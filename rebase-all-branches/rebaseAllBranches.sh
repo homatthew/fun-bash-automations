@@ -95,11 +95,19 @@ else
 fi
 
 printf "=================================================================================\n"
-printf "\t Updating ${target_branch} branch to be the same as origin\n"
 
 git checkout ${target_branch}
 git fetch origin
-git reset --hard origin/${target_branch}
+
+read -p "The script is going to reset HARD ${target_branch} to origin. Do you want to continue? (Y/n) " -n 1 -r
+echo    # (optional) move to a new line
+if [[ ! $REPLY =~ ^[Nn]$ ]]
+then
+	printf "\t Updating ${target_branch} branch to be the same as origin\n"
+	git reset --hard origin/${target_branch}
+else
+	git merge --ff-only
+fi
 
 if [ $auto_delete_resolved_branches = true ]
 then

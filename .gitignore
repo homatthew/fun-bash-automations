@@ -1,2 +1,4 @@
 cron.log
 build.log
+*.swp
+*.swo
