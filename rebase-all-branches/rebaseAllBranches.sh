@@ -99,7 +99,7 @@ printf "========================================================================
 git checkout ${target_branch}
 git fetch origin
 
-read -p "The script is going to reset HARD ${target_branch} to origin. Do you want to continue? (Y/n) " -n 1 -r
+read -p "The script is going to reset HARD ${target_branch} to origin. Do you want to continue? (Y/n) "
 echo    # (optional) move to a new line
 if [[ ! $REPLY =~ ^[Nn]$ ]]
 then

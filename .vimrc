@@ -15,3 +15,4 @@ set cursorline
 
 " use 'brew install vim' if shared clipboard doesn't work
 set clipboard=unnamed
+set backspace=indent,eol,start
