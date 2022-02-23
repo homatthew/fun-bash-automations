@@ -1,3 +1,6 @@
+autoload -Uz compinit && compinit
+autoload bashcompinit && bashcompinit
+
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 alias ls='ls -G'
 
@@ -16,25 +19,10 @@ alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias rbu='/Users/mho/repos/fun-bash-automations/review-board/rb_update.sh'
 alias rbc='/Users/mho/repos/fun-bash-automations/review-board/rb_create.sh'
+alias snap="/Users/mho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
+source "/Users/mho/repos/fun-bash-automations/rp/rp-completion.sh"
+alias rp=". /Users/mho/repos/fun-bash-automations/rp/rp.sh"
 
-rp-impl() {
-    cd "/Users/mho/repos/${1}"
-}
-alias rp=rp-impl
-
-snap-impl() {
-    if [ $# -eq 1 ]; then
-        ./gradlew -Dmaven.repo.local=$HOME/local-repo -Dorg.gradle.parallel=false -Pversion="${1}-SNAPSHOT" publishToMavenLocal
-    else
-        echo "Usage: snap {SNAPSHOT_VERSION}"
-    fi
-
-}
-alias snap=snap-impl
-
-
-
-autoload -Uz compinit && compinit
 export VOLTA_HOME="$HOME/.volta"
 export PATH="$VOLTA_HOME/bin:$PATH"
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk1.8.0_121.jdk/Contents/Home

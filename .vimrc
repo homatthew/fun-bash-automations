@@ -12,6 +12,7 @@ set wildmenu
 set incsearch
 set hlsearch
 set cursorline
+set mouse=nv
 
 " use 'brew install vim' if shared clipboard doesn't work
 set clipboard=unnamed
