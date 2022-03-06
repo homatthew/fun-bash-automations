@@ -17,6 +17,7 @@ alias squash='rbi && gca'
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
+alias gb='git branch'
 alias rbu='/Users/mho/repos/fun-bash-automations/review-board/rb_update.sh'
 alias rbc='/Users/mho/repos/fun-bash-automations/review-board/rb_create.sh'
 alias snap="/Users/mho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
