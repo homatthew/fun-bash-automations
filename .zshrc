@@ -14,6 +14,8 @@ alias rbi='git rebase -i master'
 alias grb='git rebase'
 alias grbc='git rebase --continue'
 alias squash='rbi && gca'
+alias gk='rp gobblin-kafka'
+alias gkj='rp gobblin-kafka-jobs'
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
