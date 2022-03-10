@@ -4,7 +4,9 @@ trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'echo "\"${last_command}\" command filed with exit code $?."' EXIT
 zero=0
 rp_impl() {
-  echo "cd /Users/mho/repos/${1}"
+	if [ $# -gt 1 ]; then
+    echo "cd /Users/mho/repos/${1}"
+  fi
   cd "/Users/mho/repos/${1}"
   i=0
   for arg in "$@"; do
