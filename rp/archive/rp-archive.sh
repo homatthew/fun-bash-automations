@@ -12,3 +12,5 @@ rp_archive_impl() {
   done
 }
 rp_archive_impl $@
+
+set +e

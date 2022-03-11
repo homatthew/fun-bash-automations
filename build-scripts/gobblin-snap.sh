@@ -19,3 +19,4 @@ snap_impl() {(
 )}
 
 snap_impl $@
+set +e

@@ -9,3 +9,4 @@ rb_create() {(
 )}
 
 rb_create
+set +e

@@ -12,3 +12,5 @@ rp_unarchive_impl() {
   done
 }
 rp_unarchive_impl $@
+
+set +e

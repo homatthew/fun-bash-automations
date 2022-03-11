@@ -10,3 +10,4 @@ rb_merge () {(
 )}
 
 rb_merge $@
+set +e

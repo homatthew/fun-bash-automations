@@ -18,3 +18,5 @@ rp_impl() {
   done
 }
 rp_impl $@
+
+set +e

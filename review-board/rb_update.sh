@@ -24,3 +24,4 @@ rb_update () {(
 )}
 
 rb_update
+set +e
