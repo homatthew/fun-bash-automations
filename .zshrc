@@ -14,14 +14,15 @@ alias rbi='git rebase -i master'
 alias grb='git rebase'
 alias grbc='git rebase --continue'
 alias squash='rbi && gca'
-alias rp-gk='rp gobblin-kafka'
-alias rp-gkj='rp gobblin-kafka-jobs'
+alias gk='rp gobblin-kafka'
+alias gkj='rp gobblin-kafka-jobs'
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
 alias rbu='/Users/mho/repos/fun-bash-automations/review-board/rb_update.sh'
 alias rbc='/Users/mho/repos/fun-bash-automations/review-board/rb_create.sh'
+alias rbs='/Users/mho/repos/fun-bash-automations/review-board/rb_submit.sh'
 alias snap="/Users/mho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
 source "/Users/mho/repos/fun-bash-automations/rp/rp-completion.sh"
 alias rp=". /Users/mho/repos/fun-bash-automations/rp/rp.sh"
