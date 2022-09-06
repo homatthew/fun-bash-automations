@@ -8,7 +8,7 @@ snap_impl() {(
 			snapshot="${BASH_REMATCH[1]}"
 			if [[ ! -z snapshot ]]
 			then
-				./gradlew -Dmaven.repo.local=$HOME/local-repo -Dorg.gradle.parallel=false -Pversion="${snapshot}-SNAPSHOT" publishToMavenLocal
+				./gradlew -Dmaven.repo.local=$HOME/local-repo -Dorg.gradle.parallel=false -Pversion="${snapshot}-SNAPSHOT" --stacktrace publishToMavenLocal
 				exit 0
 			fi
 			echo "SNAPSHOT_VERSION must follow the format $snapshot_regex"
