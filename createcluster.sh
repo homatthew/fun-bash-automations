@@ -10,7 +10,7 @@ clusters_to_create=(
   # "gobblin-kafka-streaming-tracking-test-rdsr-gse-lowvol-ltx1-holdem-test-1"
   # "gobblin-kafka-streaming-tracking-mho-test-ltx1-holdem-test-1"
   # "gobblin-kafka-streaming-tracking-mho-test-ltx1-holdem-onboarding-test"
-  "hello-world"
+  "gobblin-kafka-streaming-tracking-mho-test-ltx1-holdem-onboarding-mho-test"
 )
 
 if [ $zk_cluster == "shared" ]; then
