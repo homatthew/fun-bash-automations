@@ -3,12 +3,13 @@
 #   "gobblin-kafka-streaming-tracking-test-ltx1-holdem-test-2"
 #   "gobblin-kafka-streaming-tracking-test-ltx1-holdem-test-1"
 # )
-zk_env = "corp"
-zk_cluster="shared"
+zk_env="corp"
+fabric="ltx1"
+zk_cluster="gobblin"
 jira_prefixes=(
   # "gobblin-kafka-streaming-tracking-mho-test-ltx1-holdem-mho-test"
   # "gobblin-kafka-streaming-tracking-mho-test-ltx1-holdem-onboarding-mho-test"
-"gobblin-kafka-streaming-tracking-gridprodtest1"
+  "gobblin-kafka-streaming-tracking-ltx1-holdem-abora-test"
   # "hello-world"
 )
 
@@ -21,10 +22,10 @@ fi
 for cluster_name in ${jira_prefixes[@]}
 do
   echo "${cluster_name}"
-  echo "1. deregister ${cluster_name}"
-  curl -X DELETE "http://hr-ltx1.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${super_cluster}/resources/${cluster_name}"
+  echo "1. deregister ${cluster_name} in ${zk_env}-${fabric}"
+  curl -X DELETE "http://hr-${fabric}.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${super_cluster}/resources/${cluster_name}"
   sleep 5
   echo "2. Deleting cluster"
-  curl -X DELETE "http://hr-ltx1.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${cluster_name}"
-  # curl -X GET "http://hr-ltx1.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${cluster_name}"
+  curl -X DELETE "http://hr-${fabric}.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${cluster_name}"
+  # curl -X GET "http://hr-${fabric}.${zk_env}.linkedin.com:12954/admin/v2/namespaces/${zk_cluster}/clusters/${cluster_name}"
 done
