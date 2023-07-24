@@ -27,13 +27,14 @@ alias grbc='git rebase --continue'
 alias squash='rbi && gca'
 alias gk='rp gobblin-kafka'
 alias gkj='rp gobblin-kafka-jobs'
-alias gbsnap='rp gobblin && snap 0.18.0'
+alias gbtest='./gradlew -PskipTestGroup=disabledOnCI build --scan'
+alias gbsnap='rp gobblin && snap 0.19.0'
 alias gblint='./gradlew --no-daemon javadoc findbugsMain checkstyleMain checkstyleTest checkstyleJmh '
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
-alias gl='git log --pretty=format:"%H - %an, %ar : %s"'
+alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short' 
 alias rbu='/Users/mho/repos/fun-bash-automations/review-board/rb_update.sh'
 alias rbc='/Users/mho/repos/fun-bash-automations/review-board/rb_create.sh'
 alias rbs='/Users/mho/repos/fun-bash-automations/review-board/rb_submit.sh'
@@ -42,7 +43,8 @@ source "/Users/mho/repos/fun-bash-automations/rp/rp-completion.sh"
 alias rp=". /Users/mho/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
-alias zkinspector="/Users/mho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias zkinspector="/Users/mho/repos/helix-zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias li-git-refresh="ssh-add -D && ssh-add ~/.ssh/personal_github_homatthew && ssh-add --apple-use-keychain ~/.ssh/*_ssh_key"
 
 export VOLTA_HOME="$HOME/.volta"
 export PATH="$VOLTA_HOME/bin:$PATH"

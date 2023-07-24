@@ -33,7 +33,7 @@ deleteResolvedTickets () {
 					break
 				fi
 				printf "\t Searching for commits that solve ${ticket}...\n"
-				commits_with_ticket=$(git log -300 --grep="\b${ticket}\b")
+				commits_with_ticket=$(git log -300 --grep="\[${ticket}\]")
 				if [[ ! -z $commits_with_ticket ]]
 				then
 					printf "\t The ${ticket} jira ticket has been solved in a commit on master.\n"
