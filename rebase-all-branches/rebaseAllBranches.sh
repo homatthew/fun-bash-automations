@@ -38,7 +38,7 @@ deleteResolvedTickets () {
 				then
 					printf "\t The ${ticket} jira ticket has been solved in a commit on master.\n"
 					printf "\t Saving current changes on origin/${branch} before deleting\n"
-					git push --force-with-lease origin "${branch}"
+					git push -u -f origin "${branch}"
 					printf "\t Deleting ${branch}\n"
 					git branch -D "${branch}"
 					num_branches_deleted=$(($num_branches_deleted+1))

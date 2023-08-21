@@ -45,6 +45,7 @@ alias rpa=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 alias zkinspector="/Users/mho/repos/helix-zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
 alias li-git-refresh="ssh-add -D && ssh-add ~/.ssh/personal_github_homatthew && ssh-add --apple-use-keychain ~/.ssh/*_ssh_key"
+li-git-refresh
 
 export VOLTA_HOME="$HOME/.volta"
 export PATH="$VOLTA_HOME/bin:$PATH"
