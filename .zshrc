@@ -27,6 +27,9 @@ alias grbc='git rebase --continue'
 alias squash='rbi && gca'
 alias gk='rp gobblin-kafka'
 alias gkj='rp gobblin-kafka-jobs'
+alias gtw='rp gobblin-temporal-workers'
+alias br='rp beam-runner'
+alias bfa='rp beam-flink-airflow'
 alias gbtest='./gradlew -PskipTestGroup=disabledOnCI build --scan'
 alias gbsnap='rp gobblin && snap 0.19.0'
 alias gblint='./gradlew --no-daemon javadoc findbugsMain checkstyleMain checkstyleTest checkstyleJmh '
@@ -43,9 +46,15 @@ source "/Users/mho/repos/fun-bash-automations/rp/rp-completion.sh"
 alias rp=". /Users/mho/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
-alias zkinspector="/Users/mho/repos/helix-zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias zkinspector="/Users/mho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
 alias li-git-refresh="ssh-add -D && ssh-add ~/.ssh/personal_github_homatthew && ssh-add --apple-use-keychain ~/.ssh/*_ssh_key"
+alias li-mint-update="brewin engtools update  && brewin engtools install lnkd-mint"
 li-git-refresh
+
+alias zi="/Users/mho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias zi-war="ssh -nNT -L 8080:zk-lva1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
+alias zi-holdem="ssh -nNT -L 8080:zk-ltx1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
+alias zi-holdem-shared="ssh -nNT -L 8080:zk-ltx1-shared.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
 
 export VOLTA_HOME="$HOME/.volta"
 export PATH="$VOLTA_HOME/bin:$PATH"
@@ -54,6 +63,7 @@ export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
 export PATH=$PATH:$GOPATH/bin
 export PATH=$PATH:$GOROOT/bin
+
 
 # Crontab -e
 # 0 45/60 10-5 * MON,TUE,WED,THU,FRI * osascript -e 'display notification "Take a stretch break!" with title "Break reminder" sound name "Glass"'

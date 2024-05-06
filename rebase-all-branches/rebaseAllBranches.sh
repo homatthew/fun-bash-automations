@@ -167,6 +167,7 @@ then
 	printf "\t Pruning...\n"
 	rm -f .git/gc.log
 	git prune
+	git fetch --prune --all
 	printf "\t Pruning Complete\n"
 	printf "=================================================================================\n"
 fi
