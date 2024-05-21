@@ -19,7 +19,7 @@ alias ls='ls -G'
 alias gca='git commit --amend'
 alias gpo='git push origin'
 alias gpofwl='gpo --force-with-lease'
-alias rb_all='/Users/matthewho/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
+alias rb_all='~/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
 alias bcc='mint build'
 alias rbcc='rb_all && testbcc'
 alias rbi='git rebase -i master'
@@ -39,27 +39,14 @@ alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
 alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short' 
-alias rbu='/Users/matthewho/repos/fun-bash-automations/review-board/rb_update.sh'
-alias rbc='/Users/matthewho/repos/fun-bash-automations/review-board/rb_create.sh'
-alias rbs='/Users/matthewho/repos/fun-bash-automations/review-board/rb_submit.sh'
-alias snap="/Users/matthewho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
-source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
-alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
-alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
-alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
-alias zkinspector="/Users/matthewho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
-alias li-git-refresh="ssh-add -D && ssh-add ~/.ssh/personal_github_homatthew && ssh-add --apple-use-keychain ~/.ssh/*_ssh_key"
-alias li-mint-update="brewin engtools update  && brewin engtools install lnkd-mint"
-li-git-refresh
+alias rbu='~/repos/fun-bash-automations/review-board/rb_update.sh'
+alias rbc='~/repos/fun-bash-automations/review-board/rb_create.sh'
+alias rbs='~/repos/fun-bash-automations/review-board/rb_submit.sh'
+source "~/repos/fun-bash-automations/rp/rp-completion.sh"
+alias rp=". ~/repos/fun-bash-automations/rp/rp.sh"
+alias rpa=". ~/repos/fun-bash-automations/rp/archive/rp-archive.sh"
+alias rpu=". ~/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 
-alias zi="/Users/matthewho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
-alias zi-war="ssh -nNT -L 8080:zk-lva1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
-alias zi-holdem="ssh -nNT -L 8080:zk-ltx1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
-alias zi-holdem-shared="ssh -nNT -L 8080:zk-ltx1-shared.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
-
-export VOLTA_HOME="$HOME/.volta"
-export PATH="$VOLTA_HOME/bin:$PATH"
-export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk1.8.0_121.jdk/Contents/Home
 export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
 export PATH=$PATH:$GOPATH/bin

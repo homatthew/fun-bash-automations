@@ -11,7 +11,7 @@ do
 done
 
 rm ~/.vimrc
-ln -s .vimrc ~/.vimrc
+ln -s ~/repos/fun-bash-automations/.vimrc ~/.vimrc
 
 rm ~/.zshrc
-ln -s .zshrc ~/.zshrc
+ln -s ~/repos/fun-bash-automations/.zshrc ~/.zshrc
