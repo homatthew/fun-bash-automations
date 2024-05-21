@@ -6,6 +6,7 @@
 # curl -o _git https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh
 # compaudit | xargs chown -R "$(whoami)"
 # compaudit | xargs chmod go-w
+echo 'mho zshrc'
 zstyle ':completion:*:*:git:*' script ~/.zsh/git-completion.bash
 fpath=(~/.zsh $fpath)
 
@@ -18,7 +19,7 @@ alias ls='ls -G'
 alias gca='git commit --amend'
 alias gpo='git push origin'
 alias gpofwl='gpo --force-with-lease'
-alias rb_all='/Users/mho/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
+alias rb_all='/Users/matthewho/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
 alias bcc='mint build'
 alias rbcc='rb_all && testbcc'
 alias rbi='git rebase -i master'
@@ -38,20 +39,20 @@ alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
 alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short' 
-alias rbu='/Users/mho/repos/fun-bash-automations/review-board/rb_update.sh'
-alias rbc='/Users/mho/repos/fun-bash-automations/review-board/rb_create.sh'
-alias rbs='/Users/mho/repos/fun-bash-automations/review-board/rb_submit.sh'
-alias snap="/Users/mho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
-source "/Users/mho/repos/fun-bash-automations/rp/rp-completion.sh"
-alias rp=". /Users/mho/repos/fun-bash-automations/rp/rp.sh"
-alias rpa=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
-alias rpu=". /Users/mho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
-alias zkinspector="/Users/mho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias rbu='/Users/matthewho/repos/fun-bash-automations/review-board/rb_update.sh'
+alias rbc='/Users/matthewho/repos/fun-bash-automations/review-board/rb_create.sh'
+alias rbs='/Users/matthewho/repos/fun-bash-automations/review-board/rb_submit.sh'
+alias snap="/Users/matthewho/repos/fun-bash-automations/build-scripts/gobblin-snap.sh"
+source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
+alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
+alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
+alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
+alias zkinspector="/Users/matthewho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
 alias li-git-refresh="ssh-add -D && ssh-add ~/.ssh/personal_github_homatthew && ssh-add --apple-use-keychain ~/.ssh/*_ssh_key"
 alias li-mint-update="brewin engtools update  && brewin engtools install lnkd-mint"
 li-git-refresh
 
-alias zi="/Users/mho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
+alias zi="/Users/matthewho/repos/zooinspector/target/zooinspector-pkg/bin/zooinspector.sh"
 alias zi-war="ssh -nNT -L 8080:zk-lva1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
 alias zi-holdem="ssh -nNT -L 8080:zk-ltx1-gobblin.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
 alias zi-holdem-shared="ssh -nNT -L 8080:zk-ltx1-shared.corp.linkedin.com:12913 ltx1-shell02.corp.linkedin.com"
