@@ -15,3 +15,6 @@ ln -s ~/repos/fun-bash-automations/.vimrc ~/.vimrc
 
 rm ~/.zshrc
 ln -s ~/repos/fun-bash-automations/.zshrc ~/.zshrc
+
+rm ~/.ideavimrc
+ln -s ~/.vimrc ~/.ideavimrc
