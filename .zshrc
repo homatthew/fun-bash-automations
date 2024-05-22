@@ -6,7 +6,7 @@
 # curl -o _git https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh
 # compaudit | xargs chown -R "$(whoami)"
 # compaudit | xargs chmod go-w
-echo 'mho zshrc'
+echo 'mho .zshrc'
 zstyle ':completion:*:*:git:*' script ~/.zsh/git-completion.bash
 fpath=(~/.zsh $fpath)
 
@@ -26,14 +26,6 @@ alias rbi='git rebase -i master'
 alias grb='git rebase'
 alias grbc='git rebase --continue'
 alias squash='rbi && gca'
-alias gk='rp gobblin-kafka'
-alias gkj='rp gobblin-kafka-jobs'
-alias gtw='rp gobblin-temporal-workers'
-alias br='rp beam-runner'
-alias bfa='rp beam-flink-airflow'
-alias gbtest='./gradlew -PskipTestGroup=disabledOnCI build --scan'
-alias gbsnap='rp gobblin && snap 0.19.0'
-alias gblint='./gradlew --no-daemon javadoc findbugsMain checkstyleMain checkstyleTest checkstyleJmh '
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
@@ -42,7 +34,6 @@ alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short'
 alias rbu='~/repos/fun-bash-automations/review-board/rb_update.sh'
 alias rbc='~/repos/fun-bash-automations/review-board/rb_create.sh'
 alias rbs='~/repos/fun-bash-automations/review-board/rb_submit.sh'
-source "~/repos/fun-bash-automations/rp/rp-completion.sh"
 alias rp=". ~/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". ~/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". ~/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
@@ -55,4 +46,16 @@ export PATH=$PATH:$GOROOT/bin
 
 # Crontab -e
 # 0 45/60 10-5 * MON,TUE,WED,THU,FRI * osascript -e 'display notification "Take a stretch break!" with title "Break reminder" sound name "Glass"'
+source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
+source "/Users/matthewho/Library/Caches/Netflix/studio-shell-profile/shell-profile-current"
 
+autoload -Uz vcs_info
+precmd() { vcs_info }
+
+zstyle ':vcs_info:git:*' formats '%b '
+
+setopt PROMPT_SUBST
+PROMPT='%F{green}%*%f %F{blue}%~%f %F{red}${vcs_info_msg_0_}%f$ '
+#THIS MUST BE AT THE END OF THE FILE FOR SDKMAN TO WORK!!!
+export SDKMAN_DIR="$HOME/.sdkman"
+[[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"

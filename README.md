@@ -11,28 +11,32 @@ Table of contents:
 
 Setup:
 1. VS Code
-	a. GitHub Markdown preview
-	b. Gitless
-	c. Git History
-	d. One monokai
-	e. Sort Lines
-	f. Vim
-	d. Sort Json objects
+	1. GitHub Markdown preview
+	2. Gitless
+	3. Git History
+	4. One monokai
+	5. Sort Lines
+	6. Vim
+	7. Sort Json objects
 2. IntelliJ
-	a. Atom One THeme / Solarized Chandrian Themes
-	b. GitToolBox
-	c. IdeaVim
-	d. One Monokai Color Scheme
+	1. Atom One THeme / Solarized Chandrian Themes
+	2. GitToolBox
+	3. IdeaVim
+	4. One Monokai Color Scheme
 3. MacOS
-	a. DisplayLink Drivers
-	b. AltServer
-	c. BalanceLock
-	d. Shottr
-	e. Silio
-	f. Yubiswitch
-	g. F.lux
-	h. Shade
-	i. Auto Collapse
-	j. Rectangle / magnet
-	k. `defaults write .GlobalPreferences com.apple.mouse.scaling -1`
-	l. Karabiner-elements
+	1. DisplayLink Drivers
+	2. AltServer
+	3. BalanceLock
+	4. Shottr
+	5. Silcio
+	6. Yubiswitch
+	7. F.lux
+	8. Shade
+	9. Auto Collapse
+	10. Rectangle / magnet
+	11. Karabiner-elements
+
+```
+defaults write .GlobalPreferences com.apple.mouse.scaling -1
+defaults write -g ApplePressAndHoldEnabled -bool false
+```
