@@ -6,7 +6,13 @@
 # curl -o _git https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.zsh
 # compaudit | xargs chown -R "$(whoami)"
 # compaudit | xargs chmod go-w
-echo 'mho .zshrc'
+
+# Remove last login log
+printf '\33c\e[3J'
+
+autoload colors; colors
+echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
+
 zstyle ':completion:*:*:git:*' script ~/.zsh/git-completion.bash
 fpath=(~/.zsh $fpath)
 
@@ -38,6 +44,8 @@ alias rp=". ~/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". ~/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". ~/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 
+alias vpnk="sudo kill -SEGV $(ps auwx | grep dsAccessService | grep Ss | awk '{print $2}')"
+
 export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
 export PATH=$PATH:$GOPATH/bin
@@ -47,7 +55,6 @@ export PATH=$PATH:$GOROOT/bin
 # Crontab -e
 # 0 45/60 10-5 * MON,TUE,WED,THU,FRI * osascript -e 'display notification "Take a stretch break!" with title "Break reminder" sound name "Glass"'
 source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
-source "/Users/matthewho/Library/Caches/Netflix/studio-shell-profile/shell-profile-current"
 
 autoload -Uz vcs_info
 precmd() { vcs_info }
