@@ -33,12 +33,12 @@ deleteResolvedTickets () {
 					break
 				fi
 				printf "\t Searching for commits that solve ${ticket}...\n"
-				commits_with_ticket=$(git log -300 --grep="\b${ticket}\b")
+				commits_with_ticket=$(git log -300 --grep="\[${ticket}\]")
 				if [[ ! -z $commits_with_ticket ]]
 				then
 					printf "\t The ${ticket} jira ticket has been solved in a commit on master.\n"
 					printf "\t Saving current changes on origin/${branch} before deleting\n"
-					git push --force-with-lease origin "${branch}"
+					git push -u -f origin "${branch}"
 					printf "\t Deleting ${branch}\n"
 					git branch -D "${branch}"
 					num_branches_deleted=$(($num_branches_deleted+1))
@@ -99,7 +99,7 @@ printf "========================================================================
 git checkout ${target_branch}
 git fetch origin
 
-read -p "The script is going to reset HARD ${target_branch} to origin. Do you want to continue? (Y/n) " -n 1 -r
+read -p "The script is going to reset HARD ${target_branch} to origin. Do you want to continue? (Y/n) "
 echo    # (optional) move to a new line
 if [[ ! $REPLY =~ ^[Nn]$ ]]
 then
@@ -167,6 +167,9 @@ then
 	printf "\t Pruning...\n"
 	rm -f .git/gc.log
 	git prune
+	git fetch --prune --all
 	printf "\t Pruning Complete\n"
 	printf "=================================================================================\n"
 fi
+
+set +e
