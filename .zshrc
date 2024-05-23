@@ -37,9 +37,6 @@ alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
 alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short' 
-alias rbu='~/repos/fun-bash-automations/review-board/rb_update.sh'
-alias rbc='~/repos/fun-bash-automations/review-board/rb_create.sh'
-alias rbs='~/repos/fun-bash-automations/review-board/rb_submit.sh'
 alias rp=". ~/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". ~/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". ~/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
