@@ -37,9 +37,9 @@ alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
 alias gb='git branch'
 alias gl='git log --pretty=format:"%h %d - %an, %ar : %s" --decorate=short' 
-alias rp=". ~/repos/fun-bash-automations/rp/rp.sh"
-alias rpa=". ~/repos/fun-bash-automations/rp/archive/rp-archive.sh"
-alias rpu=". ~/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
+alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
+alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
+alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 
 alias vpnk="sudo kill -SEGV $(ps auwx | grep dsAccessService | grep Ss | awk '{print $2}')"
 
@@ -63,3 +63,7 @@ PROMPT='%F{green}%*%f %F{blue}%~%f %F{red}${vcs_info_msg_0_}%f$ '
 #THIS MUST BE AT THE END OF THE FILE FOR SDKMAN TO WORK!!!
 export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
+
+# Mac OS specific
+defaults write .GlobalPreferences com.apple.mouse.scaling -1
+defaults write -g ApplePressAndHoldEnabled -bool false

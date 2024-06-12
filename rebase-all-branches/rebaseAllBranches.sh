@@ -4,7 +4,7 @@ set -e
 
 #Configurations
 branch_prefix="mh"
-jira_prefixes=("ETL" "GCN" "APA" "GOBBLIN")
+jira_prefixes=("DABP" "STUB")
 auto_git_prune_enabled=true
 auto_determine_main_or_master=true
 auto_delete_resolved_branches=true
