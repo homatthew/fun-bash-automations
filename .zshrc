@@ -22,7 +22,9 @@ autoload bashcompinit && bashcompinit
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 alias ls='ls -G'
 
+alias agclean='pynt clean && newt dev-setup &&  newt start-local-deps && pynt lock-deps'
 alias gca='git commit --amend'
+alias gcane='gca --no-edit --no-verify'
 alias gpo='git push origin'
 alias gpofwl='gpo --force-with-lease'
 alias rb_all='~/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
@@ -32,6 +34,8 @@ alias rbi='git rebase -i master'
 alias grb='git rebase'
 alias grbc='git rebase --continue'
 alias squash='rbi && gca'
+alias dpl='./gradlew -PdependencyLock.includeTransitives=true -Pstatus=release generateLock saveLock'
+alias qb='./gradlew build -x integTest -x smokeTest -x test'
 
 alias gprb='git pull --rebase origin master'
 alias gch='git checkout'
@@ -65,5 +69,20 @@ export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
 
 # Mac OS specific
-defaults write .GlobalPreferences com.apple.mouse.scaling -1
-defaults write -g ApplePressAndHoldEnabled -bool false
+# defaults write .GlobalPreferences com.apple.mouse.scaling -1
+# defaults write -g ApplePressAndHoldEnabled -bool false
+
+
+function shard() {
+  grpc -a dgwcontrol.kv -e $1 -r us-east-1 com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"shard_identity\": \"$2\"}"
+}
+
+function cluster() {
+  grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"physicalClusterName\": \"$2\", \"include_shard_info\": true} ]}"
+}
+
+
+function namespace() {
+  grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"match_name\": \"$2\", \"include_shard_info\": true} ]}"
+}
+
