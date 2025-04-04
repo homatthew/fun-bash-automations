@@ -35,6 +35,7 @@ Setup:
 	9. Auto Collapse
 	10. Rectangle / magnet
 	11. Karabiner-elements
+	12. OmniDiskSweeper
 
 ```
 defaults write .GlobalPreferences com.apple.mouse.scaling -1
