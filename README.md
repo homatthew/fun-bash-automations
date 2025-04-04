@@ -18,6 +18,7 @@ Setup:
 	5. Sort Lines
 	6. Vim
 	7. Sort Json objects
+	8. Rainbow CSV
 2. IntelliJ
 	1. Atom One THeme / Solarized Chandrian Themes
 	2. GitToolBox
