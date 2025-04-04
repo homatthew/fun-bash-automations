@@ -42,3 +42,18 @@ Setup:
 defaults write .GlobalPreferences com.apple.mouse.scaling -1
 defaults write -g ApplePressAndHoldEnabled -bool false
 ```
+
+To configure personal github for github.com
+```
+Host github.com
+  AddKeysToAgent yes
+  UseKeychain yes
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+GhosTTY Needs this in the ssh
+```
+Host *
+  SetEnv TERM=xterm-256color
+
+```
