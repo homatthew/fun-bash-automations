@@ -3,6 +3,7 @@ paths=(
 	"rebase-all-branches/rebaseAllBranches.sh"
 	"rp/rp-completion.sh"
 	"rp/rp.sh"
+  "cline/start_mesh_proxy_for_cline.sh"
 )
 
 for path in ${paths[@]}

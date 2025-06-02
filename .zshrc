@@ -47,6 +47,8 @@ alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 
+alias cline="~/repos/fun-bash-automations/cline/start_mesh_proxy_for_cline.sh --restart"
+
 alias vpnk="sudo kill -SEGV $(ps auwx | grep dsAccessService | grep Ss | awk '{print $2}')"
 
 export DGI_ARTIFACT_PATH=$HOME/repos/dgi-artifact
@@ -58,6 +60,13 @@ export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/
 export PATH=$PATH:/Users/matthewho/.temporal
 
+alias crdb-control-prod='newt --app-type secure-db-proxy -- -s 5433:postgres://crdb_dgw_control.us-east-1.prod'
+alias crdb-control-test='newt --app-type secure-db-proxy -- -s 5433:postgres://crdb_dgw_control.us-east-1.test'
+alias crdb-sql='psql --host=127.0.0.1 --port=5433 --dbname=dgi_kv --username=root'
+
+alias by_cluster="jq '.namespaces[] | {namespace_name, cluster: .persistence_configurations.persistence_configuration[].physical_storage}'"
+alias by_cluster_name="jq '.namespaces[] | {namespace_name, cluster: .persistence_configurations.persistence_configuration[].physical_storage.cluster}'"
+alias desires="jq '.namespaces[0].provision_desires_v2'"
 
 
 # Crontab -e
@@ -89,6 +98,10 @@ function watch() {
   grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/WatchNamespaces -d "{\"getNamespacesRequest\": { \"shardIdentity\": \"$2\" }}"
 }
 
+function handshake() {
+  grpc -a dgwkv.$2 -r eu-west-1 -e $1 com.netflix.dgw.kv.v2.KeyValueServiceV2/Handshake -d '{}'
+}
+
 function cluster() {
   grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"physicalClusterName\": \"$2\", \"include_shard_info\": true} ]}"
 }
@@ -105,6 +118,53 @@ function clone_ns() {
   fi
 
   grpc -a dgwkv.$2 -e $1 com.netflix.dgw.kv.KeyValueControlService/CloneNamespace -d "{\"source_namespace\": \"$3\",\"target_namespace\": \"$4\"}"
+}
+
+function heap_dump() {
+  # Check if the instance ID is provided
+  if [ -z "\$1" ]; then
+    echo "Usage: heap_dump <instance_id>"
+    return 1
+  fi
+
+  # Define variables
+  local INSTANCE="$1"
+  local REMOTE_PATH="/mnt/data/stateful-compute/shared"
+  local LOCAL_PATH="."
+  local CONTAINER_NAME="kv"
+  local USER="www-data"
+  local TIMESTAMP=$(date +%s)
+  local DUMP_FILE="heap_dump_${INSTANCE}_${TIMESTAMP}.hprof"
+
+  # Print the local file name
+  echo "Local file name will be: $DUMP_FILE"
+
+  # SSH into the instance and execute commands
+  ssh $INSTANCE << EOF
+    echo "Executing commands on the instance..."
+
+    # Get the process ID
+    PID=\$(sudo docker exec $CONTAINER_NAME jps | grep DgwKv | awk '{print \$1}')
+
+    echo "Found Dgw container at PID=\$PID"
+
+    # Change permissions
+    sudo chmod 777 -R $REMOTE_PATH
+
+    # Generate heap dump with the new file name
+    sudo docker exec $CONTAINER_NAME sudo -u $USER jcmd \$PID GC.heap_dump $REMOTE_PATH/$DUMP_FILE
+
+    # Change permissions again
+    sudo chmod 777 -R $REMOTE_PATH
+EOF
+
+  # Copy the heap dump to local machine
+  echo "Copying heap dump to local machine..."
+  scp -C "$INSTANCE:$REMOTE_PATH/$DUMP_FILE" $LOCAL_PATH
+
+  # Print the local file name after copying
+  echo "Heap dump has been copied to local machine as: $DUMP_FILE"
+  # echo "Heap dump process completed successfully."
 }
 
 function cql() {
@@ -185,8 +245,8 @@ function spreadsheet() {
     echo "==============================================================================\n"
   fi
 
-  echo "\ndgw-deploy-monitor list -a kv -s --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha\n"
-  dgw-deploy-monitor list -a kv -s --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha | pbcopy
+  echo "\ndgw-deploy-monitor describe --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha\n"
+  dgw-deploy-monitor describe --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha | pbcopy
   # | tee >(pbcopy)
   echo "\nFound $(( $(pbpaste | wc -l) - 1 )) failed deploy(s)"
   echo "📋 Copied Spreadsheet to clipboard"
@@ -416,3 +476,6 @@ use-java() {
 }
 
 
+
+# Added by Windsurf
+export PATH="/Users/matthewho/.codeium/windsurf/bin:$PATH"

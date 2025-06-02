@@ -1,0 +1,23 @@
+# yaml-language-server: =http://snweb.test.netflix.net/files/MeshRoot.json
+apiVersion: "v1"
+spec:
+  meshServers:
+    - name: model-gateway
+      config:
+        localTargets:
+          - name: lo_egress
+            httpWorkload:
+              port: 2002
+              requestTimeoutMs: 0
+        listeners:
+        - name: strip_auth
+          port: 7002
+          handlers:
+            - http:
+                security:
+                  plaintext: {}
+                headers:
+                  requestHeadersToRemove:
+                    - "Authorization"
+                defaultRoute:
+                  localTargetName: lo_egress

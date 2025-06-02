@@ -3,3 +3,5 @@ build.log
 *.swp
 *.swo
 .DS_Store
+build
+cline/start_mesh_proxy_for_cline_run
