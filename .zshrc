@@ -38,8 +38,13 @@ alias rrc='source ~/.zshrc'
 alias agclean='pynt clean && newt dev-setup &&  newt start-local-deps && pynt lock-deps'
 alias gca='git commit --amend'
 alias gcane='gca --no-edit --no-verify'
+
 alias gpo='git push origin'
 alias gpofwl='gpo --force-with-lease'
+
+alias gpu='git push upstream'
+alias gpufwl='git push upstream --force-with-lease'
+
 alias rb_all='~/repos/fun-bash-automations/rebase-all-branches/rebaseAllBranches.sh'
 alias bcc='mint build'
 alias rbcc='rb_all && testbcc'
@@ -48,6 +53,7 @@ alias grb='git rebase'
 alias grbc='git rebase --continue'
 alias squash='rbi && gca'
 alias dpl='./gradlew -PdependencyLock.includeTransitives=true -Pstatus=release generateLock saveLock'
+alias pydpl='newt deps lock --upgrade'
 alias qb='./gradlew build -x integTest -x smokeTest -x test'
 alias grp='git -C ~/repos/cde-dgw-kv rev-parse'
 
@@ -59,8 +65,6 @@ alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
 alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
 alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
 alias ui_lint="npm run lint-fix -w client && npm run format-fix -w client && npm run type-check -w client"
-
-alias cline="~/repos/fun-bash-automations/cline/start_mesh_proxy_for_cline.sh --restart"
 
 alias vpnk="sudo kill -SEGV $(ps auwx | grep dsAccessService | grep Ss | awk '{print $2}')"
 
@@ -209,11 +213,11 @@ function put_item() {
   local base64_value=$(echo -n "$5" | base64)
 
   # Run the gRPC command with the base64-encoded key and value
-  grpc -a "dgwkv.$2" -e "$1" -r us-east-1 com.netflix.dgw.kv.v2.KeyValueServiceV2/PutItems -d "{\"namespace\": \""$3"\", \"id\": \"my_id\", \"items\": [{\"key\": \"$base64_key\", \"value\": \"$base64_value\", \"ttl\": 130}], \"idempotencyToken\": {}}"
+  grpc -a "dgwkv.$2" -e "$1" -r us-east-1 com.netflix.dgw.kv.v2.KeyValueServiceV2/PutItems -d "{\"namespace\": \""$3"\", \"id\": \"$4\", \"items\": [{\"key\": \"$base64_key\", \"value\": \"$base64_value\", \"ttl\": 130}], \"idempotencyToken\": {}}"
 }
 
 function get_item() {
-  grpc -a "dgwkv.$2" -e "$1" -r us-east-1 com.netflix.dgw.kv.v2.KeyValueServiceV2/GetItems -d "{\"namespace\": \""$3"\", \"id\": \"my_id\", \"predicate\":{\"match_all\": true}, \"selection\":{\"page_size_bytes\":200000, \"include\": [\"METADATA\"]}}" | jq '.items[] | {key: .key | @base64d, value: .value | @base64d}'
+  grpc -a "dgwkv.$2" -e "$1" -r us-east-1 com.netflix.dgw.kv.v2.KeyValueServiceV2/GetItems -d "{\"namespace\": \""$3"\", \"id\": \"$4\", \"predicate\":{\"match_all\": true}, \"selection\":{\"page_size_bytes\":200000, \"include\": [\"METADATA\"]}}" | jq '.items[] | {key: .key | @base64d, value: .value | @base64d}'
 }
 
 function put_get() {
@@ -650,6 +654,7 @@ function gb_clean() {
 
 
 [ -f $HOME/.sbn_aliases ] && source $HOME/.sbn_aliases
+export PATH=/opt/nflx:/opt/nflx/bin:$PATH
 
 #compdef _nflxlog nflxlog
 
@@ -830,3 +835,6 @@ if [ "$funcstack[1]" = "_nflxlog" ]; then
 fi
 # weasyprint
 export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_FALLBACK_LIBRARY_PATH
+
+export NFLX_CLAUDE_FORCE_CHANNEL=latest
+NFLX_CLAUDE_FORCE_CHANNEL=latest
