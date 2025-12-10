@@ -1,3 +1,14 @@
+#!/bin/bash
+# Setup script for zsh configuration
+# Run this once to set up symlinks and install dependencies
+
+set -e
+
+echo "=============================================="
+echo "Setting up zsh environment..."
+echo "=============================================="
+
+# Set executable permissions
 paths=(
 	"build-scripts/gobblin-snap.sh"
 	"rebase-all-branches/rebaseAllBranches.sh"
@@ -10,7 +21,73 @@ do
 	chmod +x "$path"
 done
 
-# Install git completion scripts
+# ==============================================================================
+# Oh My Zsh Installation
+# ==============================================================================
+echo ""
+echo "Checking Oh My Zsh..."
+if [ ! -d "$HOME/.oh-my-zsh" ]; then
+	echo "Installing Oh My Zsh..."
+	# --unattended: don't try to change the default shell
+	# --keep-zshrc: don't overwrite ~/.zshrc (we use our own symlinked version)
+	KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+	echo "✓ Oh My Zsh installed"
+else
+	echo "✓ Oh My Zsh already installed"
+fi
+
+# ==============================================================================
+# Homebrew packages for enhanced shell experience
+# ==============================================================================
+echo ""
+echo "Checking Homebrew packages..."
+if command -v brew &> /dev/null; then
+	# fzf - fuzzy finder
+	if ! command -v fzf &> /dev/null; then
+		echo "Installing fzf..."
+		brew install fzf
+		# Install fzf key bindings and completion
+		$(brew --prefix)/opt/fzf/install --key-bindings --completion --no-update-rc --no-bash --no-fish
+		echo "✓ fzf installed"
+	else
+		echo "✓ fzf already installed"
+	fi
+
+	# fd - faster find alternative (used by fzf)
+	if ! command -v fd &> /dev/null; then
+		echo "Installing fd..."
+		brew install fd
+		echo "✓ fd installed"
+	else
+		echo "✓ fd already installed"
+	fi
+
+	# zsh-autosuggestions - fish-like suggestions
+	if [ ! -f /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+		echo "Installing zsh-autosuggestions..."
+		brew install zsh-autosuggestions
+		echo "✓ zsh-autosuggestions installed"
+	else
+		echo "✓ zsh-autosuggestions already installed"
+	fi
+
+	# zsh-syntax-highlighting
+	if [ ! -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+		echo "Installing zsh-syntax-highlighting..."
+		brew install zsh-syntax-highlighting
+		echo "✓ zsh-syntax-highlighting installed"
+	else
+		echo "✓ zsh-syntax-highlighting already installed"
+	fi
+else
+	echo "⚠ Homebrew not found. Skipping package installation."
+	echo "  Install Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+fi
+
+# ==============================================================================
+# Git completion scripts
+# ==============================================================================
+echo ""
 echo "Setting up git completion..."
 mkdir -p ~/.zsh
 
@@ -59,3 +136,22 @@ echo "✓ personal.zsh symlinked"
 rm -f ~/.zsh/netflix.zsh
 ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
 echo "✓ netflix.zsh symlinked"
+
+# ==============================================================================
+# Summary
+# ==============================================================================
+echo ""
+echo "=============================================="
+echo "Setup complete!"
+echo "=============================================="
+echo ""
+echo "Key bindings available:"
+echo "  Ctrl+R     - Fuzzy history search (fzf)"
+echo "  Ctrl+T     - Fuzzy file search"
+echo "  Alt+C      - Fuzzy directory change"
+echo "  Up/Down    - History search (after typing partial command)"
+echo "  Ctrl+Space - Accept autosuggestion"
+echo "  Option+←/→ - Word navigation"
+echo "  z <dir>    - Jump to frequently used directory"
+echo ""
+echo "Run 'source ~/.zshrc' to reload configuration."
