@@ -40,11 +40,22 @@ else
 	echo "✓ _git already exists"
 fi
 
-rm ~/.vimrc
+# Create symlinks for dotfiles
+rm -f ~/.vimrc
 ln -s ~/repos/fun-bash-automations/.vimrc ~/.vimrc
 
-rm ~/.zshrc
+rm -f ~/.zshrc
 ln -s ~/repos/fun-bash-automations/.zshrc ~/.zshrc
 
-rm ~/.ideavimrc
+rm -f ~/.ideavimrc
 ln -s ~/.vimrc ~/.ideavimrc
+
+# Create symlinks for zsh config files
+echo "Setting up zsh config symlinks..."
+rm -f ~/.zsh/personal.zsh
+ln -s ~/repos/fun-bash-automations/zsh/personal.zsh ~/.zsh/personal.zsh
+echo "✓ personal.zsh symlinked"
+
+rm -f ~/.zsh/netflix.zsh
+ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
+echo "✓ netflix.zsh symlinked"
