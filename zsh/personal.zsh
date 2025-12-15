@@ -7,6 +7,17 @@
 # Install oh-my-zsh if not present:
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
 
+DISABLE_AUTO_TITLE="true"
+export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
+
+# Auto-rename Tabby terminal tabs based on current directory
+function chpwd() {
+    printf '\033]2;%s\007' "${PWD##*/}"
+}
+# Set initial tab name on shell startup
+printf '\033]2;%s\007' "${PWD##*/}"
+
+
 export ZSH="$HOME/.oh-my-zsh"
 
 # Disable oh-my-zsh theme (using custom prompt below)
