@@ -10,7 +10,6 @@ echo "=============================================="
 
 # Set executable permissions
 paths=(
-	"build-scripts/gobblin-snap.sh"
 	"rebase-all-branches/rebaseAllBranches.sh"
 	"rp/rp-completion.sh"
 	"rp/rp.sh"
@@ -79,6 +78,15 @@ if command -v brew &> /dev/null; then
 	else
 		echo "✓ zsh-syntax-highlighting already installed"
 	fi
+
+	# terminal-notifier - for Claude Code completion notifications
+	if ! command -v terminal-notifier &> /dev/null; then
+		echo "Installing terminal-notifier..."
+		brew install terminal-notifier
+		echo "✓ terminal-notifier installed"
+	else
+		echo "✓ terminal-notifier already installed"
+	fi
 else
 	echo "⚠ Homebrew not found. Skipping package installation."
 	echo "  Install Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
@@ -136,6 +144,47 @@ echo "✓ personal.zsh symlinked"
 rm -f ~/.zsh/netflix.zsh
 ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
 echo "✓ netflix.zsh symlinked"
+
+# ==============================================================================
+# Claude Code Configuration
+# ==============================================================================
+echo ""
+echo "Setting up Claude Code configuration..."
+
+# Create ~/.claude directory structure if it doesn't exist
+mkdir -p ~/.claude/agents ~/.claude/skills ~/.claude/hooks
+
+# Symlink CLAUDE.md
+rm -f ~/.claude/CLAUDE.md
+ln -s ~/repos/fun-bash-automations/claude/CLAUDE.md ~/.claude/CLAUDE.md
+echo "✓ CLAUDE.md symlinked"
+
+# Symlink settings.json
+rm -f ~/.claude/settings.json
+ln -s ~/repos/fun-bash-automations/claude/settings.json ~/.claude/settings.json
+echo "✓ settings.json symlinked"
+
+# Symlink agents (individual files)
+for agent in ~/repos/fun-bash-automations/claude/agents/*.md; do
+	name=$(basename "$agent")
+	rm -f ~/.claude/agents/"$name"
+	ln -s "$agent" ~/.claude/agents/"$name"
+done
+echo "✓ agents symlinked"
+
+# Symlink skills (directories)
+for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
+	name=$(basename "$skill")
+	rm -rf ~/.claude/skills/"$name"
+	ln -s "$skill" ~/.claude/skills/"$name"
+done
+echo "✓ skills symlinked"
+
+# Symlink hooks
+rm -f ~/.claude/hooks/notify-done.sh
+ln -s ~/repos/fun-bash-automations/claude/hooks/notify-done.sh ~/.claude/hooks/notify-done.sh
+chmod +x ~/repos/fun-bash-automations/claude/hooks/notify-done.sh
+echo "✓ hooks symlinked"
 
 # ==============================================================================
 # Summary
