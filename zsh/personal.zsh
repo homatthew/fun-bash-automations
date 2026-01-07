@@ -262,10 +262,8 @@ alias grbc='git rebase --continue'
 alias rbi='git rebase -i master'
 alias squash='rbi && gca'
 
-# rp aliases and completion
-alias rp=". /Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
-alias rpa=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-archive.sh"
-alias rpu=". /Users/matthewho/repos/fun-bash-automations/rp/archive/rp-unarchive.sh"
+# rp - repository navigation (source function, then load completion)
+[ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
 [ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
 
 # ==============================================================================
