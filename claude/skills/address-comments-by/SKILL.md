@@ -14,24 +14,36 @@ View and evaluate GitHub PR review comments from a specific reviewer, then accep
 
 ## Steps
 
+### 0. Fix git proxy (required for gh commands on Netflix repos)
+
+```bash
+ghe-fix-proxy $(pwd) --verify
+```
+
 ### 1. Find the PR for the current branch
 
 ```bash
-GH_HOST=github.netflix.net gh pr list --repo corp/cde-cdeportal --head $(git branch --show-current) --json number,title,state,url
+gh pr list --head $(git branch --show-current) --json number,title,state,url
 ```
 
-### 2. Get review comments from the PR
+### 2. Get reviewers who left comments
 
 ```bash
-GH_HOST=github.netflix.net gh api repos/corp/cde-cdeportal/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login == "<REVIEWER>") | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
+gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '[.[].user.login] | unique'
 ```
 
-For bot reviewers like graphite-app, use:
+### 3. Get review comments from a specific reviewer
+
 ```bash
-GH_HOST=github.netflix.net gh api repos/corp/cde-cdeportal/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login | test("<REVIEWER>"; "i")) | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
+gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login == "<REVIEWER>") | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
 ```
 
-### 3. For each comment, evaluate using these criteria:
+For bot reviewers like graphite-app, use case-insensitive matching:
+```bash
+gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login | test("<REVIEWER>"; "i")) | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
+```
+
+### 4. For each comment, evaluate using these criteria:
 
 - **ACCEPT** if:
   - The suggestion fixes a real bug or edge case
@@ -43,19 +55,22 @@ GH_HOST=github.netflix.net gh api repos/corp/cde-cdeportal/pulls/<PR_NUMBER>/com
   - The concern is not a real scenario (e.g., API would never return that)
   - The fix adds unnecessary complexity
 
-### 4. Apply accepted fixes
+### 5. Apply accepted fixes
 
 Use the Edit tool to apply each accepted fix.
 
-### 5. Verify changes
+### 6. Verify changes
+
+Run the project's tests to verify changes don't break anything.
+
+### 7. Reset git proxy
 
 ```bash
-newt exec npm run type-check -w client
-newt exec npm run test -w client
+ghe-fix-proxy --reset
 ```
 
 ## Notes
 
-- For Netflix repos using `git.netflix.net` proxy, always prefix with `GH_HOST=github.netflix.net`
+- The `<ORG>/<REPO>` can be extracted from `git remote get-url origin`
 - Common reviewers: `graphite-app[bot]`, `bitbot`, human reviewers by username
 - The `jq` filter with `test()` allows case-insensitive partial matching for bot names

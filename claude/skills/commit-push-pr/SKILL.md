@@ -50,12 +50,21 @@ graph LR
 
 ## Creating the PR
 
-For Netflix repos using `git.netflix.net` proxy:
+### For Netflix repos (git.netflix.net proxy)
+
 ```bash
-GH_HOST=github.netflix.net gh pr create --repo "corp/<repo-name>" --draft
+# Fix proxy first
+ghe-fix-proxy $(pwd) --verify
+
+# Create the PR
+gh pr create --draft
+
+# Reset proxy when done
+ghe-fix-proxy --reset
 ```
 
-For standard GitHub repos:
+### For standard GitHub repos
+
 ```bash
 gh pr create --draft
 ```

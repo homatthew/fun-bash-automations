@@ -1,13 +1,18 @@
 ## GitHub CLI Usage
 - For Netflix GitHub Enterprise repos (github.netflix.net / git.netflix.net):
-  - Use `ghe` instead of `gh` - it handles GH_HOST and URL transformations automatically
-  - Examples:
-    - `ghe pr list` - auto-detects repo from git remote
-    - `ghe pr view 123` - works without -R flag when in repo
-    - `ghe api repos/corp/repo-name/pulls` - auto-sets GH_HOST
-    - `ghe search code "pattern" --repo corp/repo-name`
-  - Run `ghe-fix-proxy` once per repo to fix git proxy config for `gh` compatibility
-  - Note: `ghe pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
+  - **First, fix the proxy** (required once per repo before any gh commands):
+    ```bash
+    ghe-fix-proxy /full/path/to/repo --verify
+    ```
+  - Then use regular `gh` commands:
+    - `gh pr list` - auto-detects repo from git remote
+    - `gh pr view 123` - works without -R flag when in repo
+    - `gh api repos/corp/repo-name/pulls` - works after proxy fix
+  - **Reset when done** (restores config for other tools):
+    ```bash
+    ghe-fix-proxy --reset
+    ```
+  - Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 
