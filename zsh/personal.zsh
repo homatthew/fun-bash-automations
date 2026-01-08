@@ -234,6 +234,7 @@ echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
+export PATH=$HOME/.local/bin:$PATH
 export PATH=$PATH:$GOPATH/bin
 export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/

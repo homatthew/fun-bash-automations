@@ -1,9 +1,15 @@
-## GitHub CLI Host Detection
-- Check `git remote -v` to determine GitHub host:
-  - If remote contains `git.netflix.net` → Netflix enterprise repo
-    - Use `GH_HOST=github.netflix.net gh ...` (note: git.netflix.net redirects to github.netflix.net)
-  - If remote contains `github.com` → Public GitHub
-    - Use regular `gh ...` commands (no GH_HOST needed)
+## GitHub CLI Usage
+- For Netflix GitHub Enterprise repos (github.netflix.net / git.netflix.net):
+  - Use `ghe` instead of `gh` - it handles GH_HOST and URL transformations automatically
+  - Examples:
+    - `ghe pr list` - auto-detects repo from git remote
+    - `ghe pr view 123` - works without -R flag when in repo
+    - `ghe api repos/corp/repo-name/pulls` - auto-sets GH_HOST
+    - `ghe search code "pattern" --repo corp/repo-name`
+  - Run `ghe-fix-proxy` once per repo to fix git proxy config for `gh` compatibility
+  - Note: `ghe pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
+- For public GitHub (github.com):
+  - Use regular `gh` commands (no special handling needed)
 
 ## Multi-Repo Workflow
 - All repositories live in `~/repos/*`

@@ -1,0 +1,3 @@
+[submodule "ghe-cli"]
+	path = ghe-cli
+	url = https://github.netflix.net/corp/ghe-cli.git
