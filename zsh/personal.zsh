@@ -268,6 +268,163 @@ alias squash='rbi && gca'
 [ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
 
 # ==============================================================================
+# Claude Code Config Sync
+# ==============================================================================
+# ~/.claude is the live config (Claude writes freely)
+# Sync back to repo when you want to version control changes
+
+# claude-sync: Copy ~/.claude config back to repo
+claude-sync() {
+    local src=~/.claude
+    local dst=~/repos/fun-bash-automations/claude
+
+    cp "$src/CLAUDE.md" "$dst/CLAUDE.md"
+    cp "$src/settings.json" "$dst/settings.json"
+    echo "Synced ~/.claude → $dst"
+    echo "Run 'cd $dst && git diff' to review changes"
+}
+
+# ==============================================================================
+# Git Worktree Functions
+# ==============================================================================
+# Naming convention:
+#   Branch: mho/<branch-name>
+#   Path:   ~/worktrees/mho-<branch-name>
+
+# gwt - Create a worktree with mho/ prefix
+# Usage: gwt <branch-name>
+# Example: gwt auth-refactor → branch mho/auth-refactor at ~/worktrees/mho-auth-refactor
+gwt() {
+    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
+
+    if [[ -z "$1" ]]; then
+        echo "Usage: gwt <branch-name>"
+        echo "Creates: branch mho/<branch-name> at ~/worktrees/mho-<branch-name>"
+        return 1
+    fi
+
+    local branch="mho/$1"
+    local path=~/worktrees/mho-$1
+
+    mkdir -p ~/worktrees
+    git worktree add -b "$branch" "$path" HEAD
+    echo ""
+    echo "Worktree created:"
+    echo "  Path:   $path"
+    echo "  Branch: $branch"
+    echo ""
+    echo "To enter: cd $path"
+}
+
+# gwtl - List all worktrees
+alias gwtl='git worktree list'
+
+# gwtr - Remove a worktree (with fzf selection if no arg)
+# Usage: gwtr [path]
+gwtr() {
+    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
+
+    if [[ -n "$1" ]]; then
+        git worktree remove "$1"
+        return
+    fi
+
+    # Use fzf to select if available
+    if command -v fzf > /dev/null 2>&1; then
+        local selected=$(git worktree list | tail -n +2 |
+            fzf --header "Select worktree to remove (Esc to cancel)" \
+                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} log --oneline -10 2>/dev/null' |
+            awk '{print $1}')
+
+        if [[ -n "$selected" ]]; then
+            git worktree remove "$selected" && echo "Removed: $selected"
+        fi
+    else
+        echo "Usage: gwtr <path>"
+        echo "Or install fzf for interactive selection"
+        git worktree list
+    fi
+}
+
+# gwtp - Prune stale worktree references
+alias gwtp='git worktree prune -v'
+
+# gwtc - cd into a worktree (with fzf selection)
+gwtc() {
+    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
+
+    if [[ -n "$1" ]]; then
+        cd "$1"
+        return
+    fi
+
+    if command -v fzf > /dev/null 2>&1; then
+        local selected=$(git worktree list |
+            fzf --header "Select worktree to enter" \
+                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} status -s 2>/dev/null; echo ""; git -C {1} log --oneline -5 2>/dev/null' |
+            awk '{print $1}')
+
+        if [[ -n "$selected" ]]; then
+            cd "$selected"
+        fi
+    else
+        echo "Usage: gwtc <path>"
+        git worktree list
+    fi
+}
+
+# gwtclean - Interactive cleanup of all worktrees in ~/worktrees
+gwtclean() {
+    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
+
+    local worktrees=$(git worktree list | tail -n +2)
+
+    if [[ -z "$worktrees" ]]; then
+        echo "No worktrees to clean up."
+        return 0
+    fi
+
+    echo "Current worktrees:"
+    echo "$worktrees"
+    echo ""
+
+    if command -v fzf > /dev/null 2>&1; then
+        local selected=$(echo "$worktrees" |
+            fzf --multi --header "Select worktrees to REMOVE (Tab=select, Enter=confirm)" \
+                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} log --oneline -10 2>/dev/null' |
+            awk '{print $1}')
+
+        if [[ -z "$selected" ]]; then
+            echo "No worktrees selected."
+            return 0
+        fi
+
+        echo ""
+        echo "Will remove:"
+        echo "$selected"
+        echo ""
+        read "confirm?Remove these worktrees? [y/N]: "
+
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            echo "$selected" | while read path; do
+                git worktree remove "$path" 2>/dev/null && echo "Removed: $path" || echo "Failed: $path"
+            done
+            git worktree prune
+        else
+            echo "Aborted."
+        fi
+    else
+        read "confirm?Remove ALL worktrees? [y/N]: "
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            echo "$worktrees" | awk '{print $1}' | while read path; do
+                git worktree remove "$path" 2>/dev/null && echo "Removed: $path"
+            done
+            git worktree prune
+        fi
+    fi
+}
+
+# ==============================================================================
 # Functions
 # ==============================================================================
 function svba() {

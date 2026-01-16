@@ -8,6 +8,22 @@ echo "=============================================="
 echo "Setting up zsh environment..."
 echo "=============================================="
 
+# ==============================================================================
+# Helper functions for symlink protection
+# ==============================================================================
+# Unlock a symlink (remove immutable flag) - silently succeeds if file doesn't exist
+unlock_symlink() {
+	[ -L "$1" ] && chflags -h nouchg "$1" 2>/dev/null || true
+}
+
+# Lock a symlink (set immutable flag) - prevents accidental deletion/replacement
+lock_symlink() {
+	[ -L "$1" ] && chflags -h uchg "$1"
+}
+
+# Track locked symlinks for summary
+LOCKED_SYMLINKS=()
+
 # Set executable permissions
 paths=(
 	"rebase-all-branches/rebaseAllBranches.sh"
@@ -154,39 +170,39 @@ echo ""
 echo "Setting up Claude Code configuration..."
 
 # Create ~/.claude directory structure if it doesn't exist
-mkdir -p ~/.claude/agents ~/.claude/skills ~/.claude/hooks
+mkdir -p ~/.claude/agents ~/.claude/skills
 
-# Symlink CLAUDE.md
+# Symlink CLAUDE.md (NOT protected - Claude writes to this file)
 rm -f ~/.claude/CLAUDE.md
 ln -s ~/repos/fun-bash-automations/claude/CLAUDE.md ~/.claude/CLAUDE.md
 echo "✓ CLAUDE.md symlinked"
 
-# Symlink settings.json
+# Symlink settings.json (NOT protected - Claude writes to this file)
 rm -f ~/.claude/settings.json
 ln -s ~/repos/fun-bash-automations/claude/settings.json ~/.claude/settings.json
 echo "✓ settings.json symlinked"
 
-# Symlink agents (individual files)
+# Symlink agents (individual files, protected)
 for agent in ~/repos/fun-bash-automations/claude/agents/*.md; do
 	name=$(basename "$agent")
+	unlock_symlink ~/.claude/agents/"$name"
 	rm -f ~/.claude/agents/"$name"
 	ln -s "$agent" ~/.claude/agents/"$name"
+	lock_symlink ~/.claude/agents/"$name"
+	LOCKED_SYMLINKS+=("~/.claude/agents/$name")
 done
-echo "✓ agents symlinked"
+echo "✓ agents symlinked (protected)"
 
-# Symlink skills (directories)
+# Symlink skills (directories, protected)
 for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
 	name=$(basename "$skill")
+	unlock_symlink ~/.claude/skills/"$name"
 	rm -rf ~/.claude/skills/"$name"
 	ln -s "$skill" ~/.claude/skills/"$name"
+	lock_symlink ~/.claude/skills/"$name"
+	LOCKED_SYMLINKS+=("~/.claude/skills/$name")
 done
-echo "✓ skills symlinked"
-
-# Symlink hooks
-rm -f ~/.claude/hooks/notify-done.sh
-ln -s ~/repos/fun-bash-automations/claude/hooks/notify-done.sh ~/.claude/hooks/notify-done.sh
-chmod +x ~/repos/fun-bash-automations/claude/hooks/notify-done.sh
-echo "✓ hooks symlinked"
+echo "✓ skills symlinked (protected)"
 
 # ==============================================================================
 # ghe-cli Installation (Netflix GitHub Enterprise CLI wrapper)
@@ -236,5 +252,11 @@ echo "  Up/Down    - History search (after typing partial command)"
 echo "  Ctrl+Space - Accept autosuggestion"
 echo "  Option+←/→ - Word navigation"
 echo "  z <dir>    - Jump to frequently used directory"
+echo ""
+echo "Protected symlinks (immutable, cannot be accidentally overwritten):"
+printf '  %s\n' "${LOCKED_SYMLINKS[@]}"
+echo ""
+echo "  To temporarily unlock: chflags -h nouchg <path>"
+echo "  Re-run this script to re-lock after changes"
 echo ""
 echo "Run 'source ~/.zshrc' to reload configuration."

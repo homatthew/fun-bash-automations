@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(terminal-notifier*)"
+    ]
+  },
   "alwaysThinkingEnabled": true,
   "apiKeyHelper": "echo sk-1234",
   "env": {
@@ -12,18 +17,6 @@
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
     "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local"
-  },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/notify-done.sh",
-            "type": "command"
-          }
-        ]
-      }
-    ]
   },
   "model": "opus"
 }
