@@ -1,0 +1,150 @@
+# Quality of Life Features
+
+Personal productivity enhancements for shell and vim.
+
+## Setup
+
+```bash
+./setupPermissions.sh
+source ~/.zshrc
+```
+
+---
+
+## Zsh Features
+
+### Oh My Zsh Plugins
+| Plugin | Description |
+|--------|-------------|
+| `z` | Jump to frequently used directories (`z proj` → `~/projects`) |
+| `fzf` | Fuzzy finder integration |
+| `history` | History aliases (`h`, `hs`, `hsi`) |
+| `colored-man-pages` | Colorized man pages |
+| `command-not-found` | Suggests packages for unknown commands |
+
+### FZF Keybindings
+| Keybinding | Action |
+|------------|--------|
+| `Ctrl+R` | Fuzzy history search |
+| `Ctrl+T` | Fuzzy file finder |
+| `Alt+C` | Fuzzy cd to directory |
+
+### FZF-Git Keybindings
+Press `Ctrl+G` then the second key:
+
+| Keybinding | Action |
+|------------|--------|
+| `Ctrl+G Ctrl+B` | Fuzzy branch picker (with commit preview) |
+| `Ctrl+G Ctrl+T` | Fuzzy tag picker |
+| `Ctrl+G Ctrl+H` | Fuzzy commit hash picker |
+| `Ctrl+G Ctrl+R` | Fuzzy remote picker |
+| `Ctrl+G Ctrl+S` | Fuzzy stash picker |
+| `Ctrl+G Ctrl+F` | Fuzzy file picker (git status) |
+
+### History Navigation
+| Keybinding | Action |
+|------------|--------|
+| `Up/Down` | Prefix-based history search (type partial command first) |
+| `Ctrl+P/N` | Same as Up/Down |
+| `Option+←/→` | Jump by word |
+| `Option+Backspace` | Delete word backward |
+| `Ctrl+Space` | Accept autosuggestion |
+
+### Shell Enhancements
+- **Autosuggestions**: Fish-like suggestions as you type (gray text)
+- **Syntax highlighting**: Commands colorized as you type
+- **50k history**: Shared across sessions, no duplicates
+
+### Git Aliases
+| Alias | Command |
+|-------|---------|
+| `gca` | `git commit --amend` |
+| `gcane` | `git commit --amend --no-edit --no-verify` |
+| `gpo` | `git push origin` |
+| `gpofwl` | `git push origin --force-with-lease` |
+| `gpu` | `git push upstream` |
+| `gpufwl` | `git push upstream --force-with-lease` |
+| `gprb` | `git pull --rebase origin master` |
+| `gch` | `git checkout` |
+| `gb` | `git branch` |
+| `gl` | Pretty git log |
+| `grb` | `git rebase` |
+| `grbc` | `git rebase --continue` |
+| `rbi` | `git rebase -i master` |
+| `squash` | `rbi && gca` |
+
+### Git Branch Pruning
+| Command | Description |
+|---------|-------------|
+| `gbprune` | Interactive fzf branch deletion (Tab to multi-select) |
+| `gbprune --merged` | Show only merged branches |
+| `gbprune --stale 30` | Show branches older than N days |
+| `gbprune --all` | Show all branches |
+| `gbdel` | Quick single branch delete with fzf |
+| `gbdelmerged` | Delete all merged branches (non-interactive) |
+| `gprune` | Prune remote tracking branches |
+| `gprunelocal` | Delete local branches whose remote is gone |
+
+### Utility Functions
+| Command | Description |
+|---------|-------------|
+| `svenv` | `source .venv/bin/activate` |
+| `svba [dir]` | Activate venv in submodule |
+| `rrc` | Reload zshrc |
+| `use-java N` | Switch Java version via SDKMAN |
+| `ytmp3 <url>` | Download YouTube audio as MP3 |
+| `to_mp3 <file>` | Convert any audio file to MP3 |
+| `webm_to_mp3` | Convert all .webm files in directory |
+
+---
+
+## Vim Features
+
+### General Settings
+- Line numbers enabled
+- Syntax highlighting
+- Smart indentation (2 spaces)
+- Mouse support
+- System clipboard integration (`brew install vim` for macOS)
+- Trailing whitespace highlighted in red and auto-removed on save
+
+### Navigation
+| Keybinding | Action |
+|------------|--------|
+| `Ctrl+J/K` | Move 5 lines down/up |
+| `Ctrl+H/L` | Navigate between splits |
+| `<Space>bn` | Next buffer |
+| `<Space>bp` | Previous buffer |
+| `<Space>bd` | Delete buffer |
+
+### Search
+| Keybinding | Action |
+|------------|--------|
+| `Esc` | Clear search highlighting |
+| `n/N` | Next/prev match (cursor stays centered) |
+| `Ctrl+D/U` | Page down/up (cursor stays centered) |
+
+### Search Settings
+- Incremental search (matches as you type)
+- Case-insensitive (unless uppercase used)
+- All matches highlighted
+
+### Visual Enhancements
+- Custom status line showing: mode, filename, modified flag, filetype, line:col, percentage
+- Cursor line highlighted
+- 8 lines always visible above/below cursor
+- Matching brackets highlighted
+
+---
+
+## File Structure
+
+```
+~/repos/fun-bash-automations/
+├── .zshrc              → ~/.zshrc (symlink)
+├── .vimrc              → ~/.vimrc (symlink)
+├── zsh/
+│   ├── personal.zsh    → ~/.zsh/personal.zsh (symlink)
+│   └── netflix.zsh     → ~/.zsh/netflix.zsh (symlink)
+└── setupPermissions.sh  # Run to install everything
+```

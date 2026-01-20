@@ -2,3 +2,5 @@ cron.log
 build.log
 *.swp
 *.swo
+.DS_Store
+build
