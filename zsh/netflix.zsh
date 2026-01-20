@@ -197,6 +197,8 @@ function spreadsheet() {
 
 export EASY_CASS_LAB_SSH_KEY=~/.ssh/cassandra_workship
 
+eval "$(fnm env --use-on-cd)"
+
 #compdef temporal
 compdef _temporal temporal
 

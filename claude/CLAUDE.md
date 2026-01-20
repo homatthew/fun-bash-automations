@@ -59,6 +59,19 @@ When spawning a Claude agent to work on a separate branch:
 3. Changes in the worktree won't affect files in `~/repos/` (only shared: commits, branches, stash)
 4. When done, review changes, merge, then `gwtr ~/worktrees/mho-feature-name`
 
+### Working in Worktrees (Important for Status Line)
+When you need to work in a worktree, **cd into it as a standalone command first**:
+```bash
+# GOOD - status line will show correct branch
+cd ~/worktrees/mho-feature-name
+git add .
+git commit -m "message"
+
+# BAD - status line won't update (cd is ephemeral in && chain)
+cd ~/worktrees/mho-feature-name && git add . && git commit -m "message"
+```
+This ensures the status line displays the correct branch. The cd persists for subsequent commands.
+
 ### Key Facts
 - Worktrees share: commits, branches, remotes, stash, reflog
 - Worktrees isolate: working directory, staging area, HEAD
