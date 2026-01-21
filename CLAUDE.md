@@ -24,9 +24,9 @@ Personal shell config and Claude Code configuration for Matthew Ho.
 - `~/.claude/statusline.sh` → `claude/statusline.sh`
 - `~/.claude/skills/*` → `claude/skills/*`
 
-**Copied files** (sync with `claude-sync` after changes):
-- `~/.claude/CLAUDE.md` ← copy → `claude/CLAUDE.md`
-- `~/.claude/settings.json` ← copy → `claude/settings.json`
+**Copied files** (use `claude-deploy` or `claude-sync`):
+- `~/.claude/CLAUDE.md` ↔ `claude/CLAUDE.md`
+- `~/.claude/settings.json` ↔ `claude/settings.json`
 
 ## When Making Changes
 
@@ -34,9 +34,16 @@ Personal shell config and Claude Code configuration for Matthew Ho.
 Edit directly in this repo - changes are immediate via symlink.
 
 ### To CLAUDE.md or settings.json
-1. Edit in `~/.claude/` (Claude writes here)
-2. Run `claude-sync` to copy back to this repo
-3. Commit changes
+Two workflows:
+
+1. **Edit repo, then deploy** (preferred for planned changes):
+   - Edit files in this repo under `claude/`
+   - Run `claude-deploy` to make changes live
+
+2. **Edit live, then sync** (for quick iterations):
+   - Edit files in `~/.claude/`
+   - Run `claude-sync` to save to repo
+   - Commit changes
 
 ### Adding a new skill
 1. Create `claude/skills/<skill-name>/skill.md`
@@ -45,6 +52,7 @@ Edit directly in this repo - changes are immediate via symlink.
 ## Shell Functions
 
 The `zsh/personal.zsh` file defines these functions that Claude should know about:
-- `claude-sync` - Sync ~/.claude/ files back to this repo
+- `claude-deploy` - Deploy repo config to ~/.claude (make changes live)
+- `claude-sync` - Sync ~/.claude config back to this repo
 - `gwt`, `gwtl`, `gwtr`, `gwtc`, `gwtclean` - Git worktree helpers
 - `ghe-fix-proxy` - Fix gh CLI for Netflix GitHub Enterprise
