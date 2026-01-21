@@ -93,18 +93,24 @@ After completing a significant task, use `/notify` to send a desktop notificatio
 - After trivial single-line changes
 
 ## Claude Config Management
-The live config is in `~/.claude/` (Claude writes freely here).
+The live config is in `~/.claude/`.
 The version-controlled source is in `~/repos/fun-bash-automations/claude/`.
 
-**When you modify ~/.claude/CLAUDE.md or ~/.claude/settings.json:**
-1. After making changes, sync back to the repo:
-   ```bash
-   cp ~/.claude/CLAUDE.md ~/repos/fun-bash-automations/claude/CLAUDE.md
-   cp ~/.claude/settings.json ~/repos/fun-bash-automations/claude/settings.json
-   ```
-2. Inform me that config was updated so I can review/commit later
+**Two workflows:**
 
-**User can manually sync with:** `claude-sync`
+1. **Edit repo, then deploy** (preferred for planned changes):
+   - Edit files in `~/repos/fun-bash-automations/claude/`
+   - Run `claude-deploy` to copy to `~/.claude/` (makes changes live)
+
+2. **Edit live, then sync** (for quick iterations):
+   - Edit files in `~/.claude/`
+   - Run `claude-sync` to copy back to repo for version control
+
+**Commands:**
+```bash
+claude-deploy  # repo → ~/.claude (make changes live)
+claude-sync    # ~/.claude → repo (save for version control)
+```
 
 ## Shell Configuration
 My shell config lives in `~/repos/fun-bash-automations/` and is symlinked to `~/.zshrc`.

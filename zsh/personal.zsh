@@ -284,6 +284,17 @@ claude-sync() {
     echo "Run 'cd $dst && git diff' to review changes"
 }
 
+# claude-deploy: Copy repo config to ~/.claude (makes changes live)
+claude-deploy() {
+    local src=~/repos/fun-bash-automations/claude
+    local dst=~/.claude
+
+    cp "$src/CLAUDE.md" "$dst/CLAUDE.md"
+    cp "$src/settings.json" "$dst/settings.json"
+    echo "Deployed $src → ~/.claude"
+    echo "Changes are now live"
+}
+
 # ==============================================================================
 # Git Worktree Functions
 # ==============================================================================
