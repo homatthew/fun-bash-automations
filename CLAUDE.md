@@ -15,6 +15,8 @@ Personal shell config and Claude Code configuration for Matthew Ho.
 │   ├── skills/          # Claude skills (symlinked from ~/.claude/skills/)
 │   ├── hooks/           # Claude hooks
 │   └── agents/          # Claude agent configs
+├── ghostty/
+│   └── config           # Ghostty terminal config (symlinked to ~/.config/ghostty/config)
 └── CLAUDE.md            # This file (project-specific instructions)
 ```
 

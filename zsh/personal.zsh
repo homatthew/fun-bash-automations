@@ -7,15 +7,26 @@
 # Install oh-my-zsh if not present:
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
 
+# Disable auto-title from oh-my-zsh and Claude Code
 DISABLE_AUTO_TITLE="true"
 export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
 
-# Auto-rename Tabby terminal tabs based on current directory
-function chpwd() {
-    printf '\033]2;%s\007' "${PWD##*/}"
+# Terminal title: shows "dirname (branch)" or just "dirname" if not in git repo
+# Works with Ghostty (requires shell-integration-features = no-title)
+function set_terminal_title() {
+    local dir="${PWD##*/}"
+    local branch=$(git branch --show-current 2>/dev/null)
+    if [[ -n "$branch" ]]; then
+        printf '\033]2;%s (%s)\007' "$dir" "$branch"
+    else
+        printf '\033]2;%s\007' "$dir"
+    fi
 }
-# Set initial tab name on shell startup
-printf '\033]2;%s\007' "${PWD##*/}"
+
+# Update title on directory change and shell startup
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd set_terminal_title
+set_terminal_title
 
 
 export ZSH="$HOME/.oh-my-zsh"
