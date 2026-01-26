@@ -164,6 +164,16 @@ ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
 echo "✓ netflix.zsh symlinked"
 
 # ==============================================================================
+# Ghostty Configuration
+# ==============================================================================
+echo ""
+echo "Setting up Ghostty configuration..."
+mkdir -p ~/.config/ghostty
+rm -f ~/.config/ghostty/config
+ln -s ~/repos/fun-bash-automations/ghostty/config ~/.config/ghostty/config
+echo "✓ Ghostty config symlinked"
+
+# ==============================================================================
 # Claude Code Configuration
 # ==============================================================================
 echo ""
