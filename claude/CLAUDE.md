@@ -13,6 +13,18 @@
     ghe-fix-proxy --reset
     ```
   - Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
+  - **Creating gists** (special case):
+    ```bash
+    # 1. Fix proxy first
+    ghe-fix-proxy /path/to/any/repo --verify
+
+    # 2. Use GH_HOST to target Netflix GHE
+    GH_HOST=github.netflix.net gh gist create file1.md file2.py --desc "Description"
+
+    # 3. Reset when done
+    ghe-fix-proxy --reset
+    ```
+    Note: `gh gist` requires `GH_HOST` env var since it doesn't auto-detect from repo remotes.
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 

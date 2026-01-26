@@ -52,12 +52,25 @@ graph LR
 
 ### For Netflix repos (git.netflix.net proxy)
 
+**Use `gh api` with explicit hostname** (not `gh pr create` which doesn't reliably detect the host):
+
 ```bash
 # Fix proxy first
 ghe-fix-proxy $(pwd) --verify
 
-# Create the PR
-gh pr create --draft
+# Get current branch name
+BRANCH=$(git branch --show-current)
+
+# Determine repo path - may differ from git remote (e.g., cde/repo → corp/cde-repo)
+# Check by visiting the repo in browser if unsure
+
+# Create the PR using the full template above
+gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
+  -f title="Your PR title" \
+  -f body="[Use the full PR Description Template above - do not abbreviate]" \
+  -f head="$BRANCH" \
+  -f base="main" \
+  -f draft=true
 
 # Reset proxy when done
 ghe-fix-proxy --reset
@@ -70,3 +83,7 @@ gh pr create --draft
 ```
 
 Always create PRs in draft mode unless explicitly told otherwise.
+
+## Why `gh api` instead of `gh pr create`?
+
+The `gh pr create` subcommand doesn't reliably detect the Netflix GHE hostname even after proxy setup. Using `gh api --hostname github.netflix.net` explicitly specifies the host and works reliably.

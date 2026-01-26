@@ -89,12 +89,19 @@ graph TB
 
 ### For Netflix repos (git.netflix.net proxy)
 
+**Use `gh api` with explicit hostname** (not `gh pr edit` which doesn't reliably detect the host):
+
 ```bash
 # Fix proxy first
 ghe-fix-proxy $(pwd) --verify
 
+# Find the PR number (replace org/repo with actual path, e.g., corp/cde-cdemkdocs)
+gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
+  --jq '.[] | select(.head.ref == "YOUR_BRANCH") | {number, title}'
+
 # Update the PR description
-gh pr edit --body "$(cat <<'EOF'
+gh api --hostname github.netflix.net -X PATCH repos/{org}/{repo}/pulls/{PR_NUMBER} \
+  -f body="$(cat <<'EOF'
 [your description here]
 EOF
 )"
@@ -102,6 +109,10 @@ EOF
 # Reset proxy when done
 ghe-fix-proxy --reset
 ```
+
+**Important:**
+- Use the full PR Description Template above - do not abbreviate
+- The repo path in the API may differ from git remote (e.g., `cde/repo` → `corp/cde-repo`)
 
 ### For standard GitHub repos
 
