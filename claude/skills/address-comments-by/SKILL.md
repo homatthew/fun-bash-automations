@@ -1,8 +1,14 @@
 ---
+name: address-comments-by
 description: View and address GitHub PR review comments by a specific reviewer
 ---
 
 # Address PR Comments by Reviewer
+
+> **Related skills:**
+> - `/update-pr-description <PR#>` - Update PR description after addressing comments
+> - `/create-nflx-pr` - Create a new PR
+> - `/commit-push-pr` - Commit, push, and create PR in one workflow
 
 View and evaluate GitHub PR review comments from a specific reviewer, then accept or reject each suggestion.
 

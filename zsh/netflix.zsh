@@ -49,8 +49,8 @@ function cluster() {
   grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"physicalClusterName\": \"$2\", \"include_shard_info\": true} ]}"
 }
 
-function namespace() {
-  grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"match_name\": \"$2\", \"include_shard_info\": true} ]}"
+function namespace () {
+	grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"match_name\": \"$2\", \"include_shard_info\": true }, { \"include_provision_desires\": true } ], \"includeClosed\": true}"
 }
 
 function clone_ns() {
