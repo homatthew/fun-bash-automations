@@ -10,11 +10,11 @@
 
 ## Skills Quick Reference
 
-**IMPORTANT**: Always use skills for PR operations on Netflix repos. Never use raw `gh pr create` or `gh pr edit` - they don't reliably detect Netflix GHE.
+**IMPORTANT**: Use skills for PR operations on Netflix repos for consistent templates and formatting.
 
 | Task | Skill | Notes |
 |------|-------|-------|
-| Create new PR | `/create-nflx-pr` | Uses `gh api --hostname`, creates in draft mode |
+| Create new PR | `/create-nflx-pr` | Uses `gh pr create`, creates in draft mode |
 | Update PR description | `/update-pr-description <PR#>` | Full template with "What/Why/Tests/How" |
 | Commit + push + PR | `/commit-push-pr` | All-in-one workflow |
 | Address review comments | `/address-comments-by <reviewer>` | Fetch and respond to specific reviewer |
@@ -28,31 +28,16 @@
 
 ## GitHub CLI Usage
 
-**For Netflix repos**: Use skills above, not raw `gh` commands for PR creation/editing.
+Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No proxy setup/reset needed.
 
-- **Proxy setup** (required once per repo before any gh commands):
-  ```bash
-  ghe-fix-proxy /full/path/to/repo --verify
-  ```
-- **Read-only commands work after proxy fix**:
-  - `gh pr list` - auto-detects repo from git remote
-  - `gh pr view 123` - works without -R flag when in repo
-  - `gh api repos/corp/repo-name/pulls` - works after proxy fix
-- **Reset when done** (restores config for other tools):
-  ```bash
-  ghe-fix-proxy --reset
-  ```
+- **All standard commands work directly in Netflix repos**:
+  - `gh pr list`, `gh pr create`, `gh pr edit`, `gh pr view`
+  - `gh api repos/corp/repo-name/pulls`
+- **Prerequisites**: Netflix fork installed, `git.netflix.net` auth, canonical remotes (`nfgit canonical origin`)
 - Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
 - **Creating gists** (special case):
   ```bash
-  # 1. Fix proxy first
-  ghe-fix-proxy /path/to/any/repo --verify
-
-  # 2. Use GH_HOST to target Netflix GHE
-  GH_HOST=github.netflix.net gh gist create file1.md file2.py --desc "Description"
-
-  # 3. Reset when done
-  ghe-fix-proxy --reset
+  GH_HOST=git.netflix.net gh gist create file1.md file2.py --desc "Description"
   ```
   Note: `gh gist` requires `GH_HOST` env var since it doesn't auto-detect from repo remotes.
 - For public GitHub (github.com):
@@ -177,3 +162,56 @@ To add a new skill:
 1. Create skill directory in `~/repos/fun-bash-automations/claude/skills/<skill-name>/`
 2. Add `skill.md` with frontmatter (name, description) and instructions
 3. Symlink: `ln -s ~/repos/fun-bash-automations/claude/skills/<skill-name> ~/.claude/skills/`
+
+## Skills Marketplace Strategy
+
+Netflix's `cde-ods-skills` repo is a plugin marketplace (`claude plugin install ods-datastores`). This section guides donate-vs-keep decisions and marketplace integration.
+
+### Decision Framework
+
+When deciding whether to donate a skill to a marketplace plugin:
+
+| Factor | Keep if... | Donate if... |
+|--------|-----------|--------------|
+| **Personal runtime coupling** | Needs `terminal-notifier`, `gwt` aliases, `~/repos/dump/`, Ghostty | Uses only standard tools |
+| **Identity coupling** | Contains `mho/` prefixes, personal paths, personal templates | Fully generic |
+| **Marketplace fit** | Doesn't fit the target plugin's domain (e.g., workflow skills don't belong in an ODS datastores plugin) | Naturally fits the plugin's category |
+| **Community maintenance** | Only you would maintain it | Many engineers would improve it |
+| **Competitive differentiation** | Embodies a unique philosophy or methodology | Mechanical procedure anyone could write |
+
+**Rule of thumb:** Keep the philosophy, donate the mechanics.
+
+### Current Skill Allocation
+
+| Skill | Status | Reason |
+|-------|--------|--------|
+| **ai-slop-removal** | Keep (donate to general plugin if one exists) | General workflow — doesn't fit ODS domain |
+| **simplify** | Keep (donate to general plugin if one exists) | General workflow — doesn't fit ODS domain |
+| **architect** | Keep (donate to general plugin if one exists) | General workflow — doesn't fit ODS domain |
+| **verify-build** | Keep | `newt` coupling + too generic for ODS |
+| **split-pr** | Keep | `mho/` naming, worktree aliases |
+| **address-comments-by** | Keep | Personal workflow + template |
+| **commit-push-pr** | Keep | Personal workflow + template |
+| **update-pr-description** | Keep | Personal template |
+| **create-nflx-pr** | Keep | Netflix-specific + personal template |
+| **notify** | Keep | macOS + Ghostty coupling |
+| **one-pager** | Keep | Personal methodology + second-brain |
+| **second-brain** | Keep | Personal knowledge store |
+| **worktree-dev** | Keep | Shell alias dependent |
+
+**Summary:** No current skills fit the `ods-datastores` plugin. Four general-purpose skills (ai-slop-removal, simplify, architect, verify-build) are candidates for a *general developer workflow* plugin if one emerges.
+
+### Marketplace Integration Rules
+
+**Consuming marketplace skills:**
+- Install plugins via `claude plugin install ods-datastores`
+- Use marketplace skills as black boxes — don't duplicate locally
+- If a marketplace skill overlaps with a personal one, try the marketplace version first
+- Personal skills in `~/.claude/skills/` take precedence over plugin skills with the same name
+- If a marketplace skill becomes better than your personal version, delete yours
+
+**Contributing to marketplace:**
+- Only contribute if the skill fits the plugin's domain — don't shoehorn workflow skills into an ODS datastores plugin
+- If a general-purpose skills plugin emerges, the four general skills are ready to donate
+- When donating: strip personal runtime deps, remove hardcoded paths, use standard tools only
+- After donating: delete the local copy and use the plugin version (fewer things to maintain)

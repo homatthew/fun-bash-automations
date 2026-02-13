@@ -29,8 +29,6 @@ paths=(
 	"rebase-all-branches/rebaseAllBranches.sh"
 	"rp/rp-completion.sh"
 	"rp/rp.sh"
-	"ghe-cli/ghe"
-	"ghe-cli/ghe-fix-proxy"
 )
 
 for path in ${paths[@]}
@@ -213,38 +211,6 @@ for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
 	LOCKED_SYMLINKS+=("~/.claude/skills/$name")
 done
 echo "✓ skills symlinked (protected)"
-
-# ==============================================================================
-# ghe-cli Installation (Netflix GitHub Enterprise CLI wrapper)
-# ==============================================================================
-echo ""
-echo "Setting up ghe-cli..."
-
-# Initialize ghe-cli submodule if needed
-if [ ! -f ~/repos/fun-bash-automations/ghe-cli/ghe ]; then
-	echo "Initializing ghe-cli submodule..."
-	git -C ~/repos/fun-bash-automations submodule update --init --recursive
-fi
-
-# Create ~/.local/bin if it doesn't exist
-mkdir -p ~/.local/bin
-
-# Symlink ghe scripts
-rm -f ~/.local/bin/ghe
-ln -s ~/repos/fun-bash-automations/ghe-cli/ghe ~/.local/bin/ghe
-echo "✓ ghe symlinked to ~/.local/bin/ghe"
-
-rm -f ~/.local/bin/ghe-fix-proxy
-ln -s ~/repos/fun-bash-automations/ghe-cli/ghe-fix-proxy ~/.local/bin/ghe-fix-proxy
-echo "✓ ghe-fix-proxy symlinked to ~/.local/bin/ghe-fix-proxy"
-
-# Remind about PATH
-if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-	echo ""
-	echo "⚠ Note: ~/.local/bin may not be in your PATH"
-	echo "  Add this to your ~/.zshrc if not present:"
-	echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
 
 # ==============================================================================
 # Summary

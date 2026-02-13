@@ -18,7 +18,7 @@ Check the git remote to determine whether this is a Netflix GHE repo or a public
 git remote -v
 ```
 
-- **Netflix GHE**: remote URLs contain `github.netflix.net` → use the GHE workflow below
+- **Netflix GHE**: remote URLs contain `git.netflix.net` → use the Netflix GHE workflow below
 - **Public GitHub (github.com)**: → use the public GitHub workflow below
 
 ## Step 2: Determine fork topology
@@ -77,53 +77,29 @@ gh pr create \
 
 ---
 
-## Netflix GHE repos (github.netflix.net)
+## Netflix GHE repos (git.netflix.net)
 
-### Setup (required once per repo)
-
-```bash
-ghe-fix-proxy $(pwd) --verify
-```
-
-### Determine the repo path
-
-The GitHub API repo path may differ from the git remote. Common patterns:
-- `cde/reponame` in git remote → `corp/cde-reponame` in API
-- Check the actual path by visiting the repo in browser
-
-```bash
-# Get the org/repo from git remote
-git remote get-url origin | sed 's|.*github.netflix.net/||' | sed 's|\.git$||'
-```
+Netflix's `gh` fork works directly with `git.netflix.net` repos — no proxy setup needed.
 
 ### Create the PR
 
-**Use `gh api` with explicit hostname** (not `gh pr create` which doesn't reliably detect the host):
-
 ```bash
-gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
-  -f title="<title>" \
-  -f body="<body>" \
-  -f head="<branch-name>" \
-  -f base="main" \
-  -f draft=true
-```
+BRANCH=$(git branch --show-current)
 
-### Cleanup (restore config for other tools)
-
-```bash
-ghe-fix-proxy --reset
+gh pr create \
+  --title "<title>" \
+  --body "<body>" \
+  --base main \
+  --head "$BRANCH" \
+  --draft
 ```
 
 ### Prerequisites
 
-- Must be authenticated: `gh auth status` should show `github.netflix.net`
+- Netflix `gh` fork installed (`/usr/local/bin/gh`)
+- Authenticated: `gh auth status` should show `git.netflix.net`
+- Remotes use canonical URLs (`nfgit canonical origin`)
 - Branch must be pushed first
-- Proxy must be fixed with `ghe-fix-proxy` before running `gh` commands
-
-### Why not `gh pr create` for GHE?
-
-The `gh pr create` subcommand doesn't reliably detect the Netflix GHE hostname even after proxy setup. Using `gh api --hostname github.netflix.net` explicitly specifies the host and works reliably.
 
 ---
 

@@ -110,32 +110,23 @@ graph LR
 
 ## Updating the PR
 
-### For Netflix repos (git.netflix.net proxy)
+### For Netflix repos (git.netflix.net)
 
-**Use `gh api` with explicit hostname** (not `gh pr edit` which doesn't reliably detect the host):
+Netflix's `gh` fork works directly — no proxy setup needed.
 
 ```bash
-# Fix proxy first
-ghe-fix-proxy $(pwd) --verify
-
-# Find the PR number (replace org/repo with actual path, e.g., corp/cde-cdemkdocs)
-gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
-  --jq '.[] | select(.head.ref == "YOUR_BRANCH") | {number, title}'
+# Find the PR number
+gh pr list --head $(git branch --show-current) --json number,title
 
 # Update the PR description
-gh api --hostname github.netflix.net -X PATCH repos/{org}/{repo}/pulls/{PR_NUMBER} \
-  -f body="$(cat <<'EOF'
+gh pr edit {PR_NUMBER} --body "$(cat <<'EOF'
 [your description here]
 EOF
 )"
-
-# Reset proxy when done
-ghe-fix-proxy --reset
 ```
 
 **Important:**
 - Use the full PR Description Template above - do not abbreviate
-- The repo path in the API may differ from git remote (e.g., `cde/repo` → `corp/cde-repo`)
 
 ### For standard GitHub repos
 
