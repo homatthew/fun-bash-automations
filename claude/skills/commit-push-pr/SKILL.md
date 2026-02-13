@@ -5,6 +5,11 @@ description: Commit, push, and create a PR in one workflow
 
 # Commit, Push, and Create PR
 
+> **Related skills:**
+> - `/create-nflx-pr` - Create PR only (if already committed and pushed)
+> - `/update-pr-description <PR#>` - Update an existing PR's description
+> - `/address-comments-by <reviewer>` - Address review comments after PR is created
+
 First, gather context by running these commands:
 
 ```bash
@@ -50,7 +55,16 @@ graph LR
 
 ## Creating the PR
 
-### For Netflix repos (git.netflix.net proxy)
+First, detect repo type and fork topology:
+
+```bash
+git remote -v
+# github.netflix.net → Netflix GHE workflow
+# github.com → Public GitHub workflow
+# If "upstream" remote exists → cross-fork PR (target upstream, head from fork)
+```
+
+### For Netflix GHE repos (github.netflix.net)
 
 **Use `gh api` with explicit hostname** (not `gh pr create` which doesn't reliably detect the host):
 
@@ -76,14 +90,36 @@ gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
 ghe-fix-proxy --reset
 ```
 
-### For standard GitHub repos
+### For public GitHub repos (github.com)
+
+#### Same-repo (no fork)
 
 ```bash
-gh pr create --draft
+gh pr create \
+  --repo <org>/<repo> \
+  --title "Your PR title" \
+  --body "[Use the full PR Description Template above]" \
+  --base main \
+  --head <branch-name> \
+  --draft
+```
+
+#### Cross-fork (origin = fork, upstream = canonical)
+
+Create the PR on the **upstream** repo with your fork's branch as head:
+
+```bash
+gh pr create \
+  --repo <upstream-org>/<repo> \
+  --title "Your PR title" \
+  --body "[Use the full PR Description Template above]" \
+  --base main \
+  --head <fork-owner>:<branch-name> \
+  --draft
 ```
 
 Always create PRs in draft mode unless explicitly told otherwise.
 
-## Why `gh api` instead of `gh pr create`?
+## Why `gh api` instead of `gh pr create` for GHE?
 
 The `gh pr create` subcommand doesn't reliably detect the Netflix GHE hostname even after proxy setup. Using `gh api --hostname github.netflix.net` explicitly specifies the host and works reliably.

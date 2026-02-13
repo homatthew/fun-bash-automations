@@ -1,30 +1,61 @@
+## Git Branch Rules
+
+**NEVER commit or push directly to `main` or `master` branches.** Always:
+1. Create a feature branch first: `git checkout -b mho/<feature-name>`
+2. Make commits on the feature branch
+3. Push the branch and create a PR
+
+Even if the user says "commit and push", create a branch first unless they explicitly specify a branch name. If already on main with uncommitted changes, create a branch before committing.
+
+**Exception:** `service-capacity-model` repo allows direct pushes to `origin main` (but NOT `upstream main`).
+
+## Skills Quick Reference
+
+**IMPORTANT**: Always use skills for PR operations on Netflix repos. Never use raw `gh pr create` or `gh pr edit` - they don't reliably detect Netflix GHE.
+
+| Task | Skill | Notes |
+|------|-------|-------|
+| Create new PR | `/create-nflx-pr` | Uses `gh api --hostname`, creates in draft mode |
+| Update PR description | `/update-pr-description <PR#>` | Full template with "What/Why/Tests/How" |
+| Commit + push + PR | `/commit-push-pr` | All-in-one workflow |
+| Address review comments | `/address-comments-by <reviewer>` | Fetch and respond to specific reviewer |
+| Split large PR | `/split-pr` | Analyze and propose atomic commits |
+| Isolated development | `/worktree-dev` | Create worktree, develop, return results |
+| Verify build passes | `/verify-build` | Run tests and fix issues |
+| Simplify code | `/simplify` | Simplify code after implementation |
+| Desktop notification | `/notify` | Alert when task completes |
+| Design architecture | `/architect` | Design and maintain feature architecture |
+| Persist insights | `/second-brain` | Save architectural learnings |
+
 ## GitHub CLI Usage
-- For Netflix GitHub Enterprise repos (github.netflix.net / git.netflix.net):
-  - **First, fix the proxy** (required once per repo before any gh commands):
-    ```bash
-    ghe-fix-proxy /full/path/to/repo --verify
-    ```
-  - Then use regular `gh` commands:
-    - `gh pr list` - auto-detects repo from git remote
-    - `gh pr view 123` - works without -R flag when in repo
-    - `gh api repos/corp/repo-name/pulls` - works after proxy fix
-  - **Reset when done** (restores config for other tools):
-    ```bash
-    ghe-fix-proxy --reset
-    ```
-  - Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
-  - **Creating gists** (special case):
-    ```bash
-    # 1. Fix proxy first
-    ghe-fix-proxy /path/to/any/repo --verify
 
-    # 2. Use GH_HOST to target Netflix GHE
-    GH_HOST=github.netflix.net gh gist create file1.md file2.py --desc "Description"
+**For Netflix repos**: Use skills above, not raw `gh` commands for PR creation/editing.
 
-    # 3. Reset when done
-    ghe-fix-proxy --reset
-    ```
-    Note: `gh gist` requires `GH_HOST` env var since it doesn't auto-detect from repo remotes.
+- **Proxy setup** (required once per repo before any gh commands):
+  ```bash
+  ghe-fix-proxy /full/path/to/repo --verify
+  ```
+- **Read-only commands work after proxy fix**:
+  - `gh pr list` - auto-detects repo from git remote
+  - `gh pr view 123` - works without -R flag when in repo
+  - `gh api repos/corp/repo-name/pulls` - works after proxy fix
+- **Reset when done** (restores config for other tools):
+  ```bash
+  ghe-fix-proxy --reset
+  ```
+- Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
+- **Creating gists** (special case):
+  ```bash
+  # 1. Fix proxy first
+  ghe-fix-proxy /path/to/any/repo --verify
+
+  # 2. Use GH_HOST to target Netflix GHE
+  GH_HOST=github.netflix.net gh gist create file1.md file2.py --desc "Description"
+
+  # 3. Reset when done
+  ghe-fix-proxy --reset
+  ```
+  Note: `gh gist` requires `GH_HOST` env var since it doesn't auto-detect from repo remotes.
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 

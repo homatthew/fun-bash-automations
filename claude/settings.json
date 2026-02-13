@@ -1,9 +1,4 @@
 {
-  "alwaysThinkingEnabled": true,
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh"
-  },
   "apiKeyHelper": "echo sk-1234",
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:9123/mtlsproxy:claudecode",
@@ -15,13 +10,24 @@
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local"
+    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,git_repository=https://git.netflix.net/corp/cde-antigravity-capacity.git"
   },
-  "model": "opus",
   "permissions": {
     "allow": [
       "Bash(terminal-notifier*)",
       "Bash(ghe-fix-proxy*)"
     ]
-  }
+  },
+  "model": "opus",
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  },
+  "enabledPlugins": {
+    "elements-of-style@superpowers-marketplace": true,
+    "frontend-design@claude-plugins-official": true,
+    "interface-design@interface-design": true,
+    "superpowers@superpowers-marketplace": true
+  },
+  "alwaysThinkingEnabled": true
 }

@@ -5,6 +5,11 @@ description: Update an existing PR with a detailed, well-structured description
 
 # Update PR Description
 
+> **Related skills:**
+> - `/create-nflx-pr` - Create a new PR (if PR doesn't exist yet)
+> - `/commit-push-pr` - Commit, push, and create PR in one workflow
+> - `/address-comments-by <reviewer>` - Address review comments
+
 Generate a comprehensive PR description for an existing PR based on the changes in the branch.
 
 ## Gather Context
@@ -45,9 +50,11 @@ Generate a description following this structure:
 
 ## Are there any tests?
 
-[Describe test coverage:]
-- **Unit tests** (`test_file.py`): [what's tested]
-- **Integration tests** (`test_integration.py`): [what's tested]
+[Focus on WHAT the tests prove, not a list of test names. 1-2 sentences max:]
+
+- Good: "Yes - regression tests verify costs stay within ±5% when model logic changes."
+- Good: "Added property tests that catch edge cases the original unit tests missed."
+- Bad: "test_foo tests foo, test_bar tests bar, test_baz tests baz..."
 
 ## How would I use the new code?
 
@@ -63,15 +70,32 @@ curl "/api/endpoint?param=value"
 result = my_function(arg1, arg2)
 ```
 
-## Architecture (optional)
+## Architecture (only if needed)
 
-[Include a Mermaid diagram for multi-component changes:]
+**Include a diagram ONLY if ONE of these is true:**
+1. **Data flows through 3+ components** - Show the pipeline
+2. **There's a non-obvious ordering/dependency** - Show what must happen first
+3. **State changes in surprising ways** - Show before/after states
+4. **The text explanation exceeds 5 sentences** - A picture is worth 1000 words
+
+**Skip the diagram if:**
+- It just restates what the code already shows
+- It's a simple A→B→C that's obvious from the function calls
+- You're adding it "because PRs should have diagrams"
+
+**Diagram style rules:**
+- **Plain English labels** - not code (`"Get user's orders"` not `getUserOrders()`)
+- **Big abstract boxes** - hide implementation details
+- **3-6 boxes max** - more means too much detail
+- **Readable without code context** - a PM should understand it
 
 ```mermaid
-graph TB
-    A[Input] --> B{Decision}
-    B -->|Path 1| C[Output 1]
-    B -->|Path 2| D[Output 2]
+graph LR
+    A[Current Deployment] --> B[Extract Costs]
+    B --> C[Compare to Model]
+    C --> D{Drift?}
+    D -->|Yes| E[Alert]
+    D -->|No| F[OK]
 ```
 
 🤖 Generated with [Claude Code](https://claude.ai/code)
@@ -79,11 +103,10 @@ graph TB
 
 ## Writing Guidelines
 
-1. **Be specific** - Reference actual file names, function names, and line numbers
-2. **Explain the "why"** - Don't just describe what changed, explain why you chose this approach
-3. **Include code snippets** - Show before/after or example usage where helpful
-4. **Use diagrams** - Mermaid diagrams help visualize flows and relationships
-5. **Keep it scannable** - Use headers, bullet points, and code blocks
+1. **Explain the "why"** - Don't just describe what changed, explain why you chose this approach
+2. **Be concise** - If a section doesn't add value, skip it
+3. **Code snippets > prose** - Show, don't tell
+4. **Scannable** - Headers, bullets, tables. Walls of text = unread
 
 ## Updating the PR
 
