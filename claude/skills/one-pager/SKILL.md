@@ -191,14 +191,12 @@ source ~/repos/dump/.venv/bin/activate
 python diagram.py
 
 # Create Netflix gist
-ghe-fix-proxy ~/repos/dump --verify
-GH_HOST=github.netflix.net gh gist create \
+GH_HOST=git.netflix.net gh gist create \
   diagram.py \
   architecture.png \
   README.md \
   --desc "Architecture diagram: [Memo Topic]" \
   --public
-ghe-fix-proxy --reset
 ```
 
 ### Phase 4: Output

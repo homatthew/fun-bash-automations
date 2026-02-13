@@ -20,12 +20,6 @@ View and evaluate GitHub PR review comments from a specific reviewer, then accep
 
 ## Steps
 
-### 0. Fix git proxy (required for gh commands on Netflix repos)
-
-```bash
-ghe-fix-proxy $(pwd) --verify
-```
-
 ### 1. Find the PR for the current branch
 
 ```bash
@@ -33,6 +27,8 @@ gh pr list --head $(git branch --show-current) --json number,title,state,url
 ```
 
 ### 2. Get reviewers who left comments
+
+> Note: All `gh` commands work directly with Netflix repos — no proxy setup needed.
 
 ```bash
 gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '[.[].user.login] | unique'
@@ -49,7 +45,7 @@ For bot reviewers like graphite-app, use case-insensitive matching:
 gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login | test("<REVIEWER>"; "i")) | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
 ```
 
-### 4. For each comment, evaluate using these criteria:
+### 4. For each comment, evaluate using these criteria
 
 - **ACCEPT** if:
   - The suggestion fixes a real bug or edge case
@@ -68,12 +64,6 @@ Use the Edit tool to apply each accepted fix.
 ### 6. Verify changes
 
 Run the project's tests to verify changes don't break anything.
-
-### 7. Reset git proxy
-
-```bash
-ghe-fix-proxy --reset
-```
 
 ## Notes
 

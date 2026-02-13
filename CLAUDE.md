@@ -57,4 +57,3 @@ The `zsh/personal.zsh` file defines these functions that Claude should know abou
 - `claude-deploy` - Deploy repo config to ~/.claude (make changes live)
 - `claude-sync` - Sync ~/.claude config back to this repo
 - `gwt`, `gwtl`, `gwtr`, `gwtc`, `gwtclean` - Git worktree helpers
-- `ghe-fix-proxy` - Fix gh CLI for Netflix GitHub Enterprise

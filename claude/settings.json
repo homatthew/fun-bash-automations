@@ -14,8 +14,7 @@
   },
   "permissions": {
     "allow": [
-      "Bash(terminal-notifier*)",
-      "Bash(ghe-fix-proxy*)"
+      "Bash(terminal-notifier*)"
     ]
   },
   "model": "opus",

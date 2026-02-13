@@ -59,35 +59,24 @@ First, detect repo type and fork topology:
 
 ```bash
 git remote -v
-# github.netflix.net → Netflix GHE workflow
+# git.netflix.net → Netflix GHE workflow
 # github.com → Public GitHub workflow
 # If "upstream" remote exists → cross-fork PR (target upstream, head from fork)
 ```
 
-### For Netflix GHE repos (github.netflix.net)
+### For Netflix GHE repos (git.netflix.net)
 
-**Use `gh api` with explicit hostname** (not `gh pr create` which doesn't reliably detect the host):
+Netflix's `gh` fork works directly — no proxy setup needed.
 
 ```bash
-# Fix proxy first
-ghe-fix-proxy $(pwd) --verify
-
-# Get current branch name
 BRANCH=$(git branch --show-current)
 
-# Determine repo path - may differ from git remote (e.g., cde/repo → corp/cde-repo)
-# Check by visiting the repo in browser if unsure
-
-# Create the PR using the full template above
-gh api --hostname github.netflix.net repos/{org}/{repo}/pulls \
-  -f title="Your PR title" \
-  -f body="[Use the full PR Description Template above - do not abbreviate]" \
-  -f head="$BRANCH" \
-  -f base="main" \
-  -f draft=true
-
-# Reset proxy when done
-ghe-fix-proxy --reset
+gh pr create \
+  --title "Your PR title" \
+  --body "[Use the full PR Description Template above - do not abbreviate]" \
+  --base main \
+  --head "$BRANCH" \
+  --draft
 ```
 
 ### For public GitHub repos (github.com)
@@ -119,7 +108,3 @@ gh pr create \
 ```
 
 Always create PRs in draft mode unless explicitly told otherwise.
-
-## Why `gh api` instead of `gh pr create` for GHE?
-
-The `gh pr create` subcommand doesn't reliably detect the Netflix GHE hostname even after proxy setup. Using `gh api --hostname github.netflix.net` explicitly specifies the host and works reliably.
