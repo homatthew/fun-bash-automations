@@ -1,11 +1,10 @@
 ## Git Branch Rules
 
-**NEVER commit or push directly to `main` or `master` branches.** Always:
-1. Create a feature branch first: `git checkout -b mho/<feature-name>`
-2. Make commits on the feature branch
-3. Push the branch and create a PR
+**For this repo (fun-bash-automations):** Always push to `mh-netflix` branch. No feature sub-branches needed.
+- All changes go to `mh-netflix`
+- Never push directly to `main`
 
-Even if the user says "commit and push", create a branch first unless they explicitly specify a branch name. If already on main with uncommitted changes, create a branch before committing.
+**For other repos:** Follow standard feature branch rules - create `mho/<feature-name>` branches, never push directly to `main` or `master`.
 
 **Exception:** `service-capacity-model` repo allows direct pushes to `origin main` (but NOT `upstream main`).
 
