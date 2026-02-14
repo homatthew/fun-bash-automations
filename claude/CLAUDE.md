@@ -24,6 +24,7 @@
 | Simplify code | `/simplify` | Simplify code after implementation |
 | Design architecture | `/architect` | Design and maintain feature architecture |
 | Persist insights | `/second-brain` | Save architectural learnings |
+| Hand off to Ralph | `/ralph-handoff` | Auto-triggered by "ralph" keyword |
 
 ## GitHub CLI Usage
 
@@ -55,6 +56,15 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
 - I prefer to use plan mode for non-trivial changes
 - Plans are stored in the default `~/.claude/plans/` directory (Claude Code's global plansDirectory)
 - Consult the plan file when resuming work
+
+### Ralph Handoff
+When the plan is approved and I exit plan mode, include a one-line reminder at the end:
+> To execute autonomously: `ralph ~/.claude/plans/<plan-name>.md`
+
+**Keyword trigger:** When I say "ralph", "ralph it", or "hand this off to ralph":
+1. Find the most recent plan file in `~/.claude/plans/`
+2. Output the `ralph` command for that plan
+3. **STOP. Do not implement the plan. Do not write code. Do not make changes.**
 
 ## Git Worktree Workflow
 Worktrees allow parallel work on the same repo without conflicts. Use this for:
