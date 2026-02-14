@@ -683,13 +683,14 @@ gprunelocal() {
 # ==============================================================================
 # Ralph Wiggum Loop (experimental)
 # ==============================================================================
-# Autonomous Claude Code loop: plan interactively, then execute in a loop.
+# Autonomous Claude Code loop with gum TUI.
 # Each iteration is a fresh context window; memory persists via filesystem.
 #
 # Usage:
-#   ralph [PROMPT.md] [max_iterations] [tools]
+#   ralph                         # Interactive plan picker (gum/fzf)
+#   ralph <plan.md>               # Execute a plan file directly
+#   ralph PROMPT.md               # Legacy mode: use PROMPT.md as raw prompt
 #   ralph-init                    # Scaffold a PROMPT.md in current dir
-#   ralph-plan <plan-file>        # Generate PROMPT.md from a .claude/plans/ file
 #
 # Safety:
 #   - No --dangerously-skip-permissions (ever)
@@ -705,27 +706,91 @@ RALPH_DEFAULT_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*
 #   RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(./gradlew:*) Bash(newt:*)"
 #   RALPH_MAX_ITER=20
 
+_ralph_prompt_from_plan() {
+    local plan_file="$1"
+    cat <<EOF
+## Task
+Execute the implementation plan in $plan_file
+
+Read the plan file first, then work through it step by step.
+
+## Completion criteria
+- All steps in the plan are implemented
+- All tests pass
+- Each step has its own commit with a descriptive message
+- Code compiles/lints cleanly
+
+## Rules
+- Work through the plan one step at a time, in order
+- After completing each step, run the relevant tests
+- Commit after each passing step
+- If tests fail, fix the issue before moving to the next step
+- Do NOT skip steps or reorder them unless a step is explicitly marked optional
+- Do NOT modify files outside the project directory
+- When ALL steps are complete and all tests pass, output the exact text: RALPH_DONE
+EOF
+}
+
 ralph() {
-    local prompt="${1:-PROMPT.md}"
+    local arg="${1:-}"
     local max_iter="${2:-10}"
     local tools="${3:-}"
 
-    if [[ ! -f "$prompt" ]]; then
-        echo "Error: $prompt not found"
-        echo "Run 'ralph-init' to scaffold one, or 'ralph-plan <plan-file>' to generate from a plan."
+    # Detect gum once for this invocation
+    local HAS_GUM=""
+    command -v gum >/dev/null 2>&1 && HAS_GUM=1
+
+    # No args: interactive plan picker
+    if [[ -z "$arg" ]]; then
+        if [[ -d ".claude/plans" ]]; then
+            local plans
+            plans=$(ls -t .claude/plans/*.md 2>/dev/null)
+            if [[ -z "$plans" ]]; then
+                echo "No plans found in .claude/plans/"
+                return 1
+            fi
+            if [[ -n "$HAS_GUM" ]]; then
+                arg=$(echo "$plans" | gum choose --header "Select a plan (newest first)")
+            elif command -v fzf >/dev/null 2>&1; then
+                arg=$(echo "$plans" | fzf --header "Select a plan file")
+            else
+                echo "Install gum or fzf for interactive plan selection, or pass a plan path directly."
+                return 1
+            fi
+            [[ -z "$arg" ]] && return 1
+        else
+            echo "No .claude/plans/ directory found."
+            echo "Usage: ralph [plan.md]"
+            return 1
+        fi
+    fi
+
+    # Validate file exists
+    if [[ ! -f "$arg" ]]; then
+        echo "Error: $arg not found"
         return 1
+    fi
+
+    # Determine prompt content based on file type
+    local prompt_content=""
+    local plan_name=""
+    if [[ "$arg" == "PROMPT.md" || "$arg" == */PROMPT.md ]]; then
+        # Legacy mode: read file as raw prompt
+        prompt_content=$(cat "$arg")
+        plan_name="PROMPT.md (legacy)"
+    else
+        # Plan mode: generate prompt from plan file
+        prompt_content=$(_ralph_prompt_from_plan "$arg")
+        plan_name="$(basename "$arg")"
     fi
 
     # Load per-project config if present (only key=value assignments, no arbitrary code)
     if [[ -f ".ralphrc" ]]; then
-        # Validate: only allow RALPH_TOOLS=... and RALPH_MAX_ITER=... lines
         if grep -qvE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc; then
             echo "Error: .ralphrc contains disallowed lines. Only RALPH_TOOLS and RALPH_MAX_ITER are permitted."
-            echo "Offending lines:"
             grep -vnE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc
             return 1
         fi
-        echo "Loading .ralphrc"
         source .ralphrc
     fi
 
@@ -737,48 +802,97 @@ ralph() {
     mkdir -p "$log_dir"
 
     local start_time=$(date +%s)
-    echo "Ralph loop starting"
-    echo "  Prompt:     $prompt"
-    echo "  Max iter:   $max_iter"
-    echo "  Tools:      $tools"
-    echo "  Logs:       $log_dir/"
-    echo ""
+
+    # Header display
+    if [[ -n "$HAS_GUM" ]]; then
+        gum style --border normal --padding "0 1" --margin "0" \
+            "Ralph Wiggum Loop" \
+            "Plan:       $plan_name" \
+            "Max iter:   $max_iter" \
+            "Tools:      ${tools:0:60}..." \
+            "Logs:       $log_dir/"
+    else
+        echo "Ralph loop starting"
+        echo "  Plan:       $plan_name"
+        echo "  Max iter:   $max_iter"
+        echo "  Tools:      $tools"
+        echo "  Logs:       $log_dir/"
+        echo ""
+    fi
 
     local i=0
     while [ $i -lt $max_iter ]; do
         ((i++))
-        echo "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
+        local iter_start=$(date +%s)
+        local log_file="$log_dir/iteration-$i.log"
 
-        # Run claude in non-interactive mode with scoped tools
-        local output
-        output=$(claude --print --allowedTools "$tools" < "$prompt" 2>&1)
-        local exit_code=$?
+        local output=""
+        local exit_code=0
 
-        # Log iteration
-        echo "$output" > "$log_dir/iteration-$i.log"
+        if [[ -n "$HAS_GUM" ]]; then
+            _RALPH_TOOLS="$tools" _RALPH_PROMPT="$prompt_content" _RALPH_LOG="$log_file" \
+                gum spin --spinner dot --title "Running claude iteration $i/$max_iter..." -- \
+                bash -c 'claude --print --allowedTools "$_RALPH_TOOLS" <<< "$_RALPH_PROMPT" > "$_RALPH_LOG" 2>&1'
+            exit_code=$?
+            output=$(cat "$log_file")
+        else
+            echo "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
+            output=$(claude --print --allowedTools "$tools" <<< "$prompt_content" 2>&1)
+            exit_code=$?
+            echo "$output" > "$log_file"
+        fi
 
-        # Show tail of output
-        echo "$output" | tail -5
-        echo ""
+        local iter_elapsed=$(( $(date +%s) - iter_start ))
+
+        # Post-iteration summary
+        local tail_output
+        tail_output=$(echo "$output" | tail -3)
+        if [[ -n "$HAS_GUM" ]]; then
+            gum style --border normal --padding "0 1" --margin "0" \
+                "Iteration $i/$max_iter complete (${iter_elapsed}s)" \
+                "" \
+                "$tail_output"
+        else
+            echo "$output" | tail -5
+            echo ""
+        fi
 
         # Check for completion signal
         if echo "$output" | grep -q "RALPH_DONE"; then
             local elapsed=$(( $(date +%s) - start_time ))
-            echo "Ralph complete after $i iterations (${elapsed}s)"
-            echo "Logs in $log_dir/"
+            if [[ -n "$HAS_GUM" ]]; then
+                gum style --border double --padding "0 1" --margin "0" --foreground 2 \
+                    "Ralph complete after $i iterations (${elapsed}s)" \
+                    "Logs in $log_dir/"
+            else
+                echo "Ralph complete after $i iterations (${elapsed}s)"
+                echo "Logs in $log_dir/"
+            fi
             return 0
         fi
 
         # Check for claude errors
         if [ $exit_code -ne 0 ]; then
-            echo "Warning: claude exited with code $exit_code on iteration $i"
-            echo "  See $log_dir/iteration-$i.log"
+            if [[ -n "$HAS_GUM" ]]; then
+                gum style --border normal --padding "0 1" --foreground 3 \
+                    "Warning: claude exited with code $exit_code on iteration $i" \
+                    "See $log_dir/iteration-$i.log"
+            else
+                echo "Warning: claude exited with code $exit_code on iteration $i"
+                echo "  See $log_dir/iteration-$i.log"
+            fi
         fi
     done
 
     local elapsed=$(( $(date +%s) - start_time ))
-    echo "Ralph hit max iterations ($max_iter) after ${elapsed}s"
-    echo "Logs in $log_dir/"
+    if [[ -n "$HAS_GUM" ]]; then
+        gum style --border double --padding "0 1" --margin "0" --foreground 1 \
+            "Ralph hit max iterations ($max_iter) after ${elapsed}s" \
+            "Logs in $log_dir/"
+    else
+        echo "Ralph hit max iterations ($max_iter) after ${elapsed}s"
+        echo "Logs in $log_dir/"
+    fi
     return 1
 }
 
@@ -835,58 +949,6 @@ RC_EOF
 PROMPT_EOF
 
     echo "Created PROMPT.md — edit the Task and Completion criteria sections, then run 'ralph'"
-}
-
-# ralph-plan: Generate a PROMPT.md from an existing plan file
-ralph-plan() {
-    local plan_file="$1"
-
-    if [[ -z "$plan_file" ]]; then
-        # Try to find plans via fzf
-        if command -v fzf > /dev/null 2>&1 && [[ -d ".claude/plans" ]]; then
-            plan_file=$(ls .claude/plans/*.md 2>/dev/null | fzf --header "Select a plan file")
-            [[ -z "$plan_file" ]] && return 1
-        else
-            echo "Usage: ralph-plan <plan-file>"
-            echo "Example: ralph-plan .claude/plans/oauth2.md"
-            return 1
-        fi
-    fi
-
-    if [[ ! -f "$plan_file" ]]; then
-        echo "Error: $plan_file not found"
-        return 1
-    fi
-
-    if [[ -f "PROMPT.md" ]]; then
-        echo "PROMPT.md already exists. Remove it first or edit directly."
-        return 1
-    fi
-
-    cat > PROMPT.md << PROMPT_EOF
-## Task
-Execute the implementation plan in $plan_file
-
-Read the plan file first, then work through it step by step.
-
-## Completion criteria
-- All steps in the plan are implemented
-- All tests pass
-- Each step has its own commit with a descriptive message
-- Code compiles/lints cleanly
-
-## Rules
-- Work through the plan one step at a time, in order
-- After completing each step, run the relevant tests
-- Commit after each passing step
-- If tests fail, fix the issue before moving to the next step
-- Do NOT skip steps or reorder them unless a step is explicitly marked optional
-- Do NOT modify files outside the project directory
-- When ALL steps are complete and all tests pass, output the exact text: RALPH_DONE
-PROMPT_EOF
-
-    echo "Created PROMPT.md pointing to $plan_file"
-    echo "Review it, then run 'ralph'"
 }
 
 # ==============================================================================
