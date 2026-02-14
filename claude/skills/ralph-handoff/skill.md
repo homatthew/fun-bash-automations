@@ -1,6 +1,6 @@
 ---
 name: ralph-handoff
-description: Find the current plan and output the ralph command to execute it
+description: "Hand off a plan to Ralph Wiggum for autonomous execution. Trigger words: ralph, ralph it, hand off, hand this off."
 ---
 
 # Ralph Handoff
