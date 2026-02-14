@@ -740,13 +740,14 @@ ralph() {
     local HAS_GUM=""
     command -v gum >/dev/null 2>&1 && HAS_GUM=1
 
-    # No args: interactive plan picker
+    # No args: interactive plan picker from global plans directory
+    local plans_dir="$HOME/.claude/plans"
     if [[ -z "$arg" ]]; then
-        if [[ -d ".claude/plans" ]]; then
+        if [[ -d "$plans_dir" ]]; then
             local plans
-            plans=$(ls -t .claude/plans/*.md 2>/dev/null)
+            plans=$(ls -t "$plans_dir"/*.md 2>/dev/null)
             if [[ -z "$plans" ]]; then
-                echo "No plans found in .claude/plans/"
+                echo "No plans found in $plans_dir/"
                 return 1
             fi
             if [[ -n "$HAS_GUM" ]]; then
@@ -759,7 +760,7 @@ ralph() {
             fi
             [[ -z "$arg" ]] && return 1
         else
-            echo "No .claude/plans/ directory found."
+            echo "No plans directory found at $plans_dir/"
             echo "Usage: ralph [plan.md]"
             return 1
         fi

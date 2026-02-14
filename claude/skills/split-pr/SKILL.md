@@ -74,7 +74,7 @@ Stack order:
 
 ## Phase 4: Output the Plan
 
-Create `.claude/plans/split-pr-<branch-name>.md`:
+Create `~/.claude/plans/split-pr-<branch-name>.md`:
 
 ```markdown
 # Split Plan: <branch-name>
