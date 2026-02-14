@@ -13,8 +13,20 @@
     "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,git_repository=https://git.netflix.net/corp/cde-antigravity-capacity.git"
   },
   "permissions": {
-    "allow": [
-      "Bash(terminal-notifier*)"
+    "allow": []
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "~/.claude/hooks/notify.sh"}]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "~/.claude/hooks/notify.sh"}]
+      }
     ]
   },
   "model": "opus",

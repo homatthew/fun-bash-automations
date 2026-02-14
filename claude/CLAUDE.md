@@ -22,7 +22,6 @@
 | Isolated development | `/worktree-dev` | Create worktree, develop, return results |
 | Verify build passes | `/verify-build` | Run tests and fix issues |
 | Simplify code | `/simplify` | Simplify code after implementation |
-| Desktop notification | `/notify` | Alert when task completes |
 | Design architecture | `/architect` | Design and maintain feature architecture |
 | Persist insights | `/second-brain` | Save architectural learnings |
 
@@ -105,20 +104,6 @@ This ensures the status line displays the correct branch. The cd persists for su
 - Cannot checkout same branch in two worktrees simultaneously
 - `gwtr` removes the directory but keeps the branch (delete branch separately with `git branch -d`)
 
-## Notifications
-After completing a significant task, use `/notify` to send a desktop notification so I know to return.
-
-**When to notify:**
-- After finishing an implementation task (feature, bugfix, refactor)
-- After completing a research task with findings ready
-- After a build/test run completes (pass or fail)
-- When blocked and waiting for input
-
-**When NOT to notify:**
-- Mid-task updates (I'll see the todo list)
-- Simple questions or clarifications
-- After trivial single-line changes
-
 ## Claude Config Management
 The live config is in `~/.claude/`.
 The version-controlled source is in `~/repos/fun-bash-automations/claude/`.
@@ -173,7 +158,7 @@ When deciding whether to donate a skill to a marketplace plugin:
 
 | Factor | Keep if... | Donate if... |
 |--------|-----------|--------------|
-| **Personal runtime coupling** | Needs `terminal-notifier`, `gwt` aliases, `~/repos/dump/`, Ghostty | Uses only standard tools |
+| **Personal runtime coupling** | Needs `gwt` aliases, `~/repos/dump/`, Ghostty | Uses only standard tools |
 | **Identity coupling** | Contains `mho/` prefixes, personal paths, personal templates | Fully generic |
 | **Marketplace fit** | Doesn't fit the target plugin's domain (e.g., workflow skills don't belong in an ODS datastores plugin) | Naturally fits the plugin's category |
 | **Community maintenance** | Only you would maintain it | Many engineers would improve it |
@@ -194,7 +179,7 @@ When deciding whether to donate a skill to a marketplace plugin:
 | **commit-push-pr** | Keep | Personal workflow + template |
 | **update-pr-description** | Keep | Personal template |
 | **create-nflx-pr** | Keep | Netflix-specific + personal template |
-| **notify** | Keep | macOS + Ghostty coupling |
+| **notify** | Replaced by hook | Auto-fires via `claude/hooks/notify.sh` on Stop/Notification events |
 | **one-pager** | Keep | Personal methodology + second-brain |
 | **second-brain** | Keep | Personal knowledge store |
 | **worktree-dev** | Keep | Shell alias dependent |
