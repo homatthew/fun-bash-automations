@@ -46,10 +46,10 @@ Before designing, understand how the codebase works:
 
 ## Phase 3: Design and Persist the Plan
 
-Create a plan file in the project:
+Create a plan file in the global plans directory:
 
 ```
-.claude/plans/<feature-name>.md
+~/.claude/plans/<feature-name>.md
 ```
 
 The plan should include:

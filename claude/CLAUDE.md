@@ -53,7 +53,7 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
 
 ## Plan Mode Preference
 - I prefer to use plan mode for non-trivial changes
-- Always persist plans to `.claude/plans/<feature-name>.md`
+- Plans are stored in the default `~/.claude/plans/` directory (Claude Code's global plansDirectory)
 - Consult the plan file when resuming work
 
 ## Git Worktree Workflow
