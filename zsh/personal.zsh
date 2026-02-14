@@ -897,59 +897,42 @@ ralph() {
     return 1
 }
 
-# ralph-init: Scaffold a PROMPT.md (and .ralphrc for detected project type)
+# ralph-init: Create .ralphrc for the detected project type
 ralph-init() {
-    if [[ -f "PROMPT.md" ]]; then
-        echo "PROMPT.md already exists. Remove it first or edit directly."
+    if [[ -f ".ralphrc" ]]; then
+        echo ".ralphrc already exists. Edit it directly."
         return 1
     fi
 
-    # Detect project type and create .ralphrc if needed
-    if [[ ! -f ".ralphrc" ]]; then
-        if [[ -f "build.gradle" || -f "build.gradle.kts" || -f "gradlew" ]]; then
-            cat > .ralphrc << 'RC_EOF'
+    # Detect project type and create .ralphrc
+    if [[ -f "build.gradle" || -f "build.gradle.kts" || -f "gradlew" ]]; then
+        cat > .ralphrc << 'RC_EOF'
 # Ralph config for Gradle/Java project
 RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(./gradlew:*) Bash(newt:*)"
 RALPH_MAX_ITER=15
 RC_EOF
-            echo "Created .ralphrc (detected Gradle project)"
-        elif [[ -f "package.json" ]]; then
-            cat > .ralphrc << 'RC_EOF'
+        echo "Created .ralphrc (detected Gradle project)"
+    elif [[ -f "package.json" ]]; then
+        cat > .ralphrc << 'RC_EOF'
 # Ralph config for Node.js project
 RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm test:*) Bash(npm run build:*) Bash(npm run lint:*)"
 RALPH_MAX_ITER=10
 RC_EOF
-            echo "Created .ralphrc (detected Node.js project)"
-        elif [[ -f "pyproject.toml" || -f "setup.py" || -f "tox.ini" ]]; then
-            cat > .ralphrc << 'RC_EOF'
+        echo "Created .ralphrc (detected Node.js project)"
+    elif [[ -f "pyproject.toml" || -f "setup.py" || -f "tox.ini" ]]; then
+        cat > .ralphrc << 'RC_EOF'
 # Ralph config for Python project
 RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(pytest:*) Bash(newt:*) Bash(tox:*)"
 RALPH_MAX_ITER=10
 RC_EOF
-            echo "Created .ralphrc (detected Python project)"
-        fi
+        echo "Created .ralphrc (detected Python project)"
+    else
+        echo "No project type detected. Create .ralphrc manually or use global defaults."
+        return 1
     fi
 
-    cat > PROMPT.md << 'PROMPT_EOF'
-## Task
-<!-- Describe what you want to accomplish -->
-
-## Completion criteria
-<!-- Be specific — Ralph loops succeed or fail based on these -->
-- [ ] All tests pass
-- [ ] Code compiles/lints cleanly
-- [ ] Each logical change is committed separately
-
-## Rules
-- Work incrementally: implement one thing, test it, commit it, move on
-- Run tests after each change
-- Commit after each passing step with a descriptive message
-- If tests fail, fix the issue before moving to the next step
-- Do NOT modify files outside the project directory
-- When ALL completion criteria are met, output the exact text: RALPH_DONE
-PROMPT_EOF
-
-    echo "Created PROMPT.md — edit the Task and Completion criteria sections, then run 'ralph'"
+    echo ""
+    echo "Next: use plan mode to create a plan, then run 'ralph' to execute it."
 }
 
 # ==============================================================================
