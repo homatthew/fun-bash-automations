@@ -251,6 +251,9 @@ export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/
 export PATH=$PATH:/Users/matthewho/.temporal
 
+# Beads: central task memory across all repos (lives in dump repo)
+export BEADS_DIR=$HOME/repos/dump/.beads
+
 # ==============================================================================
 # Aliases
 # ==============================================================================
@@ -304,6 +307,40 @@ claude-deploy() {
     cp "$src/settings.json" "$dst/settings.json"
     echo "Deployed $src → ~/.claude"
     echo "Changes are now live"
+}
+
+# ==============================================================================
+# Beads (central task memory for AI agents)
+# ==============================================================================
+# Central DB lives in ~/repos/dump/.beads (set via BEADS_DIR above).
+# All bd commands from any repo hit the same database.
+# Install: brew install steveyegge/beads/bd
+# Init:    cd ~/repos/dump && bd init
+
+# Quick aliases
+alias bdr='bd ready'              # What's next?
+alias bdl='bd list --status open' # All open tasks
+alias bds='bd show'               # Show task details (bd show <id>)
+
+# bdc - Create a beads task with repo context
+# Usage: bdc "Fix chunking race condition" [-p 0]
+# Auto-tags with current repo name
+bdc() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: bdc \"task title\" [-p priority]"
+        return 1
+    fi
+
+    local repo_name=""
+    if git rev-parse HEAD > /dev/null 2>&1; then
+        repo_name=$(basename "$(git rev-parse --show-toplevel)")
+    fi
+
+    if [[ -n "$repo_name" ]]; then
+        bd create "$1" --tag "repo:$repo_name" "${@:2}"
+    else
+        bd create "$1" "${@:2}"
+    fi
 }
 
 # ==============================================================================
@@ -641,6 +678,215 @@ gprunelocal() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         echo "$gone_branches" | xargs git branch -D
     fi
+}
+
+# ==============================================================================
+# Ralph Wiggum Loop (experimental)
+# ==============================================================================
+# Autonomous Claude Code loop: plan interactively, then execute in a loop.
+# Each iteration is a fresh context window; memory persists via filesystem.
+#
+# Usage:
+#   ralph [PROMPT.md] [max_iterations] [tools]
+#   ralph-init                    # Scaffold a PROMPT.md in current dir
+#   ralph-plan <plan-file>        # Generate PROMPT.md from a .claude/plans/ file
+#
+# Safety:
+#   - No --dangerously-skip-permissions (ever)
+#   - Bash scoped to specific commands via --allowedTools
+#   - Max iteration cap (default 10)
+#   - Logs each iteration to .ralph/
+
+# Default tools: file ops + scoped bash for git (no push) and common test runners
+RALPH_DEFAULT_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm test:*) Bash(npm run build:*) Bash(pytest:*)"
+
+# Per-project .ralphrc can override RALPH_TOOLS and RALPH_MAX_ITER.
+# Example .ralphrc for a Java project:
+#   RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(./gradlew:*) Bash(newt:*)"
+#   RALPH_MAX_ITER=20
+
+ralph() {
+    local prompt="${1:-PROMPT.md}"
+    local max_iter="${2:-10}"
+    local tools="${3:-}"
+
+    if [[ ! -f "$prompt" ]]; then
+        echo "Error: $prompt not found"
+        echo "Run 'ralph-init' to scaffold one, or 'ralph-plan <plan-file>' to generate from a plan."
+        return 1
+    fi
+
+    # Load per-project config if present (only key=value assignments, no arbitrary code)
+    if [[ -f ".ralphrc" ]]; then
+        # Validate: only allow RALPH_TOOLS=... and RALPH_MAX_ITER=... lines
+        if grep -qvE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc; then
+            echo "Error: .ralphrc contains disallowed lines. Only RALPH_TOOLS and RALPH_MAX_ITER are permitted."
+            echo "Offending lines:"
+            grep -vnE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc
+            return 1
+        fi
+        echo "Loading .ralphrc"
+        source .ralphrc
+    fi
+
+    # Priority: CLI arg > .ralphrc > global default
+    [[ -z "$tools" ]] && tools="${RALPH_TOOLS:-$RALPH_DEFAULT_TOOLS}"
+    [[ "$2" == "" ]] && max_iter="${RALPH_MAX_ITER:-10}"
+
+    local log_dir=".ralph"
+    mkdir -p "$log_dir"
+
+    local start_time=$(date +%s)
+    echo "Ralph loop starting"
+    echo "  Prompt:     $prompt"
+    echo "  Max iter:   $max_iter"
+    echo "  Tools:      $tools"
+    echo "  Logs:       $log_dir/"
+    echo ""
+
+    local i=0
+    while [ $i -lt $max_iter ]; do
+        ((i++))
+        echo "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
+
+        # Run claude in non-interactive mode with scoped tools
+        local output
+        output=$(claude --print --allowedTools "$tools" < "$prompt" 2>&1)
+        local exit_code=$?
+
+        # Log iteration
+        echo "$output" > "$log_dir/iteration-$i.log"
+
+        # Show tail of output
+        echo "$output" | tail -5
+        echo ""
+
+        # Check for completion signal
+        if echo "$output" | grep -q "RALPH_DONE"; then
+            local elapsed=$(( $(date +%s) - start_time ))
+            echo "Ralph complete after $i iterations (${elapsed}s)"
+            echo "Logs in $log_dir/"
+            return 0
+        fi
+
+        # Check for claude errors
+        if [ $exit_code -ne 0 ]; then
+            echo "Warning: claude exited with code $exit_code on iteration $i"
+            echo "  See $log_dir/iteration-$i.log"
+        fi
+    done
+
+    local elapsed=$(( $(date +%s) - start_time ))
+    echo "Ralph hit max iterations ($max_iter) after ${elapsed}s"
+    echo "Logs in $log_dir/"
+    return 1
+}
+
+# ralph-init: Scaffold a PROMPT.md (and .ralphrc for detected project type)
+ralph-init() {
+    if [[ -f "PROMPT.md" ]]; then
+        echo "PROMPT.md already exists. Remove it first or edit directly."
+        return 1
+    fi
+
+    # Detect project type and create .ralphrc if needed
+    if [[ ! -f ".ralphrc" ]]; then
+        if [[ -f "build.gradle" || -f "build.gradle.kts" || -f "gradlew" ]]; then
+            cat > .ralphrc << 'RC_EOF'
+# Ralph config for Gradle/Java project
+RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(./gradlew:*) Bash(newt:*)"
+RALPH_MAX_ITER=15
+RC_EOF
+            echo "Created .ralphrc (detected Gradle project)"
+        elif [[ -f "package.json" ]]; then
+            cat > .ralphrc << 'RC_EOF'
+# Ralph config for Node.js project
+RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm test:*) Bash(npm run build:*) Bash(npm run lint:*)"
+RALPH_MAX_ITER=10
+RC_EOF
+            echo "Created .ralphrc (detected Node.js project)"
+        elif [[ -f "pyproject.toml" || -f "setup.py" || -f "tox.ini" ]]; then
+            cat > .ralphrc << 'RC_EOF'
+# Ralph config for Python project
+RALPH_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(pytest:*) Bash(newt:*) Bash(tox:*)"
+RALPH_MAX_ITER=10
+RC_EOF
+            echo "Created .ralphrc (detected Python project)"
+        fi
+    fi
+
+    cat > PROMPT.md << 'PROMPT_EOF'
+## Task
+<!-- Describe what you want to accomplish -->
+
+## Completion criteria
+<!-- Be specific — Ralph loops succeed or fail based on these -->
+- [ ] All tests pass
+- [ ] Code compiles/lints cleanly
+- [ ] Each logical change is committed separately
+
+## Rules
+- Work incrementally: implement one thing, test it, commit it, move on
+- Run tests after each change
+- Commit after each passing step with a descriptive message
+- If tests fail, fix the issue before moving to the next step
+- Do NOT modify files outside the project directory
+- When ALL completion criteria are met, output the exact text: RALPH_DONE
+PROMPT_EOF
+
+    echo "Created PROMPT.md — edit the Task and Completion criteria sections, then run 'ralph'"
+}
+
+# ralph-plan: Generate a PROMPT.md from an existing plan file
+ralph-plan() {
+    local plan_file="$1"
+
+    if [[ -z "$plan_file" ]]; then
+        # Try to find plans via fzf
+        if command -v fzf > /dev/null 2>&1 && [[ -d ".claude/plans" ]]; then
+            plan_file=$(ls .claude/plans/*.md 2>/dev/null | fzf --header "Select a plan file")
+            [[ -z "$plan_file" ]] && return 1
+        else
+            echo "Usage: ralph-plan <plan-file>"
+            echo "Example: ralph-plan .claude/plans/oauth2.md"
+            return 1
+        fi
+    fi
+
+    if [[ ! -f "$plan_file" ]]; then
+        echo "Error: $plan_file not found"
+        return 1
+    fi
+
+    if [[ -f "PROMPT.md" ]]; then
+        echo "PROMPT.md already exists. Remove it first or edit directly."
+        return 1
+    fi
+
+    cat > PROMPT.md << PROMPT_EOF
+## Task
+Execute the implementation plan in $plan_file
+
+Read the plan file first, then work through it step by step.
+
+## Completion criteria
+- All steps in the plan are implemented
+- All tests pass
+- Each step has its own commit with a descriptive message
+- Code compiles/lints cleanly
+
+## Rules
+- Work through the plan one step at a time, in order
+- After completing each step, run the relevant tests
+- Commit after each passing step
+- If tests fail, fix the issue before moving to the next step
+- Do NOT skip steps or reorder them unless a step is explicitly marked optional
+- Do NOT modify files outside the project directory
+- When ALL steps are complete and all tests pass, output the exact text: RALPH_DONE
+PROMPT_EOF
+
+    echo "Created PROMPT.md pointing to $plan_file"
+    echo "Review it, then run 'ralph'"
 }
 
 # ==============================================================================
