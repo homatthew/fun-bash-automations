@@ -827,39 +827,31 @@ ralph() {
         local iter_start=$(date +%s)
         local log_file="$log_dir/iteration-$i.log"
 
-        local output=""
         local exit_code=0
 
         if [[ -n "$HAS_GUM" ]]; then
-            _RALPH_TOOLS="$tools" _RALPH_PROMPT="$prompt_content" _RALPH_LOG="$log_file" \
-                gum spin --spinner dot --title "Running claude iteration $i/$max_iter..." -- \
-                bash -c 'claude --print --allowedTools "$_RALPH_TOOLS" <<< "$_RALPH_PROMPT" > "$_RALPH_LOG" 2>&1'
-            exit_code=$?
-            output=$(cat "$log_file")
+            gum style --foreground 4 "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
         else
             echo "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
-            output=$(claude --print --allowedTools "$tools" <<< "$prompt_content" 2>&1)
-            exit_code=$?
-            echo "$output" > "$log_file"
         fi
+
+        # Run claude, tee to log file, show live tail output
+        claude --print --allowedTools "$tools" <<< "$prompt_content" 2>&1 | tee "$log_file" | tail -5
+        exit_code=${pipestatus[1]}
 
         local iter_elapsed=$(( $(date +%s) - iter_start ))
 
         # Post-iteration summary
-        local tail_output
-        tail_output=$(echo "$output" | tail -3)
         if [[ -n "$HAS_GUM" ]]; then
             gum style --border normal --padding "0 1" --margin "0" \
-                "Iteration $i/$max_iter complete (${iter_elapsed}s)" \
-                "" \
-                "$tail_output"
+                "Iteration $i/$max_iter complete (${iter_elapsed}s)"
         else
-            echo "$output" | tail -5
+            echo "--- iteration $i complete (${iter_elapsed}s) ---"
             echo ""
         fi
 
         # Check for completion signal
-        if echo "$output" | grep -q "RALPH_DONE"; then
+        if grep -q "RALPH_DONE" "$log_file"; then
             local elapsed=$(( $(date +%s) - start_time ))
             if [[ -n "$HAS_GUM" ]]; then
                 gum style --border double --padding "0 1" --margin "0" --foreground 2 \
