@@ -41,8 +41,13 @@ Initialize the current project for Ralph Wiggum — the autonomous Claude Code l
 
 3. **Tell the user** what was created and how to use ralph:
    - Plans live in `~/.claude/plans/` (Claude Code's global default)
-   - Use plan mode to create a plan, then run `ralph` to pick and execute it
-   - Or pass a plan directly: `ralph ~/.claude/plans/<plan-name>.md`
+   - `ralph` — interactive plan picker
+   - `ralph run ~/.claude/plans/<plan-name>.md` — execute a plan directly
+   - `ralph <plan-name>.md` — shortcut for `ralph run`
+   - `ralph run -n 20 <plan.md>` — override max iterations
+   - `ralph inject "focus on tests"` — queue directive for next iteration
+   - `ralph status` — check session state and progress
+   - `ralph logs` — browse iteration logs
    - Review logs in `.ralph/` after the run
 
 ## Rules
@@ -50,3 +55,4 @@ Initialize the current project for Ralph Wiggum — the autonomous Claude Code l
 - Do NOT create .ralphrc if it already exists — tell the user to edit it directly
 - Always add gitignore entries even if the other files already exist
 - Do NOT create PROMPT.md — ralph now accepts plan files directly
+- ralph is a Python CLI installed via `uv tool install -e ~/repos/fun-bash-automations/ralph`

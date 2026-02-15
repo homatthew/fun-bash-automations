@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Ralph Wiggum — Autonomous Claude Code Loop
+# ==============================================================================
+# Iterative plan executor with gum TUI, inter-iteration context via status.md,
+# Ctrl-C handling, and full streaming output.
+#
+# Usage:
+#   ralph                              # Interactive plan picker (gum/fzf)
+#   ralph ~/.claude/plans/refactor.md  # Execute specific plan
+#   ralph -n 20 plan.md               # 20 iterations max
+#   ralph -h                           # Show help
+#
+# Safety:
+#   - No --dangerously-skip-permissions (ever)
+#   - Bash scoped to specific commands via --allowedTools
+#   - Max iteration cap (default 10)
+#   - Logs each iteration to .ralph/
+# ==============================================================================
+
+set -euo pipefail
+
+# Default tools: file ops + scoped bash for git (no push) and common test runners
+RALPH_DEFAULT_TOOLS="Edit Read Write Glob Grep Bash(git add:*) Bash(git commit:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(npm test:*) Bash(npm run build:*) Bash(pytest:*)"
+
+# --- Helpers ------------------------------------------------------------------
+
+_RALPH_GUM=""
+command -v gum >/dev/null 2>&1 && _RALPH_GUM=1
+
+_ralph_say() {
+    local style="$1"; shift
+    if [[ -n "$_RALPH_GUM" ]]; then
+        case "$style" in
+            header)  gum style --border normal --padding "0 1" --margin "0" "$@" ;;
+            success) gum style --border double --padding "0 1" --margin "0" --foreground 2 "$@" ;;
+            warn)    gum style --border normal --padding "0 1" --foreground 3 "$@" ;;
+            error)   gum style --border double --padding "0 1" --margin "0" --foreground 1 "$@" ;;
+            iter)    gum style --foreground 4 "$@" ;;
+        esac
+    else
+        echo "$@"
+    fi
+}
+
+_ralph_help() {
+    cat <<'HELP'
+Usage: ralph [options] [plan.md]
+
+Options:
+  -n, --max <N>      Max iterations (default: 10, override via .ralphrc)
+  -t, --tools <T>    Tool scope string (override via .ralphrc)
+  -h, --help         Show this help
+
+Examples:
+  ralph                              # Interactive plan picker
+  ralph ~/.claude/plans/refactor.md  # Execute specific plan
+  ralph -n 20 plan.md               # 20 iterations max
+
+Related:
+  ralph-init    Create .ralphrc for current project
+HELP
+}
+
+_ralph_prompt_from_plan() {
+    local plan_file="$1"
+    local status_file="${2:-}"
+
+    local previous_progress="Fresh start — no previous iterations."
+    if [[ -n "$status_file" && -f "$status_file" ]]; then
+        previous_progress=$(cat "$status_file")
+    fi
+
+    cat <<EOF
+## Task
+Execute the implementation plan in $plan_file
+
+Read the plan file first, then work through it step by step.
+
+## Completion criteria
+- All steps in the plan are implemented
+- All tests pass
+- Each step has its own commit with a descriptive message
+- Code compiles/lints cleanly
+
+## Rules
+- Work through the plan one step at a time, in order
+- After completing each step, run the relevant tests
+- Commit after each passing step
+- If tests fail, fix the issue before moving to the next step
+- Do NOT skip steps or reorder them unless a step is explicitly marked optional
+- Do NOT modify files outside the project directory
+- When ALL steps are complete and all tests pass, output the exact text: RALPH_DONE
+
+## Progress tracking
+After completing work (or if you hit a blocker), update .ralph/status.md with:
+- Steps completed (one line each)
+- Current blocker (if any)
+- Next step to work on
+Keep it brief — just facts, no prose.
+
+## Previous progress
+$previous_progress
+EOF
+}
+
+# --- Main ---------------------------------------------------------------------
+
+main() {
+    local max_iter=""
+    local tools=""
+    local plan_file=""
+
+    # Flag parsing
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--max)
+                max_iter="$2"; shift 2 ;;
+            -t|--tools)
+                tools="$2"; shift 2 ;;
+            -h|--help)
+                _ralph_help; return 0 ;;
+            -*)
+                echo "Unknown option: $1"; _ralph_help; return 1 ;;
+            *)
+                plan_file="$1"; shift ;;
+        esac
+    done
+
+    # No plan file: interactive picker
+    local plans_dir="$HOME/.claude/plans"
+    if [[ -z "$plan_file" ]]; then
+        if [[ -d "$plans_dir" ]]; then
+            local plans
+            plans=$(ls -t "$plans_dir"/*.md 2>/dev/null || true)
+            if [[ -z "$plans" ]]; then
+                echo "No plans found in $plans_dir/"
+                return 1
+            fi
+            # Build basename list, let user pick, resolve back to full path
+            local basenames
+            basenames=$(echo "$plans" | while read -r p; do basename "$p"; done)
+            local chosen=""
+            if [[ -n "$_RALPH_GUM" ]]; then
+                chosen=$(echo "$basenames" | gum choose --header "Select a plan (newest first)")
+            elif command -v fzf >/dev/null 2>&1; then
+                chosen=$(echo "$basenames" | fzf --header "Select a plan file")
+            else
+                echo "Install gum or fzf for interactive plan selection, or pass a plan path directly."
+                return 1
+            fi
+            [[ -z "$chosen" ]] && return 1
+            plan_file="$plans_dir/$chosen"
+        else
+            echo "No plans directory found at $plans_dir/"
+            _ralph_help
+            return 1
+        fi
+    fi
+
+    # Validate file exists
+    if [[ ! -f "$plan_file" ]]; then
+        echo "Error: $plan_file not found"
+        return 1
+    fi
+
+    local plan_name
+    plan_name="$(basename "$plan_file")"
+
+    # Load per-project config if present (only key=value assignments, no arbitrary code)
+    if [[ -f ".ralphrc" ]]; then
+        if grep -qvE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc; then
+            echo "Error: .ralphrc contains disallowed lines. Only RALPH_TOOLS and RALPH_MAX_ITER are permitted."
+            grep -vnE '^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=)' .ralphrc
+            return 1
+        fi
+        source .ralphrc
+    fi
+
+    # Priority: CLI arg > .ralphrc > global default
+    [[ -z "$tools" ]] && tools="${RALPH_TOOLS:-$RALPH_DEFAULT_TOOLS}"
+    [[ -z "$max_iter" ]] && max_iter="${RALPH_MAX_ITER:-10}"
+
+    local log_dir=".ralph"
+    local status_file="$log_dir/status.md"
+    mkdir -p "$log_dir"
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Header
+    _ralph_say header \
+        "Ralph Wiggum Loop" \
+        "Plan:       $plan_name" \
+        "Max iter:   $max_iter" \
+        "Tools:      ${tools:0:60}..." \
+        "Logs:       $log_dir/"
+
+    # Ctrl-C trap
+    local _ralph_interrupted=0
+    trap '_ralph_interrupted=1' INT
+
+    local i=0
+    while [[ $i -lt $max_iter && $_ralph_interrupted -eq 0 ]]; do
+        ((i++))
+        local iter_start
+        iter_start=$(date +%s)
+        local log_file="$log_dir/iteration-$i.log"
+
+        _ralph_say iter "--- iteration $i/$max_iter ($(date '+%H:%M:%S')) ---"
+
+        # Build prompt with inter-iteration context
+        local prompt_content
+        prompt_content=$(_ralph_prompt_from_plan "$plan_file" "$status_file")
+
+        # Run claude with full streaming output
+        local exit_code=0
+        claude --print --allowedTools "$tools" <<< "$prompt_content" 2>&1 | tee "$log_file" || exit_code=$?
+
+        local iter_elapsed=$(( $(date +%s) - iter_start ))
+
+        # Post-iteration summary
+        _ralph_say header "Iteration $i/$max_iter complete (${iter_elapsed}s)"
+
+        # Check for completion signal
+        if grep -q "RALPH_DONE" "$log_file"; then
+            local elapsed=$(( $(date +%s) - start_time ))
+            _ralph_say success \
+                "Ralph complete after $i iterations (${elapsed}s)" \
+                "Logs in $log_dir/"
+            trap - INT
+            return 0
+        fi
+
+        # Check for claude errors
+        if [[ $exit_code -ne 0 ]]; then
+            _ralph_say warn \
+                "Warning: claude exited with code $exit_code on iteration $i" \
+                "See $log_dir/iteration-$i.log"
+        fi
+    done
+
+    trap - INT
+
+    local elapsed=$(( $(date +%s) - start_time ))
+
+    # Show summary on interrupt or max iterations
+    if [[ $_ralph_interrupted -eq 1 ]]; then
+        echo ""
+        _ralph_say warn \
+            "Ralph interrupted after $i iterations (${elapsed}s)" \
+            "Logs in $log_dir/"
+    else
+        _ralph_say error \
+            "Ralph hit max iterations ($max_iter) after ${elapsed}s" \
+            "Logs in $log_dir/"
+    fi
+
+    # Show last known progress if available
+    if [[ -f "$status_file" ]]; then
+        echo ""
+        _ralph_say header "Last known progress (.ralph/status.md):"
+        cat "$status_file"
+    fi
+
+    [[ $_ralph_interrupted -eq 1 ]] && return 130
+    return 1
+}
+
+main "$@"
