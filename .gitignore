@@ -4,3 +4,19 @@ build.log
 *.swo
 .DS_Store
 build
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+.venv/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Ralph runtime
+.ralph/
+.ralphrc
