@@ -1,0 +1,4 @@
+/* Ralph TUI global styles */
+Screen {
+    background: $surface;
+}
