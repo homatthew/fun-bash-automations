@@ -5,7 +5,7 @@ description = "Ralph Wiggum — Autonomous Claude Code Loop"
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.9",
-    "rich>=13.0",
+    "textual>=4.0",
 ]
 
 [project.optional-dependencies]
