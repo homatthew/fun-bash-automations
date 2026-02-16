@@ -2,3 +2,28 @@
 Screen {
     background: $surface;
 }
+
+/* Picker layout */
+#picker-body {
+    height: 1fr;
+}
+
+#picker-left {
+    width: 1fr;
+    min-width: 30;
+    border-right: thick $primary-background;
+}
+
+#filter-input {
+    dock: top;
+}
+
+#plan-list {
+    height: 1fr;
+}
+
+#preview-pane {
+    width: 2fr;
+    padding: 1 2;
+    overflow-y: auto;
+}
