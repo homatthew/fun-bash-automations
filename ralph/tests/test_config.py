@@ -8,7 +8,7 @@ def test_default_tools_contains_core_entries():
 
 def test_load_ralphrc_returns_defaults_when_no_file(tmp_path):
     result = load_ralphrc(tmp_path / ".ralphrc")
-    assert result == {"tools": None, "max_iter": None}
+    assert result == {"tools": None, "max_iter": None, "sandbox": None}
 
 
 def test_load_ralphrc_parses_values(tmp_path):
@@ -27,3 +27,24 @@ def test_load_ralphrc_rejects_disallowed_lines(tmp_path):
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
+
+
+def test_load_ralphrc_parses_sandbox_true(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_SANDBOX=true\n")
+    result = load_ralphrc(rc)
+    assert result["sandbox"] is True
+
+
+def test_load_ralphrc_parses_sandbox_false(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_SANDBOX=false\n")
+    result = load_ralphrc(rc)
+    assert result["sandbox"] is False
+
+
+def test_load_ralphrc_sandbox_defaults_none(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text('RALPH_TOOLS="Edit Read"\n')
+    result = load_ralphrc(rc)
+    assert result["sandbox"] is None
