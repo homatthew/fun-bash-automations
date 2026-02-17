@@ -17,6 +17,7 @@ from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
 from ralph.prompt import build_prompt
 
 PLANS_DIR = Path.home() / ".claude" / "plans"
+SANDBOX_SETTINGS = json.dumps({"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}})
 
 _interrupted = False
 
@@ -65,12 +66,28 @@ def run(
     max_iter: int = typer.Option(10, "--max", "-n", help="Max iterations"),
     tools: str | None = typer.Option(None, "--tools", "-t", help="Tool scope override"),
     no_tui: bool = typer.Option(False, "--no-tui", help="Disable TUI, use headless mode"),
+    no_sandbox: bool = typer.Option(False, "--no-sandbox", help="Disable sandbox enforcement"),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
+    # Load .ralphrc config — CLI args take priority
+    try:
+        rc = load_ralphrc()
+    except ValueError as e:
+        ui.error(str(e))
+        raise typer.Exit(1)
+
+    # Sandbox: ON by default, --no-sandbox or RALPH_SANDBOX=false disables
+    if no_sandbox:
+        sandbox_enabled = False
+    elif rc["sandbox"] is not None:
+        sandbox_enabled = rc["sandbox"]
+    else:
+        sandbox_enabled = True
+
     if not no_tui:
         from ralph.tui.app import RalphApp
 
-        app = RalphApp(plan=plan, max_iter=max_iter, tools=tools)
+        app = RalphApp(plan=plan, max_iter=max_iter, tools=tools, sandbox=sandbox_enabled)
         app.run()
         return
 
@@ -86,13 +103,6 @@ def run(
         raise typer.Exit(1)
 
     plan_name = plan.name
-
-    # Load .ralphrc config — CLI args take priority
-    try:
-        rc = load_ralphrc()
-    except ValueError as e:
-        ui.error(str(e))
-        raise typer.Exit(1)
 
     effective_tools = tools or rc["tools"] or RALPH_DEFAULT_TOOLS
     effective_max = max_iter if max_iter != 10 else (rc["max_iter"] or 10)
@@ -119,6 +129,7 @@ def run(
         f"Ralph Wiggum Loop\n"
         f"Plan:       {plan_name}\n"
         f"Max iter:   {effective_max}\n"
+        f"Sandbox:    {'on' if sandbox_enabled else 'OFF'}\n"
         f"Tools:      {effective_tools[:60]}…\n"
         f"Logs:       {log_dir}/"
     )
@@ -156,9 +167,12 @@ def run(
             ui.iter_header(i, effective_max, datetime.now().strftime("%H:%M:%S"))
 
             # Run claude, stream to both terminal and log file
+            cmd = ["claude", "--print", "--allowedTools", effective_tools]
+            if sandbox_enabled:
+                cmd.extend(["--settings", SANDBOX_SETTINGS])
             with open(log_file, "w") as lf:
                 proc = subprocess.Popen(
-                    ["claude", "--print", "--allowedTools", effective_tools],
+                    cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
