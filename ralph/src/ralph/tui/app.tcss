@@ -27,3 +27,45 @@ Screen {
     padding: 1 2;
     overflow-y: auto;
 }
+
+/* Runner layout */
+#header-bar {
+    dock: top;
+    height: 1;
+    background: $primary;
+    color: $text;
+    padding: 0 1;
+}
+
+#runner-body {
+    height: 1fr;
+}
+
+#output-pane {
+    width: 2fr;
+    border-right: thick $primary-background;
+}
+
+#status-sidebar {
+    width: 1fr;
+    min-width: 25;
+    padding: 1 2;
+}
+
+#status-label {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#status-content {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+DirectiveInput {
+    align: center middle;
+}
+
+DirectiveInput Input {
+    width: 60;
+}
