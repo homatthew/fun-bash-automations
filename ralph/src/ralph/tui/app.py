@@ -19,15 +19,19 @@ class RalphApp(App):
         plan: Path | None = None,
         max_iter: int = 10,
         tools: str | None = None,
+        sandbox: bool = True,
     ):
         super().__init__()
         self.plan_path = plan
         self.max_iter = max_iter
         self.tools_override = tools
+        self.sandbox = sandbox
 
     def on_mount(self) -> None:
         if self.plan_path:
-            self.push_screen(LoopRunner(self.plan_path, self.max_iter, self.tools_override))
+            self.push_screen(
+                LoopRunner(self.plan_path, self.max_iter, self.tools_override, self.sandbox)
+            )
         else:
             self.push_screen(PlanPicker(), callback=self._on_plan_selected)
 
@@ -35,4 +39,4 @@ class RalphApp(App):
         if plan is None:
             self.exit()
         else:
-            self.push_screen(LoopRunner(plan, self.max_iter, self.tools_override))
+            self.push_screen(LoopRunner(plan, self.max_iter, self.tools_override, self.sandbox))
