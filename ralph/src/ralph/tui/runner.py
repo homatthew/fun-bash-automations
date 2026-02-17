@@ -17,6 +17,8 @@ from textual.widgets import Footer, Input, Label, Markdown, RichLog, Static
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
 from ralph.prompt import build_prompt
 
+SANDBOX_SETTINGS = json.dumps({"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}})
+
 
 def format_elapsed(seconds: int) -> str:
     """Format seconds into human-readable elapsed time."""
@@ -77,11 +79,13 @@ class LoopRunner(Screen):
         plan: Path,
         max_iter: int = 10,
         tools: str | None = None,
+        sandbox: bool = True,
     ) -> None:
         super().__init__()
         self.plan = plan
         self.max_iter = max_iter
         self.tools_override = tools
+        self.sandbox = sandbox
         self._start_time = 0.0
         self._current_iter = 0
         self._interrupted = False
@@ -113,9 +117,11 @@ class LoopRunner(Screen):
     def _update_header(self) -> None:
         elapsed = int(time.time() - self._start_time) if self._start_time else 0
         status_icon = "\u2022" if not self._interrupted else "!"
+        sandbox_str = "on" if self.sandbox else "OFF"
         self.query_one("#header-bar", Static).update(
             f"  Plan: {self.plan.name}    "
             f"Iter: {self._current_iter}/{self.max_iter}    "
+            f"Sandbox: {sandbox_str}    "
             f"Elapsed: {format_elapsed(elapsed)}  {status_icon}"
         )
 
@@ -187,9 +193,12 @@ class LoopRunner(Screen):
                 prompt_content = prompt_content + "\n" + prompt_extra
 
             # Run claude subprocess
+            cmd = ["claude", "--print", "--allowedTools", effective_tools]
+            if self.sandbox:
+                cmd.extend(["--settings", SANDBOX_SETTINGS])
             with open(log_file, "w") as lf:
                 proc = subprocess.Popen(
-                    ["claude", "--print", "--allowedTools", effective_tools],
+                    cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
