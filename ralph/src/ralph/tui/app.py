@@ -4,6 +4,9 @@ from pathlib import Path
 
 from textual.app import App
 
+from ralph.tui.picker import PlanPicker
+from ralph.tui.runner import LoopRunner
+
 
 class RalphApp(App):
     """Main Ralph application — routes between Picker and Runner screens."""
@@ -21,3 +24,19 @@ class RalphApp(App):
         self.plan_path = plan
         self.max_iter = max_iter
         self.tools_override = tools
+
+    def on_mount(self) -> None:
+        if self.plan_path:
+            self.push_screen(
+                LoopRunner(self.plan_path, self.max_iter, self.tools_override)
+            )
+        else:
+            self.push_screen(PlanPicker(), callback=self._on_plan_selected)
+
+    def _on_plan_selected(self, plan: Path | None) -> None:
+        if plan is None:
+            self.exit()
+        else:
+            self.push_screen(
+                LoopRunner(plan, self.max_iter, self.tools_override)
+            )

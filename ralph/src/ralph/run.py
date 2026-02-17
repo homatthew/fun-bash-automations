@@ -64,8 +64,16 @@ def run(
     ),
     max_iter: int = typer.Option(10, "--max", "-n", help="Max iterations"),
     tools: str | None = typer.Option(None, "--tools", "-t", help="Tool scope override"),
+    no_tui: bool = typer.Option(False, "--no-tui", help="Disable TUI, use headless mode"),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
+    if not no_tui:
+        from ralph.tui.app import RalphApp
+
+        app = RalphApp(plan=plan, max_iter=max_iter, tools=tools)
+        app.run()
+        return
+
     global _interrupted
     _interrupted = False
 
