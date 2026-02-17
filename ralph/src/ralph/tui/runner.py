@@ -178,9 +178,7 @@ class LoopRunner(Screen):
             if directives_file.is_file():
                 directive_content = directives_file.read_text().strip()
                 if directive_content:
-                    prompt_extra = (
-                        f"\n## Operator directive (priority)\n{directive_content}\n"
-                    )
+                    prompt_extra = f"\n## Operator directive (priority)\n{directive_content}\n"
                     archive = log_dir / f"directive-consumed-{i}.md"
                     directives_file.rename(archive)
 
@@ -207,9 +205,7 @@ class LoopRunner(Screen):
                 proc.wait()
 
             iter_elapsed = int(time.time() - iter_start)
-            self.post_message(
-                IterationBoundary(i, effective_max, "end", iter_elapsed)
-            )
+            self.post_message(IterationBoundary(i, effective_max, "end", iter_elapsed))
 
             # Check for RALPH_DONE
             log_text = log_file.read_text()
@@ -242,9 +238,7 @@ class LoopRunner(Screen):
             ts = datetime.now().strftime("%H:%M:%S")
             log.write(f"── Iteration {message.iteration}/{message.max_iter} ── {ts} ──")
         else:
-            log.write(
-                f"── Iteration {message.iteration} complete ({message.elapsed}s) ──\n"
-            )
+            log.write(f"── Iteration {message.iteration} complete ({message.elapsed}s) ──\n")
 
     @on(LoopFinished)
     def on_loop_finished(self, message: LoopFinished) -> None:
