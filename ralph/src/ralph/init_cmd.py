@@ -15,6 +15,7 @@ _GRADLE_RC = f"""\
 # Ralph config for Gradle/Java project
 RALPH_TOOLS="{_GRADLE_TOOLS}"
 RALPH_MAX_ITER=15
+RALPH_SANDBOX=true
 """
 
 _NODE_TOOLS = (
@@ -27,6 +28,7 @@ _NODE_RC = f"""\
 # Ralph config for Node.js project
 RALPH_TOOLS="{_NODE_TOOLS}"
 RALPH_MAX_ITER=10
+RALPH_SANDBOX=true
 """
 
 _PYTHON_TOOLS = (
@@ -38,6 +40,7 @@ _PYTHON_RC = f"""\
 # Ralph config for Python project
 RALPH_TOOLS="{_PYTHON_TOOLS}"
 RALPH_MAX_ITER=10
+RALPH_SANDBOX=true
 """
 
 _GITIGNORE_ENTRIES = [".ralphrc", ".ralph/"]
