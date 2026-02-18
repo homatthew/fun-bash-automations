@@ -1,8 +1,5 @@
 """LoopRunner screen — streaming iteration loop with live output."""
 
-import json
-import os
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,9 +12,13 @@ from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, Markdown, RichLog, Static
 
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
-from ralph.prompt import build_prompt
-
-SANDBOX_SETTINGS = json.dumps({"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}})
+from ralph.engine import (
+    RALPH_DIR_NAME,
+    EngineConfig,
+    Event,
+    IterationEvent,
+)
+from ralph.engine import run_loop as engine_run_loop
 
 
 def format_elapsed(seconds: int) -> str:
@@ -28,13 +29,6 @@ def format_elapsed(seconds: int) -> str:
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h}h {m:02d}m {s:02d}s"
-
-
-def _write_meta(meta_path: Path, data: dict) -> None:
-    """Atomic write of meta.json."""
-    tmp = meta_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.rename(meta_path)
 
 
 class OutputLine(Message):
@@ -48,7 +42,9 @@ class OutputLine(Message):
 class IterationBoundary(Message):
     """Marks the start or end of an iteration."""
 
-    def __init__(self, iteration: int, max_iter: int, event: str, elapsed: int = 0) -> None:
+    def __init__(
+        self, iteration: int, max_iter: int, event: str, elapsed: int = 0
+    ) -> None:
         self.iteration = iteration
         self.max_iter = max_iter
         self.event = event
@@ -146,7 +142,7 @@ class LoopRunner(Screen):
 
     def _refresh_status(self) -> None:
         """Re-read .ralph/status.md and update the sidebar."""
-        status_file = Path.cwd() / ".ralph" / "status.md"
+        status_file = Path.cwd() / RALPH_DIR_NAME / "status.md"
         md_widget = self.query_one("#status-content", Markdown)
         if status_file.is_file():
             content = status_file.read_text().strip()
@@ -166,9 +162,29 @@ class LoopRunner(Screen):
     def _update_prompt_preview(self, text: str) -> None:
         lines = text.splitlines()
         if len(lines) > 120:
-            lines = lines[:120] + ["", f"... ({len(text.splitlines()) - 120} more lines)"]
+            lines = lines[:120] + [
+                "", f"... ({len(text.splitlines()) - 120} more lines)"
+            ]
         preview = "```markdown\n" + "\n".join(lines) + "\n```"
         self.query_one("#prompt-content", Markdown).update(preview)
+
+    def _handle_engine_event(self, ev: IterationEvent) -> None:
+        """Map engine events to Textual messages."""
+        if ev.kind == Event.ITERATION_START:
+            self._current_iter = ev.iteration
+            self.post_message(
+                IterationBoundary(ev.iteration, ev.max_iter, "start")
+            )
+        elif ev.kind == Event.PROMPT_BUILT:
+            self.post_message(PromptSent(ev.prompt))
+        elif ev.kind == Event.OUTPUT_LINE:
+            self.post_message(OutputLine(ev.line))
+        elif ev.kind == Event.ITERATION_END:
+            self.post_message(
+                IterationBoundary(
+                    ev.iteration, ev.max_iter, "end", ev.elapsed
+                )
+            )
 
     @work(thread=True)
     def run_loop(self) -> None:
@@ -180,97 +196,22 @@ class LoopRunner(Screen):
             return
 
         effective_tools = self.tools_override or rc["tools"] or RALPH_DEFAULT_TOOLS
-        effective_max = self.max_iter
 
-        log_dir = Path.cwd() / ".ralph"
-        log_dir.mkdir(exist_ok=True)
-        status_file = log_dir / "status.md"
-        meta_path = log_dir / "meta.json"
-        directives_file = log_dir / "directives.md"
+        config = EngineConfig(
+            plan=self.plan,
+            max_iter=self.max_iter,
+            tools=effective_tools,
+            sandbox=self.sandbox,
+        )
 
-        meta = {
-            "plan": str(self.plan),
-            "pid": os.getpid(),
-            "start_time": datetime.now().isoformat(),
-            "max_iter": effective_max,
-            "status": "running",
-            "current_iter": 0,
-        }
-        _write_meta(meta_path, meta)
+        reason = engine_run_loop(
+            config,
+            on_event=self._handle_engine_event,
+            is_interrupted=lambda: self._interrupted,
+        )
 
-        start_time = time.time()
-
-        for i in range(1, effective_max + 1):
-            if self._interrupted:
-                break
-
-            self._current_iter = i
-            meta["current_iter"] = i
-            _write_meta(meta_path, meta)
-
-            iter_start = time.time()
-            log_file = log_dir / f"iteration-{i}.log"
-
-            self.post_message(IterationBoundary(i, effective_max, "start"))
-
-            # Check for directives
-            prompt_extra = ""
-            if directives_file.is_file():
-                directive_content = directives_file.read_text().strip()
-                if directive_content:
-                    prompt_extra = f"\n## Operator directive (priority)\n{directive_content}\n"
-                    archive = log_dir / f"directive-consumed-{i}.md"
-                    directives_file.rename(archive)
-
-            prompt_content = build_prompt(str(self.plan), status_file)
-            if prompt_extra:
-                prompt_content = prompt_content + "\n" + prompt_extra
-
-            self.post_message(PromptSent(prompt_content))
-
-            # Run claude subprocess
-            cmd = ["claude", "--print", "--allowedTools", effective_tools]
-            if self.sandbox:
-                cmd.extend(["--settings", SANDBOX_SETTINGS])
-            with open(log_file, "w") as lf:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                proc.stdin.write(prompt_content)
-                proc.stdin.close()
-
-                for line in proc.stdout:
-                    lf.write(line)
-                    self.post_message(OutputLine(line))
-
-                proc.wait()
-
-            iter_elapsed = int(time.time() - iter_start)
-            self.post_message(IterationBoundary(i, effective_max, "end", iter_elapsed))
-
-            # Check for RALPH_DONE
-            log_text = log_file.read_text()
-            if "RALPH_DONE" in log_text:
-                elapsed = int(time.time() - start_time)
-                meta["status"] = "done"
-                _write_meta(meta_path, meta)
-                self.post_message(LoopFinished("done", i, elapsed))
-                return
-
-        # Reached max or interrupted
-        elapsed = int(time.time() - start_time)
-        if self._interrupted:
-            meta["status"] = "interrupted"
-            _write_meta(meta_path, meta)
-            self.post_message(LoopFinished("interrupted", self._current_iter, elapsed))
-        else:
-            meta["status"] = "max_iterations"
-            _write_meta(meta_path, meta)
-            self.post_message(LoopFinished("max_iterations", effective_max, elapsed))
+        elapsed = int(time.time() - self._start_time)
+        self.post_message(LoopFinished(reason, self._current_iter, elapsed))
 
     @on(PromptSent)
     def on_prompt_sent(self, message: PromptSent) -> None:
@@ -290,9 +231,15 @@ class LoopRunner(Screen):
         log = self.query_one("#output-pane", RichLog)
         if message.event == "start":
             ts = datetime.now().strftime("%H:%M:%S")
-            log.write(f"── Iteration {message.iteration}/{message.max_iter} ── {ts} ──")
+            log.write(
+                f"── Iteration {message.iteration}/{message.max_iter}"
+                f" ── {ts} ──"
+            )
         else:
-            log.write(f"── Iteration {message.iteration} complete ({message.elapsed}s) ──\n")
+            log.write(
+                f"── Iteration {message.iteration} complete"
+                f" ({message.elapsed}s) ──\n"
+            )
 
     @on(LoopFinished)
     def on_loop_finished(self, message: LoopFinished) -> None:
@@ -300,12 +247,24 @@ class LoopRunner(Screen):
         log = self.query_one("#output-pane", RichLog)
         elapsed_str = format_elapsed(message.elapsed)
         if message.reason == "done":
-            log.write(f"\n✓ Ralph complete after {message.iterations} iteration(s) ({elapsed_str})")
+            log.write(
+                f"\n✓ Ralph complete after {message.iterations}"
+                f" iteration(s) ({elapsed_str})"
+            )
         elif message.reason == "interrupted":
-            log.write(f"\n⚠ Ralph interrupted at iteration {message.iterations} ({elapsed_str})")
+            log.write(
+                f"\n⚠ Ralph interrupted at iteration"
+                f" {message.iterations} ({elapsed_str})"
+            )
         else:
-            log.write(f"\n✗ Ralph hit max iterations ({message.iterations}) after {elapsed_str}")
-        log.write("\nPress [bold]b[/bold] to pick another plan, [bold]q[/bold] to quit.")
+            log.write(
+                f"\n✗ Ralph hit max iterations ({message.iterations})"
+                f" after {elapsed_str}"
+            )
+        log.write(
+            "\nPress [bold]b[/bold] to pick another plan,"
+            " [bold]q[/bold] to quit."
+        )
 
     def action_inject_directive(self) -> None:
         self.app.push_screen(DirectiveInput())
@@ -333,7 +292,7 @@ class DirectiveInput(Screen):
     def on_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if text:
-            directives = Path.cwd() / ".ralph" / "directives.md"
+            directives = Path.cwd() / RALPH_DIR_NAME / "directives.md"
             directives.parent.mkdir(exist_ok=True)
             directives.write_text(text + "\n")
         self.dismiss()
