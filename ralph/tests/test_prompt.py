@@ -1,6 +1,16 @@
 """Tests for prompt builder and progress parsing."""
 
-from ralph.prompt import parse_progress
+from ralph.prompt import build_prompt, parse_progress
+
+
+def test_build_prompt_warns_against_premature_done(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n1. Do stuff\n")
+    prompt = build_prompt(str(plan))
+    assert "status.md" in prompt
+    assert "all steps" in prompt.lower()
+    # The prompt must tell Claude to verify status.md before emitting RALPH_DONE
+    assert "RALPH_DONE" in prompt
 
 
 def test_parse_progress_all_done():
