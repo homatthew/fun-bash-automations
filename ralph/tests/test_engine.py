@@ -3,7 +3,16 @@
 import json
 from pathlib import Path
 
-from ralph.engine import PLANS_DIR, RALPH_DIR_NAME, SANDBOX_SETTINGS, read_meta, write_meta
+from ralph.engine import (
+    PLANS_DIR,
+    RALPH_DIR_NAME,
+    SANDBOX_SETTINGS,
+    EngineConfig,
+    Event,
+    IterationEvent,
+    read_meta,
+    write_meta,
+)
 
 
 def test_plans_dir_is_home_claude_plans():
@@ -66,3 +75,48 @@ def test_read_meta_corrupt_json(tmp_path: Path):
     (tmp_path / "meta.json").write_text("not valid json{{{")
     result = read_meta(tmp_path)
     assert result is None
+
+
+def test_event_enum_has_all_stages():
+    assert Event.ITERATION_START is not None
+    assert Event.PROMPT_BUILT is not None
+    assert Event.OUTPUT_LINE is not None
+    assert Event.ITERATION_END is not None
+    assert Event.DONE is not None
+
+
+def test_iteration_event_defaults():
+    ev = IterationEvent(kind=Event.OUTPUT_LINE)
+    assert ev.iteration == 0
+    assert ev.line == ""
+    assert ev.elapsed == 0
+
+
+def test_iteration_event_with_values():
+    ev = IterationEvent(kind=Event.ITERATION_START, iteration=3, max_iter=10)
+    assert ev.kind == Event.ITERATION_START
+    assert ev.iteration == 3
+    assert ev.max_iter == 10
+
+
+def test_engine_config_defaults(tmp_path: Path):
+    config = EngineConfig(
+        plan=tmp_path / "plan.md",
+        max_iter=5,
+        tools="Edit Read Write",
+        sandbox=True,
+    )
+    assert config.max_iter == 5
+    assert config.sandbox is True
+    assert config.ralph_dir == Path.cwd() / ".ralph"
+
+
+def test_engine_config_custom_ralph_dir(tmp_path: Path):
+    config = EngineConfig(
+        plan=tmp_path / "plan.md",
+        max_iter=5,
+        tools="Edit Read Write",
+        sandbox=True,
+        ralph_dir=tmp_path / ".custom-ralph",
+    )
+    assert config.ralph_dir == tmp_path / ".custom-ralph"
