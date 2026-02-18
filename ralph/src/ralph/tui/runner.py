@@ -8,8 +8,8 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.screen import Screen
-from textual.widgets import Footer, Input, Label, Markdown, RichLog, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Footer, Input, Label, Markdown, RichLog, Static
 
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
 from ralph.engine import (
@@ -17,6 +17,7 @@ from ralph.engine import (
     EngineConfig,
     Event,
     IterationEvent,
+    check_resume,
 )
 from ralph.engine import run_loop as engine_run_loop
 
@@ -125,7 +126,28 @@ class LoopRunner(Screen):
         self._refresh_status()
         self.set_interval(1.0, self._tick)
         self.set_interval(3.0, self._refresh_status)
-        self.run_loop()
+
+        # Check for resume
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
+        existing = check_resume(ralph_dir, self.plan)
+        if existing:
+            resume_iter = existing.get("current_iter", 0)
+            prev_status = existing.get("status", "unknown")
+            self.app.push_screen(
+                ResumeModal(resume_iter, prev_status),
+                callback=self._on_resume_decision,
+            )
+        else:
+            self.run_loop()
+
+    def _on_resume_decision(self, resume: bool | None) -> None:
+        if resume:
+            ralph_dir = Path.cwd() / RALPH_DIR_NAME
+            existing = check_resume(ralph_dir, self.plan)
+            start = existing.get("current_iter", 1) if existing else 1
+            self.run_loop(start_iter=start)
+        else:
+            self.run_loop()
 
     def _tick(self) -> None:
         self._update_header()
@@ -199,7 +221,7 @@ class LoopRunner(Screen):
             )
 
     @work(thread=True)
-    def run_loop(self) -> None:
+    def run_loop(self, start_iter: int = 1) -> None:
         """Run the iteration loop in a background thread."""
         try:
             rc = load_ralphrc()
@@ -220,6 +242,7 @@ class LoopRunner(Screen):
             config,
             on_event=self._handle_engine_event,
             is_interrupted=lambda: self._interrupted,
+            start_iter=start_iter,
         )
 
         elapsed = int(time.time() - self._start_time)
@@ -290,6 +313,38 @@ class LoopRunner(Screen):
             self.app.exit()
         else:
             self._interrupted = True
+
+
+class ResumeModal(ModalScreen[bool]):
+    """Ask whether to resume a previous run."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, iteration: int, prev_status: str) -> None:
+        super().__init__()
+        self._iteration = iteration
+        self._prev_status = prev_status
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label("Resume Previous Run?", classes="dialog-title")
+            yield Label(
+                f"Previous run ({self._prev_status}) found at"
+                f" iteration {self._iteration}.",
+                id="confirm-detail",
+            )
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Resume", id="confirm-run", variant="primary")
+                yield Button(
+                    "Start Fresh", id="confirm-cancel", variant="default"
+                )
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-run")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class DirectiveInput(Screen):

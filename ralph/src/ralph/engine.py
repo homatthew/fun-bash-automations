@@ -80,6 +80,22 @@ class EngineConfig:
     ralph_dir: Path = field(default_factory=lambda: Path.cwd() / ".ralph")
 
 
+def check_resume(ralph_dir: Path, plan: Path) -> dict | None:
+    """Check if a previous run can be resumed.
+
+    Returns the meta dict if resume is possible (same plan, status is
+    'interrupted' or 'max_iterations'), otherwise None.
+    """
+    meta = read_meta(ralph_dir)
+    if meta is None:
+        return None
+    if Path(meta.get("plan", "")).name != plan.name:
+        return None
+    if meta.get("status") not in ("interrupted", "max_iterations"):
+        return None
+    return meta
+
+
 def run_loop(
     config: EngineConfig,
     on_event: Callable[[IterationEvent], None],

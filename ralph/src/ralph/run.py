@@ -11,7 +11,14 @@ from rich.prompt import IntPrompt
 
 from ralph import ui
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
-from ralph.engine import PLANS_DIR, RALPH_DIR_NAME, EngineConfig, Event, IterationEvent
+from ralph.engine import (
+    PLANS_DIR,
+    RALPH_DIR_NAME,
+    EngineConfig,
+    Event,
+    IterationEvent,
+    check_resume,
+)
 from ralph.engine import run_loop as engine_run_loop
 
 _interrupted = False
@@ -116,6 +123,20 @@ def run(
 
     log_dir = Path.cwd() / RALPH_DIR_NAME
 
+    # Check for resume
+    start_iter = 1
+    existing = check_resume(log_dir, plan)
+    if existing:
+        from rich.prompt import Confirm
+
+        resume_iter = existing.get("current_iter", 0)
+        prev_status = existing.get("status", "unknown")
+        if Confirm.ask(
+            f"Previous run found ({prev_status} at iteration {resume_iter}). Resume?",
+            default=True,
+        ):
+            start_iter = resume_iter
+
     # Header
     ui.header(
         f"Ralph Wiggum Loop\n"
@@ -135,6 +156,7 @@ def run(
             config,
             on_event=_headless_event_handler,
             is_interrupted=lambda: _interrupted,
+            start_iter=start_iter,
         )
     finally:
         signal.signal(signal.SIGINT, prev_handler)
