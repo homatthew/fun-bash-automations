@@ -210,7 +210,7 @@ def run_loop(
 
         # Check for completion signal
         log_text = log_file.read_text()
-        if "RALPH_DONE" in log_text:
+        if "RALPH_DONE" in log_text and i >= config.min_iter:
             elapsed = int(time.time() - loop_start)
             meta["status"] = "done"
             write_meta(meta_path, meta)

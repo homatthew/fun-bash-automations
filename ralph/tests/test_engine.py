@@ -523,3 +523,51 @@ def test_run_loop_interrupt_kills_on_timeout(mock_popen, tmp_path):
     mock_proc.terminate.assert_called_once()
     mock_proc.kill.assert_called_once()
     assert reason == "interrupted"
+
+
+# --- min_iter tests ---
+
+
+def _make_config_with_min(tmp_path, max_iter=5, min_iter=0) -> EngineConfig:
+    """Helper to create an EngineConfig with min_iter for tests."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Test Plan\n\n1. Do something\n")
+    return EngineConfig(
+        plan=plan,
+        max_iter=max_iter,
+        tools="Edit Read Write",
+        sandbox=True,
+        ralph_dir=tmp_path / ".ralph",
+        min_iter=min_iter,
+    )
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_ignores_ralph_done_before_min_iter(mock_popen, tmp_path):
+    """RALPH_DONE on iteration 1 should be ignored when min_iter=3."""
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            return _mock_popen(["Working...\n", "RALPH_DONE\n"])
+        return _mock_popen(["Final iteration\n", "RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config_with_min(tmp_path, max_iter=5, min_iter=3)
+    events = []
+    reason = run_loop(config, on_event=lambda ev: events.append(ev))
+
+    assert reason == "done"
+    # Should have run at least 3 iterations (RALPH_DONE ignored on 1 and 2)
+    iter_starts = [ev for ev in events if ev.kind == Event.ITERATION_START]
+    assert len(iter_starts) >= 3
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_accepts_ralph_done_at_min_iter(mock_popen, tmp_path):
+    """RALPH_DONE on iteration 1 should be accepted when min_iter=1."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config_with_min(tmp_path, max_iter=10, min_iter=1)
+    reason = run_loop(config, on_event=lambda ev: None)
+    assert reason == "done"
