@@ -571,3 +571,58 @@ def test_run_loop_accepts_ralph_done_at_min_iter(mock_popen, tmp_path):
     config = _make_config_with_min(tmp_path, max_iter=10, min_iter=1)
     reason = run_loop(config, on_event=lambda ev: None)
     assert reason == "done"
+
+
+# --- status.md validation tests ---
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_rejects_ralph_done_with_incomplete_status(mock_popen, tmp_path):
+    """RALPH_DONE should be ignored if status.md has unchecked boxes."""
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _mock_popen(["RALPH_DONE\n"])
+        return _mock_popen(["Finishing up\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config(tmp_path, max_iter=2)
+
+    # Pre-create status.md with incomplete progress
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    (ralph_dir / "status.md").write_text(
+        "- [x] Step 1 (DONE)\n- [ ] Step 2\n"
+    )
+
+    reason = run_loop(config, on_event=lambda ev: None)
+    # Should NOT return "done" — status.md has unchecked boxes
+    assert reason == "max_iterations"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_accepts_ralph_done_with_complete_status(mock_popen, tmp_path):
+    """RALPH_DONE should be accepted when all status.md boxes are checked."""
+    mock_popen.return_value = _mock_popen(["All done\n", "RALPH_DONE\n"])
+    config = _make_config(tmp_path, max_iter=5)
+
+    # Pre-create status.md with complete progress
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    (ralph_dir / "status.md").write_text(
+        "- [x] Step 1 (DONE)\n- [x] Step 2 (DONE)\n"
+    )
+
+    reason = run_loop(config, on_event=lambda ev: None)
+    assert reason == "done"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_accepts_ralph_done_with_no_status_file(mock_popen, tmp_path):
+    """RALPH_DONE should be accepted if status.md doesn't exist (no progress tracking)."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config(tmp_path, max_iter=5)
+    reason = run_loop(config, on_event=lambda ev: None)
+    assert reason == "done"
