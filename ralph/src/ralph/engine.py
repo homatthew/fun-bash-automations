@@ -97,6 +97,22 @@ def check_resume(ralph_dir: Path, plan: Path) -> dict | None:
     return meta
 
 
+def _ensure_git_exclude(dirname: str) -> None:
+    """Add dirname to .git/info/exclude if not already present.
+
+    This keeps .ralph/ invisible to git without modifying .gitignore.
+    Silently does nothing if not in a git repo.
+    """
+    exclude = Path(".git") / "info" / "exclude"
+    if not exclude.is_file():
+        return
+    content = exclude.read_text()
+    if dirname in content.splitlines():
+        return
+    with open(exclude, "a") as f:
+        f.write(f"{dirname}\n")
+
+
 def run_loop(
     config: EngineConfig,
     on_event: Callable[[IterationEvent], None],
@@ -111,6 +127,7 @@ def run_loop(
 
     ralph_dir = config.ralph_dir
     ralph_dir.mkdir(exist_ok=True)
+    _ensure_git_exclude(ralph_dir.name)
     meta_path = ralph_dir / "meta.json"
     status_file = ralph_dir / "status.md"
 
