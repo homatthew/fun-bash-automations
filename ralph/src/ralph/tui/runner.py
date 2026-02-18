@@ -20,6 +20,7 @@ from ralph.engine import (
     check_resume,
 )
 from ralph.engine import run_loop as engine_run_loop
+from ralph.tui.widgets import SplitHandle
 
 
 def format_elapsed(seconds: int) -> str:
@@ -110,6 +111,9 @@ class LoopRunner(Screen):
                     wrap=True,
                     auto_scroll=True,
                 )
+            yield SplitHandle(
+                "runner-log", "runner-side", left_min=40, right_min=24, id="runner-split"
+            )
             with Vertical(id="runner-side"):
                 yield Label("Status", classes="panel-title")
                 yield Markdown(id="status-content")

@@ -25,9 +25,8 @@ Screen {
 }
 
 #plan-panel {
-    width: 32;
-    min-width: 28;
-    border-right: solid #263140;
+    width: 28;
+    min-width: 20;
     padding: 1;
     background: #131820;
 }
@@ -38,24 +37,36 @@ Screen {
     background: #0f141b;
 }
 
+#filter-input:focus {
+    border: tall #9fe8d2;
+}
+
 #plan-list {
     height: 1fr;
 }
 
+PlanItem {
+    padding: 0 1;
+}
+
+PlanItem:hover {
+    background: #1a2233;
+}
+
 #plan-hint {
     dock: bottom;
-    color: #b7c1d1;
+    color: #6b7a8d;
     padding-top: 1;
 }
 
 NewPlanItem {
-    border-bottom: solid #263140;
+    border-bottom: dashed #263140;
+    padding: 0 1;
 }
 
 #preview-panel {
     width: 2fr;
     padding: 1 2;
-    border-right: solid #263140;
     background: #10151c;
 }
 
@@ -66,7 +77,7 @@ NewPlanItem {
 
 #ops-panel {
     width: 1fr;
-    min-width: 30;
+    min-width: 24;
     padding: 1 2;
     background: #131820;
 }
@@ -107,7 +118,6 @@ NewPlanItem {
 
 #runner-log {
     width: 2fr;
-    border-right: solid #263140;
     padding: 1 1 1 2;
     background: #0f141b;
 }
@@ -118,7 +128,7 @@ NewPlanItem {
 
 #runner-side {
     width: 1fr;
-    min-width: 30;
+    min-width: 24;
     padding: 1 2;
     background: #131820;
 }
