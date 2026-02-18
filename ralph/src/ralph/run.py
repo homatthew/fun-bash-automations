@@ -75,7 +75,9 @@ def run(
     no_sandbox: bool = typer.Option(
         False, "--no-sandbox", help="Disable sandbox enforcement"
     ),
-    min_iter: int = typer.Option(0, "--min-iter", help="Minimum iterations before accepting RALPH_DONE"),
+    min_iter: int = typer.Option(
+        0, "--min-iter", help="Min iterations before accepting RALPH_DONE"
+    ),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
     # Load .ralphrc config — CLI args take priority
@@ -96,7 +98,10 @@ def run(
     if not no_tui:
         from ralph.tui.app import RalphApp
 
-        app = RalphApp(plan=plan, max_iter=max_iter, min_iter=min_iter, tools=tools, sandbox=sandbox_enabled)
+        app = RalphApp(
+            plan=plan, max_iter=max_iter, min_iter=min_iter,
+            tools=tools, sandbox=sandbox_enabled,
+        )
         app.run()
         return
 
