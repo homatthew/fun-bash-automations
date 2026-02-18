@@ -34,7 +34,8 @@ def load_ralphrc(path: Path | None = None) -> dict:
         detail = "\n".join(f"  line {n}: {text}" for n, text in bad_lines)
         raise ValueError(
             f".ralphrc contains disallowed lines. "
-            f"Only RALPH_TOOLS, RALPH_MAX_ITER, RALPH_MIN_ITER, and RALPH_SANDBOX are permitted.\n{detail}"
+            f"Only RALPH_TOOLS, RALPH_MAX_ITER, RALPH_MIN_ITER, "
+            f"and RALPH_SANDBOX are permitted.\n{detail}"
         )
 
     for line in rc.read_text().splitlines():
