@@ -1,8 +1,12 @@
 """Core iteration engine — shared constants, helpers, and loop logic."""
 
 import json
+import os
+import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 
@@ -86,4 +90,127 @@ def run_loop(
 
     Returns the reason for stopping: "done", "max_iterations", or "interrupted".
     """
-    raise NotImplementedError("run_loop not yet implemented")
+    from ralph.prompt import build_prompt
+
+    ralph_dir = config.ralph_dir
+    ralph_dir.mkdir(exist_ok=True)
+    meta_path = ralph_dir / "meta.json"
+    status_file = ralph_dir / "status.md"
+
+    meta = {
+        "plan": str(config.plan),
+        "pid": os.getpid(),
+        "start_time": datetime.now().isoformat(),
+        "max_iter": config.max_iter,
+        "status": "running",
+        "current_iter": 0,
+    }
+    write_meta(meta_path, meta)
+    loop_start = time.time()
+
+    for i in range(start_iter, config.max_iter + 1):
+        if is_interrupted():
+            elapsed = int(time.time() - loop_start)
+            meta["status"] = "interrupted"
+            write_meta(meta_path, meta)
+            on_event(IterationEvent(
+                kind=Event.DONE, iteration=i, max_iter=config.max_iter,
+                elapsed=elapsed, reason="interrupted",
+            ))
+            return "interrupted"
+
+        meta["current_iter"] = i
+        write_meta(meta_path, meta)
+
+        iter_start = time.time()
+        directives_file = ralph_dir / "directives.md"
+        log_file = ralph_dir / f"iteration-{i}.log"
+
+        on_event(IterationEvent(
+            kind=Event.ITERATION_START, iteration=i, max_iter=config.max_iter,
+        ))
+
+        # Check for directives
+        prompt_extra = ""
+        if directives_file.is_file():
+            directive_content = directives_file.read_text().strip()
+            if directive_content:
+                prompt_extra = (
+                    f"\n## Operator directive (priority)\n{directive_content}\n"
+                )
+                archive = ralph_dir / f"directive-consumed-{i}.md"
+                directives_file.rename(archive)
+
+        # Build prompt
+        prompt_content = build_prompt(str(config.plan), status_file)
+        if prompt_extra:
+            prompt_content = prompt_content + "\n" + prompt_extra
+
+        on_event(IterationEvent(
+            kind=Event.PROMPT_BUILT, iteration=i, max_iter=config.max_iter,
+            prompt=prompt_content,
+        ))
+
+        # Build command
+        cmd = ["claude", "--print", "--allowedTools", config.tools]
+        if config.sandbox:
+            cmd.extend(["--settings", SANDBOX_SETTINGS])
+
+        # Run subprocess, stream output
+        with open(log_file, "w") as lf:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            proc.stdin.write(prompt_content)
+            proc.stdin.close()
+
+            for line in proc.stdout:
+                lf.write(line)
+                on_event(IterationEvent(
+                    kind=Event.OUTPUT_LINE, iteration=i, line=line,
+                ))
+
+            exit_code = proc.wait()
+
+        iter_elapsed = int(time.time() - iter_start)
+        on_event(IterationEvent(
+            kind=Event.ITERATION_END, iteration=i, max_iter=config.max_iter,
+            elapsed=iter_elapsed, exit_code=exit_code,
+        ))
+
+        # Check for completion signal
+        log_text = log_file.read_text()
+        if "RALPH_DONE" in log_text:
+            elapsed = int(time.time() - loop_start)
+            meta["status"] = "done"
+            write_meta(meta_path, meta)
+            on_event(IterationEvent(
+                kind=Event.DONE, iteration=i, max_iter=config.max_iter,
+                elapsed=elapsed, reason="done",
+            ))
+            return "done"
+
+        # Check interrupt after iteration
+        if is_interrupted():
+            elapsed = int(time.time() - loop_start)
+            meta["status"] = "interrupted"
+            write_meta(meta_path, meta)
+            on_event(IterationEvent(
+                kind=Event.DONE, iteration=i, max_iter=config.max_iter,
+                elapsed=elapsed, reason="interrupted",
+            ))
+            return "interrupted"
+
+    # Reached max iterations
+    elapsed = int(time.time() - loop_start)
+    meta["status"] = "max_iterations"
+    write_meta(meta_path, meta)
+    on_event(IterationEvent(
+        kind=Event.DONE, iteration=config.max_iter, max_iter=config.max_iter,
+        elapsed=elapsed, reason="max_iterations",
+    ))
+    return "max_iterations"
