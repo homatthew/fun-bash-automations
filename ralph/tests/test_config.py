@@ -3,7 +3,8 @@ from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
 
 def test_default_tools_contains_core_entries():
     assert "Edit" in RALPH_DEFAULT_TOOLS
-    assert "Bash(git add:*)" in RALPH_DEFAULT_TOOLS
+    assert "Bash(git:*)" in RALPH_DEFAULT_TOOLS
+    assert "Bash(pytest:*)" in RALPH_DEFAULT_TOOLS
 
 
 def test_load_ralphrc_returns_defaults_when_no_file(tmp_path):

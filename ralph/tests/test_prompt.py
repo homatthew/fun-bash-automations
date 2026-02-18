@@ -13,6 +13,15 @@ def test_build_prompt_warns_against_premature_done(tmp_path):
     assert "RALPH_DONE" in prompt
 
 
+def test_build_prompt_forbids_push_to_main(tmp_path):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n1. Do stuff\n")
+    prompt = build_prompt(str(plan))
+    assert "git push" in prompt.lower()
+    assert "main" in prompt
+    assert "master" in prompt
+
+
 def test_parse_progress_all_done():
     assert parse_progress("- [x] Step 1\n- [x] Step 2\n- [x] Step 3\n") == (3, 3)
 
