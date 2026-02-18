@@ -1,4 +1,4 @@
-"""LoopRunner screen — streaming iteration loop with status sidebar."""
+"""LoopRunner screen — streaming iteration loop with live output."""
 
 import json
 import os
@@ -56,6 +56,14 @@ class IterationBoundary(Message):
         super().__init__()
 
 
+class PromptSent(Message):
+    """Carries the prompt text sent to Claude for I/O transparency."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        super().__init__()
+
+
 class LoopFinished(Message):
     """The entire loop has completed."""
 
@@ -71,6 +79,7 @@ class LoopRunner(Screen):
 
     BINDINGS = [
         ("d", "inject_directive", "Directive"),
+        ("b", "back_to_picker", "Back"),
         ("q", "quit_loop", "Quit"),
     ]
 
@@ -89,24 +98,34 @@ class LoopRunner(Screen):
         self._start_time = 0.0
         self._current_iter = 0
         self._interrupted = False
+        self._finished = False
+        self._last_prompt = ""
 
     def compose(self) -> ComposeResult:
         yield Static(id="header-bar")
         with Horizontal(id="runner-body"):
-            yield RichLog(
-                id="output-pane",
-                markup=True,
-                wrap=True,
-                auto_scroll=True,
-            )
-            with Vertical(id="status-sidebar"):
-                yield Label("Status", id="status-label")
+            with Vertical(id="runner-log"):
+                yield Label("Live Output", classes="panel-title")
+                yield RichLog(
+                    id="output-pane",
+                    markup=True,
+                    wrap=True,
+                    auto_scroll=True,
+                )
+            with Vertical(id="runner-side"):
+                yield Label("Status", classes="panel-title")
                 yield Markdown(id="status-content")
+                yield Label("Prompt", classes="panel-title")
+                yield Markdown(id="prompt-content")
+                yield Label("Controls", classes="panel-title")
+                yield Markdown(id="controls-content")
         yield Footer()
 
     def on_mount(self) -> None:
         self._start_time = time.time()
         self._update_header()
+        self._update_controls()
+        self._refresh_status()
         self.set_interval(1.0, self._tick)
         self.set_interval(3.0, self._refresh_status)
         self.run_loop()
@@ -135,6 +154,21 @@ class LoopRunner(Screen):
                 md_widget.update(content)
         else:
             md_widget.update("*Waiting for status...*")
+
+    def _update_controls(self) -> None:
+        controls = (
+            "- [bold]d[/bold] Inject directive\n"
+            "- [bold]b[/bold] Back to plans\n"
+            "- [bold]q[/bold] Quit\n"
+        )
+        self.query_one("#controls-content", Markdown).update(controls)
+
+    def _update_prompt_preview(self, text: str) -> None:
+        lines = text.splitlines()
+        if len(lines) > 120:
+            lines = lines[:120] + ["", f"... ({len(text.splitlines()) - 120} more lines)"]
+        preview = "```markdown\n" + "\n".join(lines) + "\n```"
+        self.query_one("#prompt-content", Markdown).update(preview)
 
     @work(thread=True)
     def run_loop(self) -> None:
@@ -192,6 +226,8 @@ class LoopRunner(Screen):
             if prompt_extra:
                 prompt_content = prompt_content + "\n" + prompt_extra
 
+            self.post_message(PromptSent(prompt_content))
+
             # Run claude subprocess
             cmd = ["claude", "--print", "--allowedTools", effective_tools]
             if self.sandbox:
@@ -236,6 +272,15 @@ class LoopRunner(Screen):
             _write_meta(meta_path, meta)
             self.post_message(LoopFinished("max_iterations", effective_max, elapsed))
 
+    @on(PromptSent)
+    def on_prompt_sent(self, message: PromptSent) -> None:
+        log = self.query_one("#output-pane", RichLog)
+        for line in message.text.splitlines():
+            log.write(f"[dim]{line}[/dim]")
+        log.write("")
+        self._last_prompt = message.text
+        self._update_prompt_preview(message.text)
+
     @on(OutputLine)
     def on_output_line(self, message: OutputLine) -> None:
         self.query_one("#output-pane", RichLog).write(message.text.rstrip("\n"))
@@ -251,6 +296,7 @@ class LoopRunner(Screen):
 
     @on(LoopFinished)
     def on_loop_finished(self, message: LoopFinished) -> None:
+        self._finished = True
         log = self.query_one("#output-pane", RichLog)
         elapsed_str = format_elapsed(message.elapsed)
         if message.reason == "done":
@@ -259,12 +305,20 @@ class LoopRunner(Screen):
             log.write(f"\n⚠ Ralph interrupted at iteration {message.iterations} ({elapsed_str})")
         else:
             log.write(f"\n✗ Ralph hit max iterations ({message.iterations}) after {elapsed_str}")
+        log.write("\nPress [bold]b[/bold] to pick another plan, [bold]q[/bold] to quit.")
 
     def action_inject_directive(self) -> None:
         self.app.push_screen(DirectiveInput())
 
+    def action_back_to_picker(self) -> None:
+        if self._finished:
+            self.dismiss(None)
+
     def action_quit_loop(self) -> None:
-        self._interrupted = True
+        if self._finished:
+            self.app.exit()
+        else:
+            self._interrupted = True
 
 
 class DirectiveInput(Screen):

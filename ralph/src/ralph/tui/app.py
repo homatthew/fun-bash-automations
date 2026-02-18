@@ -30,7 +30,8 @@ class RalphApp(App):
     def on_mount(self) -> None:
         if self.plan_path:
             self.push_screen(
-                LoopRunner(self.plan_path, self.max_iter, self.tools_override, self.sandbox)
+                LoopRunner(self.plan_path, self.max_iter, self.tools_override, self.sandbox),
+                callback=self._on_runner_done,
             )
         else:
             self.push_screen(PlanPicker(), callback=self._on_plan_selected)
@@ -39,4 +40,11 @@ class RalphApp(App):
         if plan is None:
             self.exit()
         else:
-            self.push_screen(LoopRunner(plan, self.max_iter, self.tools_override, self.sandbox))
+            self.push_screen(
+                LoopRunner(plan, self.max_iter, self.tools_override, self.sandbox),
+                callback=self._on_runner_done,
+            )
+
+    def _on_runner_done(self, result: object) -> None:
+        """Runner dismissed — return to the picker."""
+        self.push_screen(PlanPicker(), callback=self._on_plan_selected)
