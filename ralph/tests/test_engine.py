@@ -11,6 +11,7 @@ from ralph.engine import (
     EngineConfig,
     Event,
     IterationEvent,
+    check_resume,
     read_meta,
     run_loop,
     write_meta,
@@ -333,3 +334,41 @@ def test_run_loop_meta_status_on_max_iter(mock_popen, tmp_path):
     run_loop(config, on_event=lambda ev: None)
     meta = read_meta(tmp_path / ".ralph")
     assert meta["status"] == "max_iterations"
+
+
+# --- check_resume tests ---
+
+
+def test_check_resume_returns_none_when_no_meta(tmp_path):
+    assert check_resume(tmp_path, Path("plan.md")) is None
+
+
+def test_check_resume_returns_none_when_different_plan(tmp_path):
+    write_meta(tmp_path / "meta.json", {"plan": "/other/old-plan.md", "status": "interrupted"})
+    assert check_resume(tmp_path, Path("/different/new-plan.md")) is None
+
+
+def test_check_resume_returns_none_when_done(tmp_path):
+    write_meta(tmp_path / "meta.json", {"plan": "/path/plan.md", "status": "done"})
+    assert check_resume(tmp_path, Path("/path/plan.md")) is None
+
+
+def test_check_resume_returns_none_when_running(tmp_path):
+    write_meta(tmp_path / "meta.json", {"plan": "/path/plan.md", "status": "running"})
+    assert check_resume(tmp_path, Path("/path/plan.md")) is None
+
+
+def test_check_resume_returns_meta_when_interrupted(tmp_path):
+    meta = {"plan": "/path/plan.md", "status": "interrupted", "current_iter": 3}
+    write_meta(tmp_path / "meta.json", meta)
+    result = check_resume(tmp_path, Path("/path/plan.md"))
+    assert result is not None
+    assert result["current_iter"] == 3
+
+
+def test_check_resume_returns_meta_when_max_iterations(tmp_path):
+    meta = {"plan": "/path/plan.md", "status": "max_iterations", "current_iter": 10}
+    write_meta(tmp_path / "meta.json", meta)
+    result = check_resume(tmp_path, Path("/path/plan.md"))
+    assert result is not None
+    assert result["current_iter"] == 10
