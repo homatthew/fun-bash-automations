@@ -180,15 +180,24 @@ def run_loop(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
             )
             proc.stdin.write(prompt_content)
             proc.stdin.close()
 
-            for line in proc.stdout:
+            for line in iter(proc.stdout.readline, ""):
                 lf.write(line)
                 on_event(IterationEvent(
                     kind=Event.OUTPUT_LINE, iteration=i, line=line,
                 ))
+                if is_interrupted():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    break
 
             exit_code = proc.wait()
 
