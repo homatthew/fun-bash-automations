@@ -5,15 +5,14 @@ from pathlib import Path
 import typer
 
 from ralph import ui
-
-RALPH_DIR = Path.cwd() / ".ralph"
+from ralph.engine import RALPH_DIR_NAME
 
 
 def inject(
     message: str | None = typer.Argument(None, help="Directive text (reads from stdin if omitted)"),
 ) -> None:
     """Queue a directive for the next Ralph iteration."""
-    directives = Path.cwd() / ".ralph" / "directives.md"
+    directives = Path.cwd() / RALPH_DIR_NAME / "directives.md"
 
     if message is None:
         ui.console.print("Enter directive (Ctrl-D to finish):")
