@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from ralph import ui
+from ralph.engine import RALPH_DIR_NAME
 
 
 def _is_running(pid: int) -> bool:
@@ -19,7 +20,7 @@ def _is_running(pid: int) -> bool:
 
 def status() -> None:
     """Show current Ralph session state."""
-    ralph_dir = Path.cwd() / ".ralph"
+    ralph_dir = Path.cwd() / RALPH_DIR_NAME
     meta_path = ralph_dir / "meta.json"
 
     if not meta_path.is_file():

@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from ralph import ui
+from ralph.engine import RALPH_DIR_NAME
 
 
 def logs(
@@ -13,7 +14,7 @@ def logs(
     last: bool = typer.Option(False, "--last", "-l", help="Show most recent iteration log"),
 ) -> None:
     """Browse Ralph iteration logs."""
-    ralph_dir = Path.cwd() / ".ralph"
+    ralph_dir = Path.cwd() / RALPH_DIR_NAME
 
     if not ralph_dir.is_dir():
         ui.error("No .ralph/ directory found.")

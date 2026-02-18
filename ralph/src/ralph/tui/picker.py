@@ -26,8 +26,8 @@ from textual.widgets import (
     Static,
 )
 
-PLANS_DIR = Path.home() / ".claude" / "plans"
-RALPH_DIR = Path.cwd() / ".ralph"
+from ralph.engine import PLANS_DIR, RALPH_DIR_NAME
+
 IDEA_PROMPT = (
     "You are Ralph's plan generator.\n"
     "Create a concise, actionable plan in Markdown for the following goal.\n"
@@ -329,7 +329,8 @@ class PlanPicker(ModalScreen[Path | None]):
         self._rebuild_list("")
 
     def _refresh_status(self) -> None:
-        status_file = RALPH_DIR / "status.md"
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
+        status_file = ralph_dir / "status.md"
         md_widget = self.query_one("#status-pane", Markdown)
         if status_file.is_file():
             content = status_file.read_text().strip()
@@ -341,15 +342,16 @@ class PlanPicker(ModalScreen[Path | None]):
             md_widget.update("*No status file yet.*")
 
     def _refresh_tail(self) -> None:
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
         tail = self.query_one("#tail-pane", RichLog)
-        if not RALPH_DIR.is_dir():
+        if not ralph_dir.is_dir():
             if self._tail_path is not None:
                 tail.clear()
                 tail.write("[dim]No run logs yet.[/dim]")
                 self._tail_path = None
             return
         logs = sorted(
-            RALPH_DIR.glob("iteration-*.log"),
+            ralph_dir.glob("iteration-*.log"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )

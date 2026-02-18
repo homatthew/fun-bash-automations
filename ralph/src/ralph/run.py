@@ -11,7 +11,7 @@ from rich.prompt import IntPrompt
 
 from ralph import ui
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
-from ralph.engine import PLANS_DIR, EngineConfig, Event, IterationEvent
+from ralph.engine import PLANS_DIR, RALPH_DIR_NAME, EngineConfig, Event, IterationEvent
 from ralph.engine import run_loop as engine_run_loop
 
 _interrupted = False
@@ -114,7 +114,7 @@ def run(
         sandbox=sandbox_enabled,
     )
 
-    log_dir = Path.cwd() / ".ralph"
+    log_dir = Path.cwd() / RALPH_DIR_NAME
 
     # Header
     ui.header(
@@ -141,7 +141,7 @@ def run(
 
     # Summary
     elapsed = int(time.time() - start_time)
-    status_file = Path.cwd() / ".ralph" / "status.md"
+    status_file = Path.cwd() / RALPH_DIR_NAME / "status.md"
     if reason == "done":
         ui.success(f"Ralph complete ({elapsed}s)\nLogs in .ralph/")
     elif reason == "interrupted":
