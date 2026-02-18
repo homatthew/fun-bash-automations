@@ -107,7 +107,7 @@ def run_loop(
 
     Returns the reason for stopping: "done", "max_iterations", or "interrupted".
     """
-    from ralph.prompt import build_prompt
+    from ralph.prompt import build_prompt, parse_progress
 
     ralph_dir = config.ralph_dir
     ralph_dir.mkdir(exist_ok=True)
@@ -211,6 +211,11 @@ def run_loop(
         # Check for completion signal
         log_text = log_file.read_text()
         if "RALPH_DONE" in log_text and i >= config.min_iter:
+            # Validate status.md — reject if unchecked boxes remain
+            if status_file.is_file():
+                done, total = parse_progress(status_file.read_text())
+                if total > 0 and done < total:
+                    continue  # keep iterating
             elapsed = int(time.time() - loop_start)
             meta["status"] = "done"
             write_meta(meta_path, meta)
