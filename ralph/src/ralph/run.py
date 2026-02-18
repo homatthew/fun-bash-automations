@@ -1,9 +1,6 @@
 """ralph run — core iteration loop."""
 
-import json
-import os
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -14,10 +11,8 @@ from rich.prompt import IntPrompt
 
 from ralph import ui
 from ralph.config import RALPH_DEFAULT_TOOLS, load_ralphrc
-from ralph.prompt import build_prompt
-
-PLANS_DIR = Path.home() / ".claude" / "plans"
-SANDBOX_SETTINGS = json.dumps({"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}})
+from ralph.engine import PLANS_DIR, EngineConfig, Event, IterationEvent
+from ralph.engine import run_loop as engine_run_loop
 
 _interrupted = False
 
@@ -52,11 +47,15 @@ def _pick_plan() -> Path:
     return plans[choice - 1]
 
 
-def _write_meta(meta_path: Path, data: dict) -> None:
-    """Atomic write of meta.json (write tmp, rename)."""
-    tmp = meta_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.rename(meta_path)
+def _headless_event_handler(ev: IterationEvent) -> None:
+    """Map engine events to Rich console output."""
+    if ev.kind == Event.ITERATION_START:
+        ui.iter_header(ev.iteration, ev.max_iter, datetime.now().strftime("%H:%M:%S"))
+    elif ev.kind == Event.OUTPUT_LINE:
+        sys.stdout.write(ev.line)
+        sys.stdout.flush()
+    elif ev.kind == Event.ITERATION_END:
+        ui.header(f"Iteration {ev.iteration}/{ev.max_iter} complete ({ev.elapsed}s)")
 
 
 def run(
@@ -66,7 +65,9 @@ def run(
     max_iter: int = typer.Option(10, "--max", "-n", help="Max iterations"),
     tools: str | None = typer.Option(None, "--tools", "-t", help="Tool scope override"),
     no_tui: bool = typer.Option(False, "--no-tui", help="Disable TUI, use headless mode"),
-    no_sandbox: bool = typer.Option(False, "--no-sandbox", help="Disable sandbox enforcement"),
+    no_sandbox: bool = typer.Option(
+        False, "--no-sandbox", help="Disable sandbox enforcement"
+    ),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
     # Load .ralphrc config — CLI args take priority
@@ -102,32 +103,23 @@ def run(
         ui.error(f"Plan not found: {plan}")
         raise typer.Exit(1)
 
-    plan_name = plan.name
-
     effective_tools = tools or rc["tools"] or RALPH_DEFAULT_TOOLS
     effective_max = max_iter if max_iter != 10 else (rc["max_iter"] or 10)
 
-    # Set up .ralph/ directory
-    log_dir = Path.cwd() / ".ralph"
-    log_dir.mkdir(exist_ok=True)
-    status_file = log_dir / "status.md"
-    meta_path = log_dir / "meta.json"
-    directives_file = log_dir / "directives.md"
+    # Build engine config
+    config = EngineConfig(
+        plan=plan,
+        max_iter=effective_max,
+        tools=effective_tools,
+        sandbox=sandbox_enabled,
+    )
 
-    meta = {
-        "plan": str(plan),
-        "pid": os.getpid(),
-        "start_time": datetime.now().isoformat(),
-        "max_iter": effective_max,
-        "status": "running",
-        "current_iter": 0,
-    }
-    _write_meta(meta_path, meta)
+    log_dir = Path.cwd() / ".ralph"
 
     # Header
     ui.header(
         f"Ralph Wiggum Loop\n"
-        f"Plan:       {plan_name}\n"
+        f"Plan:       {plan.name}\n"
         f"Max iter:   {effective_max}\n"
         f"Sandbox:    {'on' if sandbox_enabled else 'OFF'}\n"
         f"Tools:      {effective_tools[:60]}…\n"
@@ -139,91 +131,25 @@ def run(
     start_time = time.time()
 
     try:
-        for i in range(1, effective_max + 1):
-            if _interrupted:
-                break
-
-            meta["current_iter"] = i
-            _write_meta(meta_path, meta)
-
-            iter_start = time.time()
-            log_file = log_dir / f"iteration-{i}.log"
-
-            # Check for directives
-            prompt_extra = ""
-            if directives_file.is_file():
-                directive_content = directives_file.read_text().strip()
-                if directive_content:
-                    prompt_extra = f"\n## Operator directive (priority)\n{directive_content}\n"
-                    # Archive the directive
-                    archive = log_dir / f"directive-consumed-{i}.md"
-                    directives_file.rename(archive)
-
-            # Build prompt
-            prompt_content = build_prompt(str(plan), status_file)
-            if prompt_extra:
-                prompt_content = prompt_content + "\n" + prompt_extra
-
-            ui.iter_header(i, effective_max, datetime.now().strftime("%H:%M:%S"))
-
-            # Run claude, stream to both terminal and log file
-            cmd = ["claude", "--print", "--allowedTools", effective_tools]
-            if sandbox_enabled:
-                cmd.extend(["--settings", SANDBOX_SETTINGS])
-            with open(log_file, "w") as lf:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                proc.stdin.write(prompt_content)
-                proc.stdin.close()
-
-                for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    lf.write(line)
-
-                exit_code = proc.wait()
-
-            iter_elapsed = int(time.time() - iter_start)
-            ui.header(f"Iteration {i}/{effective_max} complete ({iter_elapsed}s)")
-
-            # Check for completion signal
-            log_text = log_file.read_text()
-            if "RALPH_DONE" in log_text:
-                elapsed = int(time.time() - start_time)
-                meta["status"] = "done"
-                _write_meta(meta_path, meta)
-                ui.success(
-                    f"Ralph complete after {i} iteration(s) ({elapsed}s)\nLogs in {log_dir}/"
-                )
-                _print_status_summary(status_file)
-                return
-
-            # Warn on non-zero exit
-            if exit_code != 0:
-                ui.warn(f"claude exited with code {exit_code} on iteration {i}\nSee {log_file}")
-
+        reason = engine_run_loop(
+            config,
+            on_event=_headless_event_handler,
+            is_interrupted=lambda: _interrupted,
+        )
     finally:
         signal.signal(signal.SIGINT, prev_handler)
 
-    # Reached max iterations or interrupted
+    # Summary
     elapsed = int(time.time() - start_time)
-    if _interrupted:
-        meta["status"] = "interrupted"
-        _write_meta(meta_path, meta)
-        ui.warn(
-            f"Ralph interrupted at iteration {meta['current_iter']} ({elapsed}s)\n"
-            f"Logs in {log_dir}/"
-        )
+    status_file = Path.cwd() / ".ralph" / "status.md"
+    if reason == "done":
+        ui.success(f"Ralph complete ({elapsed}s)\nLogs in .ralph/")
+    elif reason == "interrupted":
+        ui.warn(f"Ralph interrupted ({elapsed}s)\nLogs in .ralph/")
     else:
-        meta["status"] = "max_iterations"
-        _write_meta(meta_path, meta)
-        ui.error(f"Ralph hit max iterations ({effective_max}) after {elapsed}s\nLogs in {log_dir}/")
-
+        ui.error(
+            f"Ralph hit max iterations ({effective_max}) after {elapsed}s\nLogs in .ralph/"
+        )
     _print_status_summary(status_file)
 
 
