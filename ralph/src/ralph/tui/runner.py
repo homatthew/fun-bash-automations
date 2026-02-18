@@ -96,6 +96,7 @@ class LoopRunner(Screen):
         self._interrupted = False
         self._finished = False
         self._last_prompt = ""
+        self._progress: tuple[int, int] = (0, 0)
 
     def compose(self) -> ComposeResult:
         yield Static(id="header-bar")
@@ -133,21 +134,32 @@ class LoopRunner(Screen):
         elapsed = int(time.time() - self._start_time) if self._start_time else 0
         status_icon = "\u2022" if not self._interrupted else "!"
         sandbox_str = "on" if self.sandbox else "OFF"
+
+        progress_str = ""
+        if self._progress[1] > 0:
+            done, total = self._progress
+            pct = int(done / total * 100)
+            progress_str = f"    Steps: {done}/{total} ({pct}%)"
+
         self.query_one("#header-bar", Static).update(
             f"  Plan: {self.plan.name}    "
             f"Iter: {self._current_iter}/{self.max_iter}    "
             f"Sandbox: {sandbox_str}    "
-            f"Elapsed: {format_elapsed(elapsed)}  {status_icon}"
+            f"Elapsed: {format_elapsed(elapsed)}"
+            f"{progress_str}  {status_icon}"
         )
 
     def _refresh_status(self) -> None:
         """Re-read .ralph/status.md and update the sidebar."""
+        from ralph.prompt import parse_progress
+
         status_file = Path.cwd() / RALPH_DIR_NAME / "status.md"
         md_widget = self.query_one("#status-content", Markdown)
         if status_file.is_file():
             content = status_file.read_text().strip()
             if content:
                 md_widget.update(content)
+                self._progress = parse_progress(content)
         else:
             md_widget.update("*Waiting for status...*")
 
