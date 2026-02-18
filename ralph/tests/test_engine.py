@@ -12,6 +12,7 @@ from ralph.engine import (
     EngineConfig,
     Event,
     IterationEvent,
+    _ensure_git_exclude,
     check_resume,
     read_meta,
     run_loop,
@@ -389,6 +390,36 @@ def test_check_resume_returns_meta_when_max_iterations(tmp_path):
     result = check_resume(tmp_path, Path("/path/plan.md"))
     assert result is not None
     assert result["current_iter"] == 10
+
+
+# --- _ensure_git_exclude tests ---
+
+
+def test_ensure_git_exclude_adds_entry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    git_info = tmp_path / ".git" / "info"
+    git_info.mkdir(parents=True)
+    exclude = git_info / "exclude"
+    exclude.write_text("# git ls-files --others --exclude-from=.git/info/exclude\n")
+    _ensure_git_exclude(".ralph")
+    assert ".ralph" in exclude.read_text().splitlines()
+
+
+def test_ensure_git_exclude_idempotent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    git_info = tmp_path / ".git" / "info"
+    git_info.mkdir(parents=True)
+    exclude = git_info / "exclude"
+    exclude.write_text(".ralph\n")
+    _ensure_git_exclude(".ralph")
+    # Should not duplicate
+    assert exclude.read_text().count(".ralph") == 1
+
+
+def test_ensure_git_exclude_no_git_dir(tmp_path, monkeypatch):
+    """Does nothing if not in a git repo."""
+    monkeypatch.chdir(tmp_path)
+    _ensure_git_exclude(".ralph")  # should not raise
 
 
 # --- Live output streaming tests ---
