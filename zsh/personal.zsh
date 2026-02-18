@@ -309,6 +309,9 @@ claude-deploy() {
     echo "Changes are now live"
 }
 
+alias claude='claude --dangerously-skip-permissions'
+alias codex="codex --dangerously-bypass-approvals-and-sandbox"
+
 # ==============================================================================
 # Beads (central task memory for AI agents)
 # ==============================================================================
