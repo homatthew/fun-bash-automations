@@ -1,6 +1,8 @@
 """Core iteration engine — shared constants, helpers, and loop logic."""
 
 import json
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 
 # --- Shared constants ---
@@ -25,3 +27,49 @@ def read_meta(ralph_dir: Path) -> dict | None:
         return json.loads(meta_path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+
+
+class Event(Enum):
+    """Events emitted during the iteration loop."""
+
+    ITERATION_START = auto()
+    PROMPT_BUILT = auto()
+    OUTPUT_LINE = auto()
+    ITERATION_END = auto()
+    DONE = auto()
+
+
+@dataclass
+class IterationEvent:
+    """Payload for an engine event.
+
+    Not all fields are populated for every event kind:
+    - ITERATION_START: iteration, max_iter
+    - PROMPT_BUILT: iteration, max_iter, prompt
+    - OUTPUT_LINE: iteration, line
+    - ITERATION_END: iteration, max_iter, elapsed, exit_code
+    - DONE: iteration, max_iter, elapsed, reason
+    """
+
+    kind: Event
+    iteration: int = 0
+    max_iter: int = 0
+    prompt: str = ""
+    line: str = ""
+    elapsed: int = 0
+    exit_code: int = 0
+    reason: str = ""
+
+
+@dataclass
+class EngineConfig:
+    """Configuration for the iteration engine.
+
+    Callers resolve CLI args, .ralphrc, and defaults before constructing this.
+    """
+
+    plan: Path
+    max_iter: int
+    tools: str
+    sandbox: bool
+    ralph_dir: Path = field(default_factory=lambda: Path.cwd() / ".ralph")
