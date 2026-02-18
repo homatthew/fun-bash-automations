@@ -10,7 +10,7 @@ RALPH_DEFAULT_TOOLS = (
     "Bash(npm test:*) Bash(npm run build:*) Bash(pytest:*)"
 )
 
-_ALLOWED_LINE = re.compile(r"^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=|RALPH_SANDBOX=)")
+_ALLOWED_LINE = re.compile(r"^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=|RALPH_MIN_ITER=|RALPH_SANDBOX=)")
 
 
 def load_ralphrc(path: Path | None = None) -> dict:
@@ -20,7 +20,7 @@ def load_ralphrc(path: Path | None = None) -> dict:
     Raises ValueError if .ralphrc contains disallowed lines.
     """
     rc = path or Path.cwd() / ".ralphrc"
-    result: dict = {"tools": None, "max_iter": None, "sandbox": None}
+    result: dict = {"tools": None, "max_iter": None, "min_iter": None, "sandbox": None}
 
     if not rc.is_file():
         return result
@@ -34,7 +34,7 @@ def load_ralphrc(path: Path | None = None) -> dict:
         detail = "\n".join(f"  line {n}: {text}" for n, text in bad_lines)
         raise ValueError(
             f".ralphrc contains disallowed lines. "
-            f"Only RALPH_TOOLS, RALPH_MAX_ITER, and RALPH_SANDBOX are permitted.\n{detail}"
+            f"Only RALPH_TOOLS, RALPH_MAX_ITER, RALPH_MIN_ITER, and RALPH_SANDBOX are permitted.\n{detail}"
         )
 
     for line in rc.read_text().splitlines():
@@ -44,6 +44,11 @@ def load_ralphrc(path: Path | None = None) -> dict:
         elif line.startswith("RALPH_MAX_ITER="):
             try:
                 result["max_iter"] = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("RALPH_MIN_ITER="):
+            try:
+                result["min_iter"] = int(line.split("=", 1)[1].strip())
             except ValueError:
                 pass
         elif line.startswith("RALPH_SANDBOX="):

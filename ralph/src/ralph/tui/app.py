@@ -18,19 +18,27 @@ class RalphApp(App):
         self,
         plan: Path | None = None,
         max_iter: int = 10,
+        min_iter: int = 0,
         tools: str | None = None,
         sandbox: bool = True,
     ):
         super().__init__()
         self.plan_path = plan
         self.max_iter = max_iter
+        self.min_iter = min_iter
         self.tools_override = tools
         self.sandbox = sandbox
 
     def on_mount(self) -> None:
         if self.plan_path:
             self.push_screen(
-                LoopRunner(self.plan_path, self.max_iter, self.tools_override, self.sandbox),
+                LoopRunner(
+                    self.plan_path,
+                    max_iter=self.max_iter,
+                    min_iter=self.min_iter,
+                    tools=self.tools_override,
+                    sandbox=self.sandbox,
+                ),
                 callback=self._on_runner_done,
             )
         else:
@@ -41,7 +49,13 @@ class RalphApp(App):
             self.exit()
         else:
             self.push_screen(
-                LoopRunner(plan, self.max_iter, self.tools_override, self.sandbox),
+                LoopRunner(
+                    plan,
+                    max_iter=self.max_iter,
+                    min_iter=self.min_iter,
+                    tools=self.tools_override,
+                    sandbox=self.sandbox,
+                ),
                 callback=self._on_runner_done,
             )
 

@@ -85,12 +85,14 @@ class LoopRunner(Screen):
         self,
         plan: Path,
         max_iter: int = 10,
+        min_iter: int = 0,
         tools: str | None = None,
         sandbox: bool = True,
     ) -> None:
         super().__init__()
         self.plan = plan
         self.max_iter = max_iter
+        self.min_iter = min_iter
         self.tools_override = tools
         self.sandbox = sandbox
         self._start_time = 0.0
@@ -234,10 +236,12 @@ class LoopRunner(Screen):
             return
 
         effective_tools = self.tools_override or rc["tools"] or RALPH_DEFAULT_TOOLS
+        effective_min = self.min_iter if self.min_iter != 0 else (rc.get("min_iter") or 0)
 
         config = EngineConfig(
             plan=self.plan,
             max_iter=self.max_iter,
+            min_iter=effective_min,
             tools=effective_tools,
             sandbox=self.sandbox,
         )

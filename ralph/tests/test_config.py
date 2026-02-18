@@ -8,7 +8,7 @@ def test_default_tools_contains_core_entries():
 
 def test_load_ralphrc_returns_defaults_when_no_file(tmp_path):
     result = load_ralphrc(tmp_path / ".ralphrc")
-    assert result == {"tools": None, "max_iter": None, "sandbox": None}
+    assert result == {"tools": None, "max_iter": None, "min_iter": None, "sandbox": None}
 
 
 def test_load_ralphrc_parses_values(tmp_path):
@@ -48,3 +48,17 @@ def test_load_ralphrc_sandbox_defaults_none(tmp_path):
     rc.write_text('RALPH_TOOLS="Edit Read"\n')
     result = load_ralphrc(rc)
     assert result["sandbox"] is None
+
+
+def test_load_ralphrc_parses_min_iter(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_MIN_ITER=3\n")
+    result = load_ralphrc(rc)
+    assert result["min_iter"] == 3
+
+
+def test_load_ralphrc_min_iter_defaults_none(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text('RALPH_TOOLS="Edit Read"\n')
+    result = load_ralphrc(rc)
+    assert result["min_iter"] is None
