@@ -1,6 +1,7 @@
 """Core iteration engine — shared constants, helpers, and loop logic."""
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -73,3 +74,16 @@ class EngineConfig:
     tools: str
     sandbox: bool
     ralph_dir: Path = field(default_factory=lambda: Path.cwd() / ".ralph")
+
+
+def run_loop(
+    config: EngineConfig,
+    on_event: Callable[[IterationEvent], None],
+    is_interrupted: Callable[[], bool] = lambda: False,
+    start_iter: int = 1,
+) -> str:
+    """Run the iteration loop, calling on_event for each significant event.
+
+    Returns the reason for stopping: "done", "max_iterations", or "interrupted".
+    """
+    raise NotImplementedError("run_loop not yet implemented")
