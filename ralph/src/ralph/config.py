@@ -5,9 +5,9 @@ from pathlib import Path
 
 RALPH_DEFAULT_TOOLS = (
     "Edit Read Write Glob Grep "
-    "Bash(git add:*) Bash(git commit:*) Bash(git status:*) "
-    "Bash(git diff:*) Bash(git log:*) "
-    "Bash(npm test:*) Bash(npm run build:*) Bash(pytest:*)"
+    "Bash(git:*) "
+    "Bash(npm:*) Bash(npx:*) Bash(pytest:*) Bash(python:*) "
+    "Bash(ruff:*) Bash(make:*) Bash(cargo:*) Bash(tox:*)"
 )
 
 _ALLOWED_LINE = re.compile(r"^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=|RALPH_MIN_ITER=|RALPH_SANDBOX=)")

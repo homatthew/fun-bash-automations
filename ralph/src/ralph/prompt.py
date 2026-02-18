@@ -27,6 +27,7 @@ def build_prompt(plan_file: str, status_file: Path | None = None) -> str:
         "- If tests fail, fix the issue before moving to the next step\n"
         "- Do NOT skip steps or reorder them unless a step is explicitly marked optional\n"
         "- Do NOT modify files outside the project directory\n"
+        "- Do NOT run git push to main or master branches\n"
         "- Do NOT output RALPH_DONE until .ralph/status.md shows ALL steps marked [x]\n"
         "- When ALL steps are marked [x] in status.md and all tests pass, "
         "output the exact text: RALPH_DONE\n",
