@@ -1,6 +1,7 @@
 """Tests for the shared iteration engine."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -142,10 +143,16 @@ def _make_config(tmp_path, max_iter=2) -> EngineConfig:
 
 
 def _mock_popen(stdout_lines: list[str], returncode: int = 0):
-    """Create a mock Popen that yields the given stdout lines."""
+    """Create a mock Popen that yields the given stdout lines.
+
+    Uses io.StringIO so the mock supports both readline() and iteration,
+    matching real file-object behaviour from subprocess pipes.
+    """
+    import io
+
     mock_proc = MagicMock()
     mock_proc.stdin = MagicMock()
-    mock_proc.stdout = iter(stdout_lines)
+    mock_proc.stdout = io.StringIO("".join(stdout_lines))
     mock_proc.wait.return_value = returncode
     mock_proc.returncode = returncode
     return mock_proc
@@ -372,3 +379,137 @@ def test_check_resume_returns_meta_when_max_iterations(tmp_path):
     result = check_resume(tmp_path, Path("/path/plan.md"))
     assert result is not None
     assert result["current_iter"] == 10
+
+
+# --- Live output streaming tests ---
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_uses_line_buffered_popen(mock_popen, tmp_path):
+    """Popen must use bufsize=1 so pipe output is line-buffered, not block-buffered."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config(tmp_path, max_iter=1)
+    run_loop(config, on_event=lambda ev: None)
+    _, kwargs = mock_popen.call_args
+    assert kwargs.get("bufsize") == 1, (
+        "Popen should use bufsize=1 for line-buffered streaming; "
+        "default (fully buffered) blocks live output"
+    )
+
+
+class _ReadlineOnlyStdout:
+    """Mock stdout that only supports readline(), not iteration.
+
+    The file iterator protocol (``for line in file``) uses an internal
+    read-ahead buffer that delays output delivery from subprocess pipes.
+    Using ``readline()`` reads one line at a time without buffering.
+    This mock proves the engine uses readline() by raising on __iter__.
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines)
+        self._pos = 0
+
+    def readline(self) -> str:
+        if self._pos >= len(self._lines):
+            return ""
+        line = self._lines[self._pos]
+        self._pos += 1
+        return line
+
+    def __iter__(self):
+        raise AssertionError(
+            "Engine must use readline(), not file iteration (causes output buffering)"
+        )
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_reads_output_via_readline(mock_popen, tmp_path):
+    """Output must be read via readline() to avoid iterator read-ahead buffering."""
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdout = _ReadlineOnlyStdout(["Working...\n", "RALPH_DONE\n"])
+    mock_proc.wait.return_value = 0
+    mock_popen.return_value = mock_proc
+
+    config = _make_config(tmp_path, max_iter=1)
+    events = []
+    run_loop(config, on_event=lambda ev: events.append(ev))
+
+    output_lines = [ev for ev in events if ev.kind == Event.OUTPUT_LINE]
+    assert len(output_lines) == 2, "Should emit one OUTPUT_LINE event per line"
+
+
+# --- Mid-iteration interrupt tests ---
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_interrupt_mid_iteration_terminates_subprocess(mock_popen, tmp_path):
+    """When is_interrupted() fires mid-readline, engine should terminate the subprocess."""
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    call_count = [0]
+
+    def _readline():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return "Working...\n"
+        if call_count[0] == 2:
+            return "Still going...\n"
+        return ""
+
+    mock_proc.stdout.readline = _readline
+    mock_proc.wait.return_value = -15  # SIGTERM
+    mock_popen.return_value = mock_proc
+
+    interrupt_after = [0]
+
+    def _interrupt():
+        interrupt_after[0] += 1
+        return interrupt_after[0] > 1  # True after first line processed
+
+    config = _make_config(tmp_path, max_iter=5)
+    reason = run_loop(config, on_event=lambda ev: None, is_interrupted=_interrupt)
+
+    mock_proc.terminate.assert_called_once()
+    assert reason == "interrupted"
+    meta = read_meta(tmp_path / ".ralph")
+    assert meta["status"] == "interrupted"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_interrupt_kills_on_timeout(mock_popen, tmp_path):
+    """If proc.terminate() doesn't stop the subprocess, engine should escalate to kill()."""
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    call_count = [0]
+
+    def _readline():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return "Working...\n"
+        return ""
+
+    mock_proc.stdout.readline = _readline
+    # wait() raises TimeoutExpired after terminate, then succeeds after kill
+    mock_proc.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="claude", timeout=5),  # after terminate
+        -9,  # after kill
+        -9,  # final proc.wait() outside loop
+    ]
+    mock_popen.return_value = mock_proc
+
+    interrupt_calls = [0]
+
+    def _interrupt():
+        interrupt_calls[0] += 1
+        return interrupt_calls[0] > 1  # False at top-of-loop check, True inside readline
+
+    config = _make_config(tmp_path, max_iter=5)
+    reason = run_loop(
+        config, on_event=lambda ev: None, is_interrupted=_interrupt,
+    )
+
+    mock_proc.terminate.assert_called_once()
+    mock_proc.kill.assert_called_once()
+    assert reason == "interrupted"
