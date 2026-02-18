@@ -126,6 +126,16 @@ def test_engine_config_custom_ralph_dir(tmp_path: Path):
     assert config.ralph_dir == tmp_path / ".custom-ralph"
 
 
+def test_engine_config_min_iter_default(tmp_path):
+    config = EngineConfig(
+        plan=tmp_path / "plan.md",
+        max_iter=5,
+        tools="Edit Read Write",
+        sandbox=True,
+    )
+    assert config.min_iter == 0
+
+
 # --- run_loop TDD tests ---
 
 

@@ -78,6 +78,7 @@ class EngineConfig:
     tools: str
     sandbox: bool
     ralph_dir: Path = field(default_factory=lambda: Path.cwd() / ".ralph")
+    min_iter: int = 0
 
 
 def check_resume(ralph_dir: Path, plan: Path) -> dict | None:
