@@ -27,6 +27,7 @@ from textual.widgets import (
 )
 
 from ralph.engine import PLANS_DIR, RALPH_DIR_NAME
+from ralph.tui.widgets import SplitHandle
 
 IDEA_PROMPT = (
     "You are Ralph's plan generator. Ralph is an autonomous iteration loop "
@@ -59,6 +60,7 @@ IDEA_PROMPT = (
     "Goal:\n"
 )
 MAX_TAIL_LINES = 240
+MAX_VISIBLE_PLANS = 5
 
 
 def relative_time(mtime: float) -> str:
@@ -94,6 +96,14 @@ def _slugify(text: str) -> str:
     return cleaned[:48] if cleaned else "plan"
 
 
+def _slug_from_filename(path: Path) -> str:
+    """Extract human-readable name from plan filename slug."""
+    parts = path.stem.split("-", 2)
+    if len(parts) >= 3:
+        return parts[2].replace("-", " ").title()
+    return path.stem.replace("-", " ").title()
+
+
 class IdeationFinished(Message):
     """Signals that ideation has completed."""
 
@@ -112,14 +122,8 @@ class PlanItem(ListItem):
 
     def compose(self) -> ComposeResult:
         age = relative_time(self.plan_path.stat().st_mtime)
-        heading = plan_heading(self.plan_path)
-        if heading:
-            yield Label(
-                f"{self.plan_path.name}  [dim]{age}[/dim]\n  [italic]{heading}[/italic]",
-                markup=True,
-            )
-        else:
-            yield Label(f"{self.plan_path.name}  [dim]{age}[/dim]", markup=True)
+        heading = plan_heading(self.plan_path) or _slug_from_filename(self.plan_path)
+        yield Label(f"[bold]{heading}[/bold]\n[dim]{age} ago[/dim]", markup=True)
 
 
 class NewPlanItem(ListItem):
@@ -155,9 +159,15 @@ class PlanPicker(ModalScreen[Path | None]):
                 yield Input(placeholder="Filter plans…", id="filter-input")
                 yield ListView(id="plan-list")
                 yield Static("Select a plan to confirm run.", id="plan-hint")
+            yield SplitHandle(
+                "plan-panel", "preview-panel", left_min=20, right_min=30, id="split-left"
+            )
             with Vertical(id="preview-panel"):
                 yield Static("Plan Preview", classes="panel-title")
                 yield Markdown(id="preview-pane")
+            yield SplitHandle(
+                "preview-panel", "ops-panel", left_min=30, right_min=24, id="split-right"
+            )
             with Vertical(id="ops-panel"):
                 yield Static("Ideate", classes="panel-title")
                 yield Markdown(
@@ -200,9 +210,13 @@ class PlanPicker(ModalScreen[Path | None]):
         needle = filter_text.lower()
         if not needle:
             plan_list.append(NewPlanItem())
-        for p in self._all_plans:
-            if needle in p.name.lower():
+            for p in self._all_plans[:MAX_VISIBLE_PLANS]:
                 plan_list.append(PlanItem(p))
+        else:
+            for p in self._all_plans:
+                heading = plan_heading(p) or ""
+                if needle in p.name.lower() or needle in heading.lower():
+                    plan_list.append(PlanItem(p))
         if plan_list.children:
             plan_list.index = 0
             self._update_preview()
