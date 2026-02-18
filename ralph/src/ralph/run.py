@@ -75,6 +75,7 @@ def run(
     no_sandbox: bool = typer.Option(
         False, "--no-sandbox", help="Disable sandbox enforcement"
     ),
+    min_iter: int = typer.Option(0, "--min-iter", help="Minimum iterations before accepting RALPH_DONE"),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
     # Load .ralphrc config — CLI args take priority
@@ -95,7 +96,7 @@ def run(
     if not no_tui:
         from ralph.tui.app import RalphApp
 
-        app = RalphApp(plan=plan, max_iter=max_iter, tools=tools, sandbox=sandbox_enabled)
+        app = RalphApp(plan=plan, max_iter=max_iter, min_iter=min_iter, tools=tools, sandbox=sandbox_enabled)
         app.run()
         return
 
@@ -112,11 +113,13 @@ def run(
 
     effective_tools = tools or rc["tools"] or RALPH_DEFAULT_TOOLS
     effective_max = max_iter if max_iter != 10 else (rc["max_iter"] or 10)
+    effective_min = min_iter if min_iter != 0 else (rc["min_iter"] or 0)
 
     # Build engine config
     config = EngineConfig(
         plan=plan,
         max_iter=effective_max,
+        min_iter=effective_min,
         tools=effective_tools,
         sandbox=sandbox_enabled,
     )
@@ -138,10 +141,11 @@ def run(
             start_iter = resume_iter
 
     # Header
+    min_iter_str = f"\nMin iter:   {effective_min}" if effective_min > 0 else ""
     ui.header(
         f"Ralph Wiggum Loop\n"
         f"Plan:       {plan.name}\n"
-        f"Max iter:   {effective_max}\n"
+        f"Max iter:   {effective_max}{min_iter_str}\n"
         f"Sandbox:    {'on' if sandbox_enabled else 'OFF'}\n"
         f"Tools:      {effective_tools[:60]}…\n"
         f"Logs:       {log_dir}/"
