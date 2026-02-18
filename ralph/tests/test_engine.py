@@ -626,3 +626,272 @@ def test_run_loop_accepts_ralph_done_with_no_status_file(mock_popen, tmp_path):
     config = _make_config(tmp_path, max_iter=5)
     reason = run_loop(config, on_event=lambda ev: None)
     assert reason == "done"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_accepts_ralph_done_with_prose_only_status(mock_popen, tmp_path):
+    """status.md with prose but no checkboxes should not block RALPH_DONE."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config(tmp_path, max_iter=5)
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    (ralph_dir / "status.md").write_text(
+        "Working on the feature.\nNo checkbox progress tracking here.\n"
+    )
+    reason = run_loop(config, on_event=lambda ev: None)
+    assert reason == "done"
+
+
+# --- Composition / integration tests ---
+#
+# These test that multiple features work together correctly,
+# not just individually.
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_min_iter_and_status_validation_compose(mock_popen, tmp_path):
+    """Both guards must pass: min_iter AND status.md complete.
+
+    Scenario: min_iter=2, status incomplete on iter 1-2, complete on iter 3.
+    - Iter 1: RALPH_DONE + incomplete status → rejected (min_iter)
+    - Iter 2: RALPH_DONE + incomplete status → rejected (status)
+    - Iter 3: RALPH_DONE + complete status → accepted
+    """
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    status_file = ralph_dir / "status.md"
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        # Simulate Claude updating status.md each iteration
+        if call_count[0] == 1:
+            status_file.write_text("- [x] Step 1 (DONE)\n- [ ] Step 2\n")
+        elif call_count[0] == 2:
+            status_file.write_text("- [x] Step 1 (DONE)\n- [ ] Step 2\n")
+        else:
+            status_file.write_text(
+                "- [x] Step 1 (DONE)\n- [x] Step 2 (DONE)\n"
+            )
+        return _mock_popen(["Working...\n", "RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config_with_min(tmp_path, max_iter=5, min_iter=2)
+    events = []
+    reason = run_loop(config, on_event=lambda ev: events.append(ev))
+
+    assert reason == "done"
+    iter_starts = [ev for ev in events if ev.kind == Event.ITERATION_START]
+    # Iter 1: blocked by min_iter. Iter 2: blocked by incomplete status.
+    # Iter 3: both pass.
+    assert len(iter_starts) == 3
+    done_events = [ev for ev in events if ev.kind == Event.DONE]
+    assert done_events[0].iteration == 3
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_status_evolves_across_iterations(mock_popen, tmp_path):
+    """Realistic scenario: status.md progresses 1/3 → 2/3 → 3/3.
+
+    Engine should keep going until all steps are complete.
+    """
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    status_file = ralph_dir / "status.md"
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            status_file.write_text(
+                "- [x] Step 1 (DONE)\n- [ ] Step 2\n- [ ] Step 3\n"
+            )
+        elif call_count[0] == 2:
+            status_file.write_text(
+                "- [x] Step 1 (DONE)\n- [x] Step 2 (DONE)\n- [ ] Step 3\n"
+            )
+        else:
+            status_file.write_text(
+                "- [x] Step 1 (DONE)\n"
+                "- [x] Step 2 (DONE)\n"
+                "- [x] Step 3 (DONE)\n"
+            )
+        return _mock_popen(["RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config(tmp_path, max_iter=10)
+    events = []
+    reason = run_loop(config, on_event=lambda ev: events.append(ev))
+
+    assert reason == "done"
+    iter_starts = [ev for ev in events if ev.kind == Event.ITERATION_START]
+    assert len(iter_starts) == 3, (
+        "Should take exactly 3 iterations: "
+        "rejected at 1/3, rejected at 2/3, accepted at 3/3"
+    )
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_interrupt_works_before_min_iter(mock_popen, tmp_path):
+    """User can always quit, even if min_iter hasn't been reached."""
+    mock_popen.return_value = _mock_popen(["Working...\n"])
+    config = _make_config_with_min(tmp_path, max_iter=10, min_iter=5)
+    interrupt_calls = [0]
+
+    def _interrupt():
+        interrupt_calls[0] += 1
+        # False on first check (top of loop), True on second (after iter)
+        return interrupt_calls[0] > 1
+
+    reason = run_loop(
+        config, on_event=lambda ev: None, is_interrupted=_interrupt,
+    )
+    assert reason == "interrupted"
+    meta = read_meta(tmp_path / ".ralph")
+    assert meta["status"] == "interrupted"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_resume_respects_min_iter(mock_popen, tmp_path):
+    """After resume at iter 3, min_iter=2 should accept RALPH_DONE."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config_with_min(tmp_path, max_iter=10, min_iter=2)
+    reason = run_loop(
+        config, on_event=lambda ev: None, start_iter=3,
+    )
+    assert reason == "done"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_resume_before_min_iter_still_enforces(mock_popen, tmp_path):
+    """After resume at iter 1, min_iter=3 should still block RALPH_DONE."""
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        return _mock_popen(["RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config_with_min(tmp_path, max_iter=5, min_iter=3)
+    events = []
+    reason = run_loop(
+        config, on_event=lambda ev: events.append(ev), start_iter=1,
+    )
+    assert reason == "done"
+    iter_starts = [ev for ev in events if ev.kind == Event.ITERATION_START]
+    assert iter_starts[0].iteration == 1
+    # Should run at least 3 iterations before accepting
+    assert len(iter_starts) >= 3
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_multi_iteration_meta_tracks_current_iter(mock_popen, tmp_path):
+    """meta.json current_iter should reflect the last completed iteration."""
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] < 3:
+            return _mock_popen(["Working...\n"])
+        return _mock_popen(["RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config(tmp_path, max_iter=5)
+    run_loop(config, on_event=lambda ev: None)
+
+    meta = read_meta(tmp_path / ".ralph")
+    assert meta["current_iter"] == 3
+    assert meta["status"] == "done"
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_multi_iteration_creates_separate_logs(mock_popen, tmp_path):
+    """Each iteration should produce its own log file with correct content."""
+    call_count = [0]
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] < 3:
+            return _mock_popen([f"Iteration {call_count[0]} output\n"])
+        return _mock_popen([f"Iteration {call_count[0]} output\n", "RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config(tmp_path, max_iter=5)
+    run_loop(config, on_event=lambda ev: None)
+
+    ralph_dir = tmp_path / ".ralph"
+    for i in range(1, 4):
+        log = ralph_dir / f"iteration-{i}.log"
+        assert log.is_file(), f"iteration-{i}.log should exist"
+        assert f"Iteration {i} output" in log.read_text()
+    # No iteration 4 log
+    assert not (ralph_dir / "iteration-4.log").exists()
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_prompt_includes_status_from_prior_iteration(mock_popen, tmp_path):
+    """Iteration 2's prompt should contain status.md written by iteration 1."""
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    status_file = ralph_dir / "status.md"
+    call_count = [0]
+    prompts = []
+
+    def _capture(ev):
+        if ev.kind == Event.PROMPT_BUILT:
+            prompts.append(ev.prompt)
+
+    def _popen_factory(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # Simulate Claude writing status.md during iteration 1
+            status_file.write_text(
+                "- [x] Step 1: set up database (DONE)\n"
+                "- [ ] Step 2: add API endpoints\n"
+            )
+            return _mock_popen(["Did step 1\n"])
+        return _mock_popen(["RALPH_DONE\n"])
+
+    mock_popen.side_effect = _popen_factory
+    config = _make_config(tmp_path, max_iter=3)
+    run_loop(config, on_event=_capture)
+
+    assert len(prompts) >= 2
+    # First prompt should say "Fresh start"
+    assert "Fresh start" in prompts[0]
+    # Second prompt should include iteration 1's status
+    assert "set up database" in prompts[1]
+    assert "API endpoints" in prompts[1]
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_mid_iteration_interrupt_still_writes_log(mock_popen, tmp_path):
+    """Lines received before interrupt should still be in the log file."""
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    line_num = [0]
+
+    def _readline():
+        line_num[0] += 1
+        if line_num[0] <= 3:
+            return f"Line {line_num[0]}\n"
+        return ""
+
+    mock_proc.stdout.readline = _readline
+    mock_proc.wait.return_value = -15
+    mock_popen.return_value = mock_proc
+
+    interrupt_calls = [0]
+
+    def _interrupt():
+        interrupt_calls[0] += 1
+        # False at top-of-loop, True after 2nd line in readline loop
+        return interrupt_calls[0] > 2
+
+    config = _make_config(tmp_path, max_iter=5)
+    run_loop(config, on_event=lambda ev: None, is_interrupted=_interrupt)
+
+    log = tmp_path / ".ralph" / "iteration-1.log"
+    log_text = log.read_text()
+    assert "Line 1" in log_text
+    assert "Line 2" in log_text
