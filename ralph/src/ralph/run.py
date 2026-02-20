@@ -18,8 +18,10 @@ from ralph.engine import (
     Event,
     IterationEvent,
     check_resume,
+    ensure_prd,
 )
 from ralph.engine import run_loop as engine_run_loop
+from ralph.engine import run_prd_loop as engine_run_prd_loop
 
 _interrupted = False
 
@@ -58,6 +60,8 @@ def _headless_event_handler(ev: IterationEvent) -> None:
     """Map engine events to Rich console output."""
     if ev.kind == Event.ITERATION_START:
         ui.iter_header(ev.iteration, ev.max_iter, datetime.now().strftime("%H:%M:%S"))
+        if ev.story_id:
+            ui.console.print(f"  Story: [cyan]{ev.story_id}[/cyan]")
     elif ev.kind == Event.OUTPUT_LINE:
         sys.stdout.write(ev.line)
         sys.stdout.flush()
@@ -78,6 +82,12 @@ def run(
     min_iter: int = typer.Option(
         0, "--min-iter", help="Min iterations before accepting RALPH_DONE"
     ),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", "-y", help="Skip PRD review prompt"
+    ),
+    git_checkpoint: bool = typer.Option(
+        False, "--git-checkpoint", help="Rollback git on failed iterations"
+    ),
 ) -> None:
     """Execute a plan in an autonomous iteration loop."""
     # Load .ralphrc config — CLI args take priority
@@ -95,12 +105,20 @@ def run(
     else:
         sandbox_enabled = True
 
+    # Auto-approve: OFF by default, --auto-approve or RALPH_AUTO_APPROVE=true enables
+    effective_auto_approve = auto_approve or rc.get("auto_approve") or False
+
+    # Git checkpoint: OFF by default, --git-checkpoint or RALPH_GIT_CHECKPOINT=true enables
+    effective_git_checkpoint = git_checkpoint or rc.get("git_checkpoint") or False
+
     if not no_tui:
         from ralph.tui.app import RalphApp
 
         app = RalphApp(
             plan=plan, max_iter=max_iter, min_iter=min_iter,
             tools=tools, sandbox=sandbox_enabled,
+            auto_approve=effective_auto_approve,
+            git_checkpoint=effective_git_checkpoint,
         )
         app.run()
         return
@@ -127,6 +145,7 @@ def run(
         min_iter=effective_min,
         tools=effective_tools,
         sandbox=sandbox_enabled,
+        git_checkpoint=effective_git_checkpoint,
     )
 
     log_dir = Path.cwd() / RALPH_DIR_NAME
@@ -161,12 +180,33 @@ def run(
     start_time = time.time()
 
     try:
-        reason = engine_run_loop(
-            config,
-            on_event=_headless_event_handler,
-            is_interrupted=lambda: _interrupted,
-            start_iter=start_iter,
-        )
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
+        prd_available = ensure_prd(ralph_dir, plan)
+
+        # Review gate: show PRD summary and ask for approval
+        if prd_available and start_iter == 1 and not effective_auto_approve:
+            from rich.prompt import Confirm as RichConfirm
+
+            _print_prd_summary(ralph_dir / "prd.json")
+            if not RichConfirm.ask("Approve this PRD?", default=True):
+                (ralph_dir / "prd.json").unlink(missing_ok=True)
+                ui.warn("PRD rejected — exiting.")
+                raise typer.Exit(0)
+
+        if prd_available:
+            reason = engine_run_prd_loop(
+                config,
+                on_event=_headless_event_handler,
+                is_interrupted=lambda: _interrupted,
+                start_iter=start_iter,
+            )
+        else:
+            reason = engine_run_loop(
+                config,
+                on_event=_headless_event_handler,
+                is_interrupted=lambda: _interrupted,
+                start_iter=start_iter,
+            )
     finally:
         signal.signal(signal.SIGINT, prev_handler)
 
@@ -182,6 +222,19 @@ def run(
             f"Ralph hit max iterations ({effective_max}) after {elapsed}s\nLogs in .ralph/"
         )
     _print_status_summary(status_file)
+
+
+def _print_prd_summary(prd_path: Path) -> None:
+    """Print a summary of the PRD stories for human review."""
+    from ralph.prompt import load_prd
+
+    prd = load_prd(prd_path)
+    ui.console.print("\n[bold]PRD Stories:[/bold]\n")
+    for s in sorted(prd.user_stories, key=lambda x: x.priority):
+        ui.console.print(f"  [cyan]{s.id}[/cyan] {s.title}")
+        for c in s.acceptance_criteria:
+            ui.console.print(f"    - {c}")
+    ui.console.print()
 
 
 def _print_status_summary(status_file: Path) -> None:

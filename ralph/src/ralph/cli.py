@@ -43,4 +43,8 @@ def main(ctx: typer.Context) -> None:
     """Ralph Wiggum — Autonomous Claude Code Loop."""
     if ctx.invoked_subcommand is None:
         # Bare `ralph` with no args → invoke run (interactive picker)
-        ctx.invoke(run, plan=None, max_iter=10, tools=None, no_tui=False, no_sandbox=False)
+        ctx.invoke(
+            run, plan=None, max_iter=10, tools=None,
+            no_tui=False, no_sandbox=False, min_iter=0,
+            auto_approve=False, git_checkpoint=False,
+        )
