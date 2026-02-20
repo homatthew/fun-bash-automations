@@ -21,6 +21,8 @@ class RalphApp(App):
         min_iter: int = 0,
         tools: str | None = None,
         sandbox: bool = True,
+        auto_approve: bool = False,
+        git_checkpoint: bool = False,
     ):
         super().__init__()
         self.plan_path = plan
@@ -28,6 +30,8 @@ class RalphApp(App):
         self.min_iter = min_iter
         self.tools_override = tools
         self.sandbox = sandbox
+        self.auto_approve = auto_approve
+        self.git_checkpoint = git_checkpoint
 
     def on_mount(self) -> None:
         if self.plan_path:
@@ -38,6 +42,8 @@ class RalphApp(App):
                     min_iter=self.min_iter,
                     tools=self.tools_override,
                     sandbox=self.sandbox,
+                    auto_approve=self.auto_approve,
+                    git_checkpoint=self.git_checkpoint,
                 ),
                 callback=self._on_runner_done,
             )
@@ -55,6 +61,8 @@ class RalphApp(App):
                     min_iter=self.min_iter,
                     tools=self.tools_override,
                     sandbox=self.sandbox,
+                    auto_approve=self.auto_approve,
+                    git_checkpoint=self.git_checkpoint,
                 ),
                 callback=self._on_runner_done,
             )

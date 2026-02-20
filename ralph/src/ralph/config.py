@@ -10,7 +10,11 @@ RALPH_DEFAULT_TOOLS = (
     "Bash(ruff:*) Bash(make:*) Bash(cargo:*) Bash(tox:*)"
 )
 
-_ALLOWED_LINE = re.compile(r"^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=|RALPH_MIN_ITER=|RALPH_SANDBOX=)")
+_ALLOWED_LINE = re.compile(
+    r"^\s*(#|$|RALPH_TOOLS=|RALPH_MAX_ITER=|RALPH_MIN_ITER="
+    r"|RALPH_SANDBOX=|RALPH_MAX_STEP_TURNS=|RALPH_AUTO_APPROVE="
+    r"|RALPH_GIT_CHECKPOINT=)"
+)
 
 
 def load_ralphrc(path: Path | None = None) -> dict:
@@ -20,7 +24,11 @@ def load_ralphrc(path: Path | None = None) -> dict:
     Raises ValueError if .ralphrc contains disallowed lines.
     """
     rc = path or Path.cwd() / ".ralphrc"
-    result: dict = {"tools": None, "max_iter": None, "min_iter": None, "sandbox": None}
+    result: dict = {
+        "tools": None, "max_iter": None, "min_iter": None,
+        "sandbox": None, "max_step_turns": None,
+        "auto_approve": None, "git_checkpoint": None,
+    }
 
     if not rc.is_file():
         return result
@@ -35,7 +43,9 @@ def load_ralphrc(path: Path | None = None) -> dict:
         raise ValueError(
             f".ralphrc contains disallowed lines. "
             f"Only RALPH_TOOLS, RALPH_MAX_ITER, RALPH_MIN_ITER, "
-            f"and RALPH_SANDBOX are permitted.\n{detail}"
+            f"RALPH_SANDBOX, RALPH_MAX_STEP_TURNS, RALPH_AUTO_APPROVE, "
+            f"and RALPH_GIT_CHECKPOINT are "
+            f"permitted.\n{detail}"
         )
 
     for line in rc.read_text().splitlines():
@@ -55,5 +65,18 @@ def load_ralphrc(path: Path | None = None) -> dict:
         elif line.startswith("RALPH_SANDBOX="):
             val = line.split("=", 1)[1].strip('"').strip("'").lower()
             result["sandbox"] = val in ("true", "1", "yes")
+        elif line.startswith("RALPH_MAX_STEP_TURNS="):
+            try:
+                result["max_step_turns"] = int(
+                    line.split("=", 1)[1].strip()
+                )
+            except ValueError:
+                pass
+        elif line.startswith("RALPH_AUTO_APPROVE="):
+            val = line.split("=", 1)[1].strip('"').strip("'").lower()
+            result["auto_approve"] = val in ("true", "1", "yes")
+        elif line.startswith("RALPH_GIT_CHECKPOINT="):
+            val = line.split("=", 1)[1].strip('"').strip("'").lower()
+            result["git_checkpoint"] = val in ("true", "1", "yes")
 
     return result

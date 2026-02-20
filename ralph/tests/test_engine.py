@@ -13,7 +13,12 @@ from ralph.engine import (
     Event,
     IterationEvent,
     _ensure_git_exclude,
+    _extract_progress_notes,
+    _git_head_sha,
+    _git_rollback,
+    _plan_hash,
     check_resume,
+    ensure_prd,
     read_meta,
     run_loop,
     write_meta,
@@ -390,6 +395,40 @@ def test_check_resume_returns_meta_when_max_iterations(tmp_path):
     result = check_resume(tmp_path, Path("/path/plan.md"))
     assert result is not None
     assert result["current_iter"] == 10
+
+
+def test_check_resume_matches_by_hash(tmp_path):
+    """Resume should match when plan_hash matches, even if path differs."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("# My plan\nDo stuff\n")
+    h = _plan_hash(plan)
+    meta = {"plan": "/old/path/plan.md", "plan_hash": h, "status": "interrupted", "current_iter": 3}
+    write_meta(tmp_path / "meta.json", meta)
+    result = check_resume(tmp_path, plan)
+    assert result is not None
+    assert result["current_iter"] == 3
+
+
+def test_check_resume_rejects_edited_plan(tmp_path):
+    """Resume should reject when plan was edited (hash mismatch)."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Original plan\n")
+    h = _plan_hash(plan)
+    meta = {"plan": str(plan), "plan_hash": h, "status": "interrupted", "current_iter": 3}
+    write_meta(tmp_path / "meta.json", meta)
+    # Edit the plan
+    plan.write_text("# Modified plan\n")
+    result = check_resume(tmp_path, plan)
+    assert result is None
+
+
+def test_check_resume_backward_compat_no_hash(tmp_path):
+    """Old meta without plan_hash should fall back to name comparison."""
+    meta = {"plan": "/path/plan.md", "status": "interrupted", "current_iter": 5}
+    write_meta(tmp_path / "meta.json", meta)
+    # Matching name, no hash
+    result = check_resume(tmp_path, Path("/different/plan.md"))
+    assert result is not None
 
 
 # --- _ensure_git_exclude tests ---
@@ -926,3 +965,163 @@ def test_mid_iteration_interrupt_still_writes_log(mock_popen, tmp_path):
     log_text = log.read_text()
     assert "Line 1" in log_text
     assert "Line 2" in log_text
+
+
+# --- ensure_prd tests ---
+
+
+@patch("ralph.prompt.convert_plan_to_prd")
+def test_ensure_prd_converts_plan(mock_convert, tmp_path):
+    """ensure_prd should convert plan and write prd.json."""
+    mock_convert.return_value = (
+        '{"project":"x","branch_name":"x",'
+        '"description":"x","user_stories":[]}'
+    )
+    ralph_dir = tmp_path / ".ralph"
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n")
+
+    result = ensure_prd(ralph_dir, plan)
+    assert result is True
+    assert (ralph_dir / "prd.json").is_file()
+    mock_convert.assert_called_once_with(plan)
+
+
+def test_ensure_prd_returns_true_when_exists(tmp_path):
+    """ensure_prd should return True if prd.json already exists."""
+    ralph_dir = tmp_path / ".ralph"
+    ralph_dir.mkdir()
+    (ralph_dir / "prd.json").write_text('{"user_stories":[]}')
+
+    result = ensure_prd(ralph_dir, tmp_path / "plan.md")
+    assert result is True
+
+
+@patch("ralph.prompt.convert_plan_to_prd")
+def test_ensure_prd_returns_false_on_failure(mock_convert, tmp_path):
+    """ensure_prd should return False when conversion fails."""
+    mock_convert.side_effect = RuntimeError("Claude failed")
+    ralph_dir = tmp_path / ".ralph"
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n")
+
+    result = ensure_prd(ralph_dir, plan)
+    assert result is False
+
+
+# --- plan_hash in meta.json tests ---
+
+
+@patch("ralph.engine.subprocess.Popen")
+def test_run_loop_writes_plan_hash(mock_popen, tmp_path):
+    """Legacy run_loop should write plan_hash to meta.json."""
+    mock_popen.return_value = _mock_popen(["RALPH_DONE\n"])
+    config = _make_config(tmp_path, max_iter=1)
+    run_loop(config, on_event=lambda ev: None)
+    meta = read_meta(tmp_path / ".ralph")
+    assert "plan_hash" in meta
+    assert meta["plan_hash"] == _plan_hash(config.plan)
+
+
+# --- _extract_progress_notes tests ---
+
+
+def test_extract_progress_notes_prefers_status_file(tmp_path):
+    """Should prefer status.md over text output."""
+    status = tmp_path / "status.md"
+    status.write_text("Step 1 done\n")
+    result = _extract_progress_notes("some output", status)
+    assert result == "Step 1 done"
+
+
+def test_extract_progress_notes_captures_pytest_failures():
+    """Should extract FAILED lines from text output."""
+    text = (
+        "collected 5 items\n"
+        "test_foo.py::test_one PASSED\n"
+        "test_foo.py::test_two FAILED\n"
+        "test_foo.py::test_three FAILED\n"
+        "1 passed, 2 failed\n"
+    )
+    result = _extract_progress_notes(text, None)
+    assert "## Errors detected" in result
+    assert "test_two FAILED" in result
+    assert "test_three FAILED" in result
+
+
+def test_extract_progress_notes_captures_traceback():
+    """Should extract the last traceback from text output."""
+    text = (
+        "Running tests...\n"
+        "Traceback (most recent call last):\n"
+        '  File "test.py", line 10, in test_it\n'
+        "    assert x == 1\n"
+        "AssertionError: assert 2 == 1\n"
+    )
+    result = _extract_progress_notes(text, None)
+    assert "## Last traceback" in result
+    assert "Traceback (most recent call last)" in result
+    assert "assert x == 1" in result
+
+
+def test_extract_progress_notes_deduplicates():
+    """Duplicate error lines should appear only once."""
+    text = (
+        "test_a.py::test_one FAILED\n"
+        "test_a.py::test_one FAILED\n"
+        "test_a.py::test_one FAILED\n"
+    )
+    result = _extract_progress_notes(text, None)
+    assert result.count("test_one FAILED") == 1
+
+
+def test_extract_progress_notes_fallback_2000():
+    """Without error markers, should use last 2000 chars."""
+    text = "x" * 3000
+    result = _extract_progress_notes(text, None)
+    assert len(result) == 2000
+
+
+# --- Git checkpoint tests ---
+
+
+@patch("ralph.engine.subprocess.run")
+def test_git_head_sha_returns_hash(mock_run):
+    """_git_head_sha should return the SHA from git rev-parse."""
+    mock_run.return_value = MagicMock(stdout="abc123def456\n")
+    result = _git_head_sha()
+    assert result == "abc123def456"
+
+
+@patch("ralph.engine.subprocess.run")
+def test_git_head_sha_returns_none_on_failure(mock_run):
+    """_git_head_sha should return None when not in a git repo."""
+    mock_run.side_effect = subprocess.CalledProcessError(128, "git")
+    result = _git_head_sha()
+    assert result is None
+
+
+@patch("ralph.engine._git_untracked_files")
+@patch("ralph.engine.subprocess.run")
+def test_git_rollback_skips_new_untracked(mock_run, mock_untracked):
+    """_git_rollback should skip if new untracked files appeared."""
+    # New file appeared since pre-capture
+    mock_untracked.return_value = {"old.txt", "new_file.py"}
+    result = _git_rollback("abc123", {"old.txt"})
+    assert result is False
+    mock_run.assert_not_called()
+
+
+@patch("ralph.engine._git_untracked_files")
+@patch("ralph.engine.subprocess.run")
+def test_git_rollback_performs_reset(mock_run, mock_untracked):
+    """_git_rollback should perform reset when safe."""
+    mock_untracked.return_value = {"old.txt"}
+    mock_run.return_value = MagicMock()
+    result = _git_rollback("abc123", {"old.txt"})
+    assert result is True
+    mock_run.assert_called_once()
+    call_args = mock_run.call_args[0][0]
+    assert "reset" in call_args
+    assert "--hard" in call_args
+    assert "abc123" in call_args

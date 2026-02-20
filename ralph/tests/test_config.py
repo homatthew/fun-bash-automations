@@ -9,7 +9,11 @@ def test_default_tools_contains_core_entries():
 
 def test_load_ralphrc_returns_defaults_when_no_file(tmp_path):
     result = load_ralphrc(tmp_path / ".ralphrc")
-    assert result == {"tools": None, "max_iter": None, "min_iter": None, "sandbox": None}
+    assert result == {
+        "tools": None, "max_iter": None, "min_iter": None,
+        "sandbox": None, "max_step_turns": None,
+        "auto_approve": None, "git_checkpoint": None,
+    }
 
 
 def test_load_ralphrc_parses_values(tmp_path):
@@ -63,3 +67,31 @@ def test_load_ralphrc_min_iter_defaults_none(tmp_path):
     rc.write_text('RALPH_TOOLS="Edit Read"\n')
     result = load_ralphrc(rc)
     assert result["min_iter"] is None
+
+
+def test_load_ralphrc_auto_approve_parses(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_AUTO_APPROVE=true\n")
+    result = load_ralphrc(rc)
+    assert result["auto_approve"] is True
+
+
+def test_load_ralphrc_auto_approve_false(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_AUTO_APPROVE=false\n")
+    result = load_ralphrc(rc)
+    assert result["auto_approve"] is False
+
+
+def test_load_ralphrc_git_checkpoint_parses(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_GIT_CHECKPOINT=true\n")
+    result = load_ralphrc(rc)
+    assert result["git_checkpoint"] is True
+
+
+def test_load_ralphrc_git_checkpoint_false(tmp_path):
+    rc = tmp_path / ".ralphrc"
+    rc.write_text("RALPH_GIT_CHECKPOINT=false\n")
+    result = load_ralphrc(rc)
+    assert result["git_checkpoint"] is False

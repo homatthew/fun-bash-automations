@@ -1,5 +1,9 @@
-"""LoopRunner screen — streaming iteration loop with live output."""
+"""LoopRunner screen — streaming iteration loop with live output.
 
+Supports both prd.json-driven (story-by-story) and legacy (flat plan) modes.
+"""
+
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,8 +22,11 @@ from ralph.engine import (
     Event,
     IterationEvent,
     check_resume,
+    ensure_prd,
 )
 from ralph.engine import run_loop as engine_run_loop
+from ralph.engine import run_prd_loop as engine_run_prd_loop
+from ralph.prompt import load_prd
 from ralph.tui.widgets import SplitHandle
 
 
@@ -41,24 +48,36 @@ class OutputLine(Message):
         super().__init__()
 
 
+class ToolActivity(Message):
+    """A tool call from Claude (for the activity panel)."""
+
+    def __init__(self, tool: str, summary: str) -> None:
+        self.tool = tool
+        self.summary = summary
+        super().__init__()
+
+
 class IterationBoundary(Message):
     """Marks the start or end of an iteration."""
 
     def __init__(
-        self, iteration: int, max_iter: int, event: str, elapsed: int = 0
+        self, iteration: int, max_iter: int, event: str,
+        elapsed: int = 0, story_id: str = "",
     ) -> None:
         self.iteration = iteration
         self.max_iter = max_iter
         self.event = event
         self.elapsed = elapsed
+        self.story_id = story_id
         super().__init__()
 
 
 class PromptSent(Message):
     """Carries the prompt text sent to Claude for I/O transparency."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, story_id: str = "") -> None:
         self.text = text
+        self.story_id = story_id
         super().__init__()
 
 
@@ -88,6 +107,8 @@ class LoopRunner(Screen):
         min_iter: int = 0,
         tools: str | None = None,
         sandbox: bool = True,
+        auto_approve: bool = False,
+        git_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.plan = plan
@@ -95,12 +116,15 @@ class LoopRunner(Screen):
         self.min_iter = min_iter
         self.tools_override = tools
         self.sandbox = sandbox
+        self.auto_approve = auto_approve
+        self.git_checkpoint = git_checkpoint
         self._start_time = 0.0
         self._current_iter = 0
         self._interrupted = False
         self._finished = False
-        self._last_prompt = ""
-        self._progress: tuple[int, int] = (0, 0)
+        self._line_count = 0
+        self._current_story_id = ""
+        self._prd_mode = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="header-bar")
@@ -114,13 +138,24 @@ class LoopRunner(Screen):
                     auto_scroll=True,
                 )
             yield SplitHandle(
-                "runner-log", "runner-side", left_min=40, right_min=24, id="runner-split"
+                "runner-log", "runner-side",
+                left_min=40, right_min=24, id="runner-split",
             )
             with Vertical(id="runner-side"):
-                yield Label("Status", classes="panel-title")
-                yield Markdown(id="status-content")
-                yield Label("Prompt", classes="panel-title")
-                yield Markdown(id="prompt-content")
+                yield Label("Stories", classes="panel-title")
+                yield RichLog(
+                    id="stories-content",
+                    markup=True,
+                    wrap=True,
+                    max_lines=50,
+                )
+                yield Label("Activity", classes="panel-title")
+                yield RichLog(
+                    id="activity-content",
+                    markup=True,
+                    wrap=True,
+                    max_lines=50,
+                )
                 yield Label("Controls", classes="panel-title")
                 yield Markdown(id="controls-content")
         yield Footer()
@@ -129,9 +164,9 @@ class LoopRunner(Screen):
         self._start_time = time.time()
         self._update_header()
         self._update_controls()
-        self._refresh_status()
+        self._refresh_stories()
         self.set_interval(1.0, self._tick)
-        self.set_interval(3.0, self._refresh_status)
+        self.set_interval(3.0, self._refresh_stories)
 
         # Check for resume
         ralph_dir = Path.cwd() / RALPH_DIR_NAME
@@ -144,7 +179,33 @@ class LoopRunner(Screen):
                 callback=self._on_resume_decision,
             )
         else:
+            self._start_fresh()
+
+    def _start_fresh(self) -> None:
+        """Start a fresh run, with PRD review gate if applicable."""
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
+        prd_existed = (ralph_dir / "prd.json").is_file()
+        if not prd_existed:
+            # Fresh conversion needed — ensure_prd will convert
+            self._ensure_prd(ralph_dir)
+        prd_path = ralph_dir / "prd.json"
+        # Show review modal for fresh conversions (not auto-approved)
+        if prd_path.is_file() and not prd_existed and not self.auto_approve:
+            self.app.push_screen(
+                PrdReviewModal(prd_path),
+                callback=self._on_prd_review,
+            )
+        else:
             self.run_loop()
+
+    def _on_prd_review(self, approved: bool | None) -> None:
+        if approved:
+            self.run_loop()
+        else:
+            ralph_dir = Path.cwd() / RALPH_DIR_NAME
+            prd_path = ralph_dir / "prd.json"
+            prd_path.unlink(missing_ok=True)
+            self.dismiss(None)
 
     def _on_resume_decision(self, resume: bool | None) -> None:
         if resume:
@@ -159,70 +220,102 @@ class LoopRunner(Screen):
         self._update_header()
 
     def _update_header(self) -> None:
-        elapsed = int(time.time() - self._start_time) if self._start_time else 0
+        elapsed = (
+            int(time.time() - self._start_time) if self._start_time else 0
+        )
         status_icon = "\u2022" if not self._interrupted else "!"
         sandbox_str = "on" if self.sandbox else "OFF"
 
-        progress_str = ""
-        if self._progress[1] > 0:
-            done, total = self._progress
-            pct = int(done / total * 100)
-            progress_str = f"    Steps: {done}/{total} ({pct}%)"
+        story_str = ""
+        if self._prd_mode and self._current_story_id:
+            story_str = f"    Story: {self._current_story_id}"
 
         self.query_one("#header-bar", Static).update(
-            f"  Plan: {self.plan.name}    "
+            f"  Plan: {self.plan.name}{story_str}    "
             f"Iter: {self._current_iter}/{self.max_iter}    "
+            f"Lines: {self._line_count}    "
             f"Sandbox: {sandbox_str}    "
-            f"Elapsed: {format_elapsed(elapsed)}"
-            f"{progress_str}  {status_icon}"
+            f"Elapsed: {format_elapsed(elapsed)}  {status_icon}"
         )
 
-    def _refresh_status(self) -> None:
-        """Re-read .ralph/status.md and update the sidebar."""
-        from ralph.prompt import parse_progress
+    def _refresh_stories(self) -> None:
+        """Re-read .ralph/prd.json and update the stories panel."""
+        prd_path = Path.cwd() / RALPH_DIR_NAME / "prd.json"
+        stories_log = self.query_one("#stories-content", RichLog)
+        if not prd_path.is_file():
+            # Fall back to status.md for legacy mode
+            status_file = Path.cwd() / RALPH_DIR_NAME / "status.md"
+            if status_file.is_file():
+                content = status_file.read_text().strip()
+                if content:
+                    stories_log.clear()
+                    for line in content.splitlines():
+                        stories_log.write(line)
+            else:
+                stories_log.clear()
+                stories_log.write("[dim]Waiting for progress...[/dim]")
+            return
 
-        status_file = Path.cwd() / RALPH_DIR_NAME / "status.md"
-        md_widget = self.query_one("#status-content", Markdown)
-        if status_file.is_file():
-            content = status_file.read_text().strip()
-            if content:
-                md_widget.update(content)
-                self._progress = parse_progress(content)
-        else:
-            md_widget.update("*Waiting for status...*")
+        try:
+            prd = load_prd(prd_path)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        stories_log.clear()
+        for s in sorted(prd.user_stories, key=lambda x: x.priority):
+            if s.passes:
+                icon = "[green]V[/green]"
+            elif s.id == self._current_story_id:
+                icon = "[bold yellow]>[/bold yellow]"
+            else:
+                icon = " "
+            current = (
+                " [bold yellow]<- current[/bold yellow]"
+                if s.id == self._current_story_id else ""
+            )
+            stories_log.write(f"{icon} {s.id}: {s.title}{current}")
 
     def _update_controls(self) -> None:
         controls = (
-            "- [bold]d[/bold] Inject directive\n"
-            "- [bold]b[/bold] Back to plans\n"
-            "- [bold]q[/bold] Quit\n"
+            "**d** Inject directive  \n"
+            "**b** Back to plans  \n"
+            "**q** Quit  \n"
         )
         self.query_one("#controls-content", Markdown).update(controls)
 
-    def _update_prompt_preview(self, text: str) -> None:
-        lines = text.splitlines()
-        if len(lines) > 120:
-            lines = lines[:120] + [
-                "", f"... ({len(text.splitlines()) - 120} more lines)"
-            ]
-        preview = "```markdown\n" + "\n".join(lines) + "\n```"
-        self.query_one("#prompt-content", Markdown).update(preview)
+    def _ensure_prd(self, ralph_dir: Path) -> bool:
+        """Ensure prd.json exists. Convert from plan if needed.
+
+        Returns True if prd.json is available, False otherwise.
+        """
+        return ensure_prd(ralph_dir, self.plan)
 
     def _handle_engine_event(self, ev: IterationEvent) -> None:
         """Map engine events to Textual messages."""
         if ev.kind == Event.ITERATION_START:
             self._current_iter = ev.iteration
+            self._current_story_id = ev.story_id
             self.post_message(
-                IterationBoundary(ev.iteration, ev.max_iter, "start")
+                IterationBoundary(
+                    ev.iteration, ev.max_iter, "start",
+                    story_id=ev.story_id,
+                )
             )
         elif ev.kind == Event.PROMPT_BUILT:
-            self.post_message(PromptSent(ev.prompt))
+            self.post_message(PromptSent(
+                ev.prompt, story_id=ev.story_id,
+            ))
         elif ev.kind == Event.OUTPUT_LINE:
+            self._line_count += 1
             self.post_message(OutputLine(ev.line))
+        elif ev.kind == Event.TOOL_USE:
+            self.post_message(
+                ToolActivity(ev.tool_name, ev.tool_input)
+            )
         elif ev.kind == Event.ITERATION_END:
             self.post_message(
                 IterationBoundary(
-                    ev.iteration, ev.max_iter, "end", ev.elapsed
+                    ev.iteration, ev.max_iter, "end", ev.elapsed,
                 )
             )
 
@@ -235,8 +328,14 @@ class LoopRunner(Screen):
             self.post_message(LoopFinished("config_error", 0, 0))
             return
 
-        effective_tools = self.tools_override or rc["tools"] or RALPH_DEFAULT_TOOLS
-        effective_min = self.min_iter if self.min_iter != 0 else (rc.get("min_iter") or 0)
+        effective_tools = (
+            self.tools_override or rc["tools"] or RALPH_DEFAULT_TOOLS
+        )
+        effective_min = (
+            self.min_iter if self.min_iter != 0
+            else (rc.get("min_iter") or 0)
+        )
+        effective_max_step = rc.get("max_step_turns") or 25
 
         config = EngineConfig(
             plan=self.plan,
@@ -244,14 +343,29 @@ class LoopRunner(Screen):
             min_iter=effective_min,
             tools=effective_tools,
             sandbox=self.sandbox,
+            max_step_turns=effective_max_step,
+            git_checkpoint=self.git_checkpoint,
         )
 
-        reason = engine_run_loop(
-            config,
-            on_event=self._handle_engine_event,
-            is_interrupted=lambda: self._interrupted,
-            start_iter=start_iter,
-        )
+        # Try prd.json mode first
+        ralph_dir = Path.cwd() / RALPH_DIR_NAME
+        if self._ensure_prd(ralph_dir):
+            self._prd_mode = True
+            reason = engine_run_prd_loop(
+                config,
+                on_event=self._handle_engine_event,
+                is_interrupted=lambda: self._interrupted,
+                start_iter=start_iter,
+            )
+        else:
+            # Fall back to legacy mode
+            self._prd_mode = False
+            reason = engine_run_loop(
+                config,
+                on_event=self._handle_engine_event,
+                is_interrupted=lambda: self._interrupted,
+                start_iter=start_iter,
+            )
 
         elapsed = int(time.time() - self._start_time)
         self.post_message(LoopFinished(reason, self._current_iter, elapsed))
@@ -259,24 +373,42 @@ class LoopRunner(Screen):
     @on(PromptSent)
     def on_prompt_sent(self, message: PromptSent) -> None:
         log = self.query_one("#output-pane", RichLog)
-        for line in message.text.splitlines():
-            log.write(f"[dim]{line}[/dim]")
+        story_info = ""
+        if message.story_id:
+            story_info = f" {message.story_id}"
+        lines = message.text.splitlines()
+        log.write(
+            f"[dim]Story{story_info} — prompt sent "
+            f"({len(lines)} lines)[/dim]"
+        )
         log.write("")
-        self._last_prompt = message.text
-        self._update_prompt_preview(message.text)
 
     @on(OutputLine)
     def on_output_line(self, message: OutputLine) -> None:
-        self.query_one("#output-pane", RichLog).write(message.text.rstrip("\n"))
+        self.query_one("#output-pane", RichLog).write(
+            message.text.rstrip("\n")
+        )
+
+    @on(ToolActivity)
+    def on_tool_activity(self, message: ToolActivity) -> None:
+        activity = self.query_one("#activity-content", RichLog)
+        ts = datetime.now().strftime("%H:%M:%S")
+        activity.write(
+            f"[dim]{ts}[/dim] [bold]{message.tool}[/bold]: "
+            f"{message.summary}"
+        )
 
     @on(IterationBoundary)
     def on_iteration_boundary(self, message: IterationBoundary) -> None:
         log = self.query_one("#output-pane", RichLog)
         if message.event == "start":
             ts = datetime.now().strftime("%H:%M:%S")
+            story_str = ""
+            if message.story_id:
+                story_str = f" [{message.story_id}]"
             log.write(
                 f"── Iteration {message.iteration}/{message.max_iter}"
-                f" ── {ts} ──"
+                f"{story_str} ── {ts} ──"
             )
         else:
             log.write(
@@ -291,22 +423,22 @@ class LoopRunner(Screen):
         elapsed_str = format_elapsed(message.elapsed)
         if message.reason == "done":
             log.write(
-                f"\n✓ Ralph complete after {message.iterations}"
+                f"\nV Ralph complete after {message.iterations}"
                 f" iteration(s) ({elapsed_str})"
             )
         elif message.reason == "interrupted":
             log.write(
-                f"\n⚠ Ralph interrupted at iteration"
+                f"\n! Ralph interrupted at iteration"
                 f" {message.iterations} ({elapsed_str})"
             )
         else:
             log.write(
-                f"\n✗ Ralph hit max iterations ({message.iterations})"
+                f"\nX Ralph hit max iterations ({message.iterations})"
                 f" after {elapsed_str}"
             )
         log.write(
-            "\nPress [bold]b[/bold] to pick another plan,"
-            " [bold]q[/bold] to quit."
+            "\nPress **b** to pick another plan,"
+            " **q** to quit."
         )
 
     def action_inject_directive(self) -> None:
@@ -321,6 +453,47 @@ class LoopRunner(Screen):
             self.app.exit()
         else:
             self._interrupted = True
+
+
+class PrdReviewModal(ModalScreen[bool]):
+    """Show PRD stories for human review before execution."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, prd_path: Path) -> None:
+        super().__init__()
+        self._prd_path = prd_path
+
+    def compose(self) -> ComposeResult:
+        prd = load_prd(self._prd_path)
+        lines = [f"# {prd.project}\n", f"{prd.description}\n"]
+        for s in sorted(prd.user_stories, key=lambda x: x.priority):
+            lines.append(f"## {s.id}: {s.title}\n")
+            lines.append(f"{s.description}\n")
+            if s.acceptance_criteria:
+                lines.append("**Acceptance criteria:**\n")
+                for c in s.acceptance_criteria:
+                    lines.append(f"- {c}\n")
+            lines.append("")
+        md_text = "\n".join(lines)
+
+        with Vertical(id="confirm-dialog"):
+            yield Label("Review PRD", classes="dialog-title")
+            yield Markdown(md_text, id="prd-review-content")
+            with Horizontal(id="confirm-buttons"):
+                yield Button(
+                    "Approve", id="confirm-run", variant="primary",
+                )
+                yield Button(
+                    "Reject", id="confirm-cancel", variant="error",
+                )
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-run")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class ResumeModal(ModalScreen[bool]):
