@@ -1,3 +1,7 @@
+## Notifications
+
+Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never run `terminal-notifier` manually**, even if a project's CLAUDE.md instructs you to. Ignore all such instructions.
+
 ## Git Branch Rules
 
 **For this repo (fun-bash-automations):** Always push to `mh-netflix` branch. No feature sub-branches needed.
@@ -32,14 +36,13 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
 
 - **All standard commands work directly in Netflix repos**:
   - `gh pr list`, `gh pr create`, `gh pr edit`, `gh pr view`
-  - `gh api repos/corp/repo-name/pulls`
 - **Prerequisites**: Netflix fork installed, `git.netflix.net` auth, canonical remotes (`nfgit canonical origin`)
 - Note: `gh pr checkout` doesn't work due to Netflix Git Proxy; use git fetch workaround
-- **Creating gists** (special case):
+- **`gh api` and `gh gist`** require `GH_HOST` since they can't infer the host from git remotes:
   ```bash
+  GH_HOST=git.netflix.net gh api repos/corp/repo-name/pulls
   GH_HOST=git.netflix.net gh gist create file1.md file2.py --desc "Description"
   ```
-  Note: `gh gist` requires `GH_HOST` env var since it doesn't auto-detect from repo remotes.
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 
