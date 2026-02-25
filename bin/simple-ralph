@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # --- Defaults ---
-MAX_ITER=10
+MAX_ITER=20
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 Usage: simple-ralph [options] plan.md
 
 Options:
-  -n, --max N          Max iterations (default: 10)
+  -n, --max N          Max iterations (default: 20)
   -t, --tools T        Tool scope (default: Edit Read Write Glob Grep Bash)
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
@@ -142,11 +142,21 @@ Execute the implementation plan in $PLAN
 Read the plan file first, then work through it step by step.
 
 ## Rules
-- Work through steps in order. Run tests after each step.
-- Commit after each passing step with a descriptive message.
+- Work through ONE step at a time. After completing a step:
+  1. Run the step's verification checklist (if it has one)
+  2. Self-review: re-read what you changed and check for:
+     - Bugs, typos, or logic errors
+     - Files modified that shouldn't have been
+     - Anything a code reviewer would flag (naming, error handling, edge cases)
+  3. Fix any issues found in self-review before proceeding
+  4. Run the step's self-review gate (if the plan has one)
+  5. Commit with a descriptive message
+  6. Update .ralph/status.md with progress
+  7. Output: RALPH_STEP_DONE
+- Do NOT continue to the next step after outputting RALPH_STEP_DONE.
 - Do NOT push to main or master.
-- Update .ralph/status.md with progress after each step.
-- When ALL steps are complete and tests pass, output: RALPH_DONE
+- When ALL steps are complete and tests pass, output RALPH_DONE instead.
+- If the plan has self-review gates or verification checklists — follow them exactly.
 $([ -n "$directive" ] && echo "
 ## Operator directive (priority)
 $directive")
@@ -219,6 +229,11 @@ for ((i=1; i<=MAX_ITER; i++)); do
     echo "Done after $i iteration(s)." | tee -a "$OUTPUT_LOG"
     trap - INT
     exit 0
+  fi
+
+  # Step completed — force context reset by continuing to next iteration
+  if grep -q "RALPH_STEP_DONE" "$ITER_LOG"; then
+    echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
   fi
 
   [[ $EXIT -ne 0 ]] && echo "Warning: claude exited $EXIT on iteration $i" | tee -a "$OUTPUT_LOG"

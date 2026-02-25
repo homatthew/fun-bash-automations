@@ -86,12 +86,16 @@ Rules:
 - Each `### Step N:` section becomes one user story.
 - Step title -> story title.
 - Step content -> description + acceptance criteria.
-- Verification lines -> acceptance criteria.
+- Verification commands (bash commands for build/test/lint) -> acceptance criteria.\
+  Include the EXACT commands, not summaries. E.g., "Run: ./gradlew build" not "Build passes".
+- Self-review gate items -> acceptance criteria. Preserve each bullet as a separate criterion.
+- Context checkpoint instructions -> notes field.
 - Always add "Tests pass" as the final criterion if not already present.
 - Priority = step order (1-based).
 - All stories start with passes: false and empty notes.
 - plan_context: Capture project-wide instructions that aren't step-specific \
-(technology constraints, patterns to follow, testing requirements). 2-4 sentences.
+(technology constraints, patterns to follow, testing requirements). \
+Include "Original Design Intent" section verbatim if present. 2-4 sentences.
 - Output ONLY valid JSON. No commentary, no markdown fences.
 
 Plan:

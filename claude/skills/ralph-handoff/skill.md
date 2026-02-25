@@ -28,7 +28,9 @@ Read the plan file. Check whether it has the required sections for autonomous ex
 - [ ] **Per-step Verification Checklist** — Every step must end with explicit verification commands (compile, test, lint) AND a self-review section.
 - [ ] **Per-step Self-Review Gate** — Each step must include a self-review checklist that asks: "Does this match the original design intent? Did I only touch the files listed? Do the remaining steps still make sense?"
 - [ ] **Context Checkpoint** — Between steps, a clear marker that says whether to `/clear` and what the next step touches (so the agent knows what context it needs).
-- [ ] **Completion Signal** — Each step ends with the exact text the agent must output when done (RALPH_DONE or RALPH_STORY_DONE).
+- [ ] **Completion Signal** — Each step ends with the exact text the agent must output when done:
+  - simple-ralph: `RALPH_STEP_DONE` per step, `RALPH_DONE` for the final step
+  - full ralph: `RALPH_STORY_DONE` per story
 
 ### 3. Augment the plan
 
@@ -58,7 +60,7 @@ Add this after the design intent:
 1. Run the verification checklist (must all pass)
 2. Run the self-review gate (must all pass)
 3. Commit with a descriptive message
-4. Output RALPH_STORY_DONE (or RALPH_DONE for simple-ralph)
+4. Output RALPH_STEP_DONE (simple-ralph) or RALPH_STORY_DONE (full ralph)
 
 **On session start / after context clear**: Run these commands to recover:
 \```bash
