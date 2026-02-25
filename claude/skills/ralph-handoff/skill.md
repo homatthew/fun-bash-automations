@@ -130,13 +130,16 @@ Plan: ~/.claude/plans/<plan-name>.md (augmented for autonomous execution)
 # Full Ralph (TUI + PRD stories):
 ralph ~/.claude/plans/<plan-name>.md
 
-# Simple Ralph (bash, zero deps, easy to tail):
+# Simple Ralph (bash, zero deps):
 simple-ralph ~/.claude/plans/<plan-name>.md
 
-# In a worktree (isolated):
-simple-ralph -w <slug> ~/.claude/plans/<plan-name>.md
+# Simple Ralph with rich output (recommended):
+simple-ralph --watch ~/.claude/plans/<plan-name>.md
 
-# Monitor (in another terminal):
+# In a worktree (isolated):
+simple-ralph --watch -w <slug> ~/.claude/plans/<plan-name>.md
+
+# Or monitor separately (in another terminal):
 rt                          # tail -f .ralph/output.log
 ralph-watch                 # rich console version
 ```
