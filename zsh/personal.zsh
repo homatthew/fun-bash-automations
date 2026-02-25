@@ -253,6 +253,7 @@ export PATH=$PATH:/Users/matthewho/.temporal
 
 # Beads: central task memory across all repos (lives in dump repo)
 export BEADS_DIR=$HOME/repos/dump/.beads
+export BD_DB=$BEADS_DIR/beads.db
 
 # ==============================================================================
 # Aliases
