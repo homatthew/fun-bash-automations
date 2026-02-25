@@ -162,7 +162,10 @@ trap 'INTERRUPTED=1; echo ""; echo ">>> Interrupt received — finishing iterati
 
 # --- Header ---
 echo "simple-ralph | plan: $(basename "$PLAN") | max: $MAX_ITER | dir: $(pwd)"
-echo "Monitor: tail -f $(pwd)/$OUTPUT_LOG"
+echo ""
+echo "Monitor (in another terminal):"
+echo "  rt $(pwd)"
+echo "  ralph-watch $(pwd)"
 echo ""
 
 write_meta "running" 0
