@@ -223,17 +223,20 @@ for ((i=1; i<=MAX_ITER; i++)); do
   echo "$FOOTER" | tee -a "$OUTPUT_LOG"
   echo "" | tee -a "$OUTPUT_LOG"
 
-  # Check for completion
+  # Check step completion FIRST — Claude's narration often mentions "RALPH_DONE"
+  # (e.g., "when all steps complete, output RALPH_DONE") which false-triggers the
+  # RALPH_DONE grep. Checking RALPH_STEP_DONE first and continuing skips that.
+  if grep -q "RALPH_STEP_DONE" "$ITER_LOG"; then
+    echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
+    continue
+  fi
+
+  # All steps complete
   if grep -q "RALPH_DONE" "$ITER_LOG"; then
     write_meta "done" "$i"
     echo "Done after $i iteration(s)." | tee -a "$OUTPUT_LOG"
     trap - INT
     exit 0
-  fi
-
-  # Step completed — force context reset by continuing to next iteration
-  if grep -q "RALPH_STEP_DONE" "$ITER_LOG"; then
-    echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
   fi
 
   [[ $EXIT -ne 0 ]] && echo "Warning: claude exited $EXIT on iteration $i" | tee -a "$OUTPUT_LOG"
