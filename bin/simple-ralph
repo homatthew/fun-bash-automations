@@ -190,16 +190,19 @@ for ((i=1; i<=MAX_ITER; i++)); do
     <<< "$PROMPT" 2>>"$ITER_LOG.err" \
     | tee "$ITER_LOG" \
     | jq --unbuffered -r '
-        if .type == "assistant" and .subtype == "text" then
-          .content // empty
-        elif .type == "assistant" and .subtype == "tool_use" then
-          "[" + (.tool // "?") + "] " + (
+        # --verbose stream-json nests content inside .message.content[]
+        select(.type == "assistant") |
+        .message.content[]? //empty |
+        if .type == "text" then
+          .text // empty
+        elif .type == "tool_use" then
+          "[" + (.name // "?") + "] " + (
             if .input.command then .input.command[:80]
             elif .input.file_path then .input.file_path
             elif .input.pattern then .input.pattern
             else (.input | tostring)[:60]
             end
-          ) + "\n"
+          )
         else empty end
       ' 2>/dev/null \
     | tee -a "$OUTPUT_LOG"
