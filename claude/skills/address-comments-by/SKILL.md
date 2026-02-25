@@ -26,15 +26,25 @@ View and evaluate GitHub PR review comments from a specific reviewer, then accep
 gh pr list --head $(git branch --show-current) --json number,title,state,url
 ```
 
-### 2. Get reviewers who left comments
+### 2. Determine the GH_HOST
 
-> Note: All `gh` commands work directly with Netflix repos — no proxy setup needed.
+`gh api` can't infer the host from git remotes, so set `GH_HOST` for Netflix repos:
+
+```bash
+# Check if this is a Netflix GHE repo
+REMOTE_URL=$(git remote get-url origin)
+if [[ "$REMOTE_URL" == *"git.netflix.net"* ]]; then
+  export GH_HOST=git.netflix.net
+fi
+```
+
+### 3. Get reviewers who left comments
 
 ```bash
 gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '[.[].user.login] | unique'
 ```
 
-### 3. Get review comments from a specific reviewer
+### 4. Get review comments from a specific reviewer
 
 ```bash
 gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login == "<REVIEWER>") | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
@@ -45,7 +55,7 @@ For bot reviewers like graphite-app, use case-insensitive matching:
 gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user.login | test("<REVIEWER>"; "i")) | "---\nFile: \(.path):\(.line // .original_line)\nComment: \(.body)\n"'
 ```
 
-### 4. For each comment, evaluate using these criteria
+### 5. For each comment, evaluate using these criteria
 
 - **ACCEPT** if:
   - The suggestion fixes a real bug or edge case
@@ -57,11 +67,11 @@ gh api repos/<ORG>/<REPO>/pulls/<PR_NUMBER>/comments | jq -r '.[] | select(.user
   - The concern is not a real scenario (e.g., API would never return that)
   - The fix adds unnecessary complexity
 
-### 5. Apply accepted fixes
+### 6. Apply accepted fixes
 
 Use the Edit tool to apply each accepted fix.
 
-### 6. Verify changes
+### 7. Verify changes
 
 Run the project's tests to verify changes don't break anything.
 

@@ -133,15 +133,14 @@ NewPlanItem {
     background: #131820;
 }
 
-#status-content {
-    height: 8;
+#stories-content {
+    height: 1fr;
     overflow-y: auto;
     margin-bottom: 1;
 }
 
-#prompt-content {
-    height: 1fr;
-    overflow-y: auto;
+#activity-content {
+    height: 12;
     margin-bottom: 1;
 }
 
