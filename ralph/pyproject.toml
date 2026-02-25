@@ -17,6 +17,7 @@ dev = [
 
 [project.scripts]
 ralph = "ralph.cli:app"
+ralph-watch = "ralph.watch:main"
 
 [build-system]
 requires = ["hatchling"]
