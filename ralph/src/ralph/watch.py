@@ -1,8 +1,8 @@
 """ralph-watch — Rich live tail for Ralph output.
 
-Tails .ralph/output.log with color-coded iteration boundaries,
-elapsed time, and status from meta.json. Works with both
-simple-ralph and full ralph.
+Tails .ralph/output.log with a spinner, elapsed time per line,
+and color-coded output. Ported from the dgi-tools SSH streaming
+pattern (SpinnerColumn + TimeElapsedColumn + tree connectors).
 
 Usage:
   ralph-watch              # Watch .ralph/ in cwd
@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 console = Console()
 
@@ -31,32 +32,42 @@ def _read_meta(ralph_dir: Path) -> dict:
         return {}
 
 
-def _format_line(line: str) -> None:
-    """Print a line with rich formatting based on content."""
-    stripped = line.rstrip("\n")
-
-    # Iteration boundaries
-    if stripped.startswith("=== iteration") and "===" in stripped[3:]:
-        console.rule(f"[bold cyan]{stripped.strip('= ')}[/bold cyan]")
-        return
-
-    # Completion signals
-    if "RALPH_DONE" in stripped or "RALPH_STORY_DONE" in stripped:
-        console.print(f"[bold green]{stripped}[/bold green]")
-        return
-
-    # Error lines
-    if any(m in stripped for m in ("FAILED", "Error", "Traceback")):
-        console.print(f"[red]{stripped}[/red]")
-        return
-
-    # Normal output
-    console.print(stripped, highlight=False)
-
-
 def _find_latest_iter_log(ralph_dir: Path) -> Path | None:
     logs = sorted(ralph_dir.glob("iteration-*.log"), key=lambda p: p.stat().st_mtime)
     return logs[-1] if logs else None
+
+
+def _format_line(line: str, elapsed: int) -> str | None:
+    """Format a line with elapsed time and tree connectors. Returns None to skip."""
+    stripped = line.rstrip("\n")
+    if not stripped:
+        return None
+
+    ts = f"[dim]{elapsed:>4}s[/dim]"
+
+    # Iteration boundaries
+    if stripped.startswith("=== iteration"):
+        return None  # handled by progress bar update
+
+    # Completion signals
+    if "RALPH_DONE" in stripped or "RALPH_STORY_DONE" in stripped:
+        return f"  [dim]│[/dim] {ts} [bold green]{stripped}[/bold green]"
+
+    # Tool calls
+    if stripped.startswith("[") and "]" in stripped[:30]:
+        bracket_end = stripped.index("]")
+        tool = stripped[1:bracket_end]
+        rest = stripped[bracket_end + 2:]
+        return f"  [dim]│[/dim] {ts} [bold]{tool}[/bold] [dim]{rest}[/dim]"
+
+    # Error lines
+    if any(m in stripped for m in ("FAILED", "Error", "Traceback", "error:")):
+        return f"  [dim]│[/dim] {ts} [red]{stripped}[/red]"
+
+    # Normal text — truncate long lines
+    if len(stripped) > 120:
+        stripped = stripped[:117] + "..."
+    return f"  [dim]│[/dim] {ts} {stripped}"
 
 
 def _watch(ralph_dir: Path, from_start: bool = False) -> None:
@@ -64,21 +75,22 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
 
     # Show header from meta.json
     meta = _read_meta(ralph_dir)
+    plan_name = "unknown"
     if meta:
-        plan = Path(meta.get("plan", "unknown")).name
+        plan_name = Path(meta.get("plan", "unknown")).name
         status = meta.get("status", "?")
         itr = meta.get("iter", 0)
         mx = meta.get("max_iter", "?")
         cwd = meta.get("cwd", "")
         console.rule("[bold]ralph-watch[/bold]")
         console.print(
-            f"  Plan: [cyan]{plan}[/cyan]  |  "
+            f"  Plan: [cyan]{plan_name}[/cyan]  |  "
             f"Iter: [yellow]{itr}/{mx}[/yellow]  |  "
             f"Status: [bold]{status}[/bold]"
         )
         if cwd:
             console.print(f"  Dir:  [dim]{cwd}[/dim]")
-        console.rule()
+        console.print()
 
     # Wait for log to exist
     if not output_log.exists():
@@ -95,38 +107,94 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
                     break
                 time.sleep(0.5)
 
-    with open(output_log) as f:
-        if not from_start:
-            f.seek(0, 2)  # seek to end
+    iter_start = time.monotonic()
+    current_iter = ""
 
-        last_meta_check = 0.0
-        while True:
-            line = f.readline()
-            if line:
-                _format_line(line)
-            else:
-                now = time.time()
-                if now - last_meta_check > 2:
-                    last_meta_check = now
-                    meta = _read_meta(ralph_dir)
-                    if meta.get("status") in ("done", "interrupted", "max_iterations"):
-                        console.rule(
-                            f"[bold]Ralph {meta['status']}[/bold] "
-                            f"(iter {meta.get('iter', '?')})"
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(
+            f"Watching {plan_name}...", total=None,
+        )
+
+        with open(output_log) as f:
+            if not from_start:
+                f.seek(0, 2)
+
+            last_meta_check = 0.0
+            while True:
+                line = f.readline()
+                if line:
+                    stripped = line.rstrip("\n")
+
+                    # Detect iteration boundaries — update spinner
+                    if stripped.startswith("=== iteration") and "===" in stripped[3:]:
+                        # Extract iteration info
+                        current_iter = stripped.strip("= ")
+                        iter_start = time.monotonic()
+                        progress.update(
+                            task,
+                            description=f"[bold cyan]{current_iter}[/bold cyan]",
                         )
-                        break
-                    pid = meta.get("pid")
-                    if pid:
-                        try:
-                            os.kill(pid, 0)
-                        except (OSError, ProcessLookupError):
+                        progress.console.print(
+                            f"\n  [dim]┌─[/dim] [bold cyan]{current_iter}[/bold cyan]"
+                        )
+                        continue
+
+                    if stripped.startswith("=== iteration") and "complete" in stripped:
+                        progress.console.print(
+                            f"  [dim]└─[/dim] [dim]{stripped.strip('= ')}[/dim]\n"
+                        )
+                        continue
+
+                    elapsed = int(time.monotonic() - iter_start)
+                    formatted = _format_line(line, elapsed)
+                    if formatted:
+                        progress.console.print(formatted, highlight=False)
+                else:
+                    # Check if ralph finished
+                    now = time.time()
+                    if now - last_meta_check > 2:
+                        last_meta_check = now
+                        meta = _read_meta(ralph_dir)
+                        if meta.get("status") in ("done", "interrupted", "max_iterations"):
+                            progress.update(
+                                task,
+                                description=(
+                                    f"[bold]Ralph {meta['status']}[/bold] "
+                                    f"(iter {meta.get('iter', '?')})"
+                                ),
+                            )
+                            # Drain remaining
                             remaining = f.read()
                             if remaining:
                                 for rem_line in remaining.splitlines():
-                                    _format_line(rem_line)
-                            console.rule("[bold]Ralph process exited[/bold]")
+                                    elapsed = int(time.monotonic() - iter_start)
+                                    fmt = _format_line(rem_line, elapsed)
+                                    if fmt:
+                                        progress.console.print(fmt, highlight=False)
                             break
-                time.sleep(0.1)
+                        pid = meta.get("pid")
+                        if pid:
+                            try:
+                                os.kill(pid, 0)
+                            except (OSError, ProcessLookupError):
+                                remaining = f.read()
+                                if remaining:
+                                    for rem_line in remaining.splitlines():
+                                        elapsed = int(time.monotonic() - iter_start)
+                                        fmt = _format_line(rem_line, elapsed)
+                                        if fmt:
+                                            progress.console.print(fmt, highlight=False)
+                                progress.update(
+                                    task, description="[bold]Ralph exited[/bold]",
+                                )
+                                break
+                    time.sleep(0.1)
 
 
 def main():
