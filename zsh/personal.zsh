@@ -699,11 +699,17 @@ rt() {
   # If no output.log, try to find the latest iteration log instead
   if [[ ! -f "$log" ]]; then
     local latest
-    latest=$(ls -t "$dir"/.ralph/iteration-*.log 2>/dev/null | head -1)
+    latest=$(ls -t "$dir"/.ralph/iteration-*.log 2>/dev/null | head -1 || true)
     if [[ -n "$latest" ]]; then
       log="$latest"
+    elif [[ -d "$dir/.ralph" ]]; then
+      echo "No logs yet in $dir/.ralph/ — waiting for Ralph to start..."
+      echo "Will tail output.log when it appears."
+      # Wait for output.log to appear
+      while [[ ! -f "$dir/.ralph/output.log" ]]; do sleep 1; done
+      log="$dir/.ralph/output.log"
     else
-      echo "No Ralph logs found in $dir/.ralph/"
+      echo "No .ralph/ directory in $dir"
       echo "Start Ralph first: simple-ralph plan.md"
       return 1
     fi

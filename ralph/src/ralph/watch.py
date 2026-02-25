@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """ralph-watch — Rich live tail for Ralph output.
 
 Tails .ralph/output.log with color-coded iteration boundaries,
@@ -9,26 +8,20 @@ Usage:
   ralph-watch              # Watch .ralph/ in cwd
   ralph-watch /path/to/dir # Watch specific directory
   ralph-watch -f           # Follow from start of file (not just tail)
-
-Requires: pip install rich (or just use `rt` shell alias for zero-dep tail)
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-try:
-    from rich.console import Console
-    from rich.text import Text
-except ImportError:
-    print("rich not installed. Use `rt` (tail -f) or: pip install rich")
-    sys.exit(1)
+from rich.console import Console
 
 console = Console()
 
 
-def read_meta(ralph_dir: Path) -> dict:
+def _read_meta(ralph_dir: Path) -> dict:
     meta_path = ralph_dir / "meta.json"
     if not meta_path.exists():
         return {}
@@ -38,7 +31,7 @@ def read_meta(ralph_dir: Path) -> dict:
         return {}
 
 
-def format_line(line: str) -> None:
+def _format_line(line: str) -> None:
     """Print a line with rich formatting based on content."""
     stripped = line.rstrip("\n")
 
@@ -61,18 +54,23 @@ def format_line(line: str) -> None:
     console.print(stripped, highlight=False)
 
 
-def watch(ralph_dir: Path, from_start: bool = False) -> None:
+def _find_latest_iter_log(ralph_dir: Path) -> Path | None:
+    logs = sorted(ralph_dir.glob("iteration-*.log"), key=lambda p: p.stat().st_mtime)
+    return logs[-1] if logs else None
+
+
+def _watch(ralph_dir: Path, from_start: bool = False) -> None:
     output_log = ralph_dir / "output.log"
 
     # Show header from meta.json
-    meta = read_meta(ralph_dir)
+    meta = _read_meta(ralph_dir)
     if meta:
         plan = Path(meta.get("plan", "unknown")).name
         status = meta.get("status", "?")
         itr = meta.get("iter", 0)
         mx = meta.get("max_iter", "?")
         cwd = meta.get("cwd", "")
-        console.rule(f"[bold]ralph-watch[/bold]")
+        console.rule("[bold]ralph-watch[/bold]")
         console.print(
             f"  Plan: [cyan]{plan}[/cyan]  |  "
             f"Iter: [yellow]{itr}/{mx}[/yellow]  |  "
@@ -84,7 +82,6 @@ def watch(ralph_dir: Path, from_start: bool = False) -> None:
 
     # Wait for log to exist
     if not output_log.exists():
-        # Try iteration logs as fallback (full ralph doesn't write output.log)
         latest = _find_latest_iter_log(ralph_dir)
         if latest:
             output_log = latest
@@ -102,43 +99,34 @@ def watch(ralph_dir: Path, from_start: bool = False) -> None:
         if not from_start:
             f.seek(0, 2)  # seek to end
 
-        last_meta_check = 0
+        last_meta_check = 0.0
         while True:
             line = f.readline()
             if line:
-                format_line(line)
+                _format_line(line)
             else:
-                # Periodically check if ralph is still running
                 now = time.time()
                 if now - last_meta_check > 2:
                     last_meta_check = now
-                    meta = read_meta(ralph_dir)
+                    meta = _read_meta(ralph_dir)
                     if meta.get("status") in ("done", "interrupted", "max_iterations"):
                         console.rule(
                             f"[bold]Ralph {meta['status']}[/bold] "
                             f"(iter {meta.get('iter', '?')})"
                         )
                         break
-                    # Check if PID is still alive
                     pid = meta.get("pid")
                     if pid:
                         try:
-                            import os
                             os.kill(pid, 0)
                         except (OSError, ProcessLookupError):
-                            # Process gone — drain remaining lines
                             remaining = f.read()
                             if remaining:
-                                for l in remaining.splitlines():
-                                    format_line(l)
+                                for rem_line in remaining.splitlines():
+                                    _format_line(rem_line)
                             console.rule("[bold]Ralph process exited[/bold]")
                             break
                 time.sleep(0.1)
-
-
-def _find_latest_iter_log(ralph_dir: Path) -> Path | None:
-    logs = sorted(ralph_dir.glob("iteration-*.log"), key=lambda p: p.stat().st_mtime)
-    return logs[-1] if logs else None
 
 
 def main():
@@ -162,7 +150,7 @@ def main():
         sys.exit(1)
 
     try:
-        watch(ralph_dir, from_start=from_start)
+        _watch(ralph_dir, from_start=from_start)
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching.[/dim]")
 
