@@ -182,11 +182,28 @@ for ((i=1; i<=MAX_ITER; i++)); do
 
   PROMPT=$(build_prompt "$i")
 
-  # Run claude — stream to terminal, iteration log, and combined log
+  # Run claude with streaming JSON, extract text + tool calls in real time
+  # jq unbuffered (-u) processes each line as it arrives
   EXIT=0
   claude -p --dangerously-skip-permissions \
+    --output-format stream-json \
     --allowedTools "$TOOLS" \
-    <<< "$PROMPT" 2>&1 | tee "$ITER_LOG" | tee -a "$OUTPUT_LOG" || EXIT=$?
+    <<< "$PROMPT" 2>"$ITER_LOG.err" \
+    | tee "$ITER_LOG" \
+    | jq --unbuffered -r '
+        if .type == "assistant" and .subtype == "text" then
+          .content // empty
+        elif .type == "assistant" and .subtype == "tool_use" then
+          "[" + (.tool // "?") + "] " + (
+            if .input.command then .input.command[:80]
+            elif .input.file_path then .input.file_path
+            elif .input.pattern then .input.pattern
+            else (.input | tostring)[:60]
+            end
+          ) + "\n"
+        else empty end
+      ' \
+    | tee -a "$OUTPUT_LOG" || EXIT=$?
 
   FOOTER="=== iteration $i complete ==="
   echo "$FOOTER" | tee -a "$OUTPUT_LOG"
