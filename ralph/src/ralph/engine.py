@@ -326,6 +326,7 @@ def run_prd_loop(
     meta_path = ralph_dir / "meta.json"
     status_file = ralph_dir / "status.md"
     prd_path = ralph_dir / "prd.json"
+    output_log = ralph_dir / "output.log"
 
     prd = load_prd(prd_path)
     stories = sorted(prd.user_stories, key=lambda s: s.priority)
@@ -347,11 +348,15 @@ def run_prd_loop(
     write_meta(meta_path, meta)
     loop_start = time.time()
 
+    # Combined output log for `rt` / `ralph-watch` tailing
+    combined_log = open(output_log, "a")
+
     for i in range(start_iter, config.max_iter + 1):
         if is_interrupted():
             elapsed = int(time.time() - loop_start)
             meta["status"] = "interrupted"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i, max_iter=config.max_iter,
                 elapsed=elapsed, reason="interrupted",
@@ -364,6 +369,7 @@ def run_prd_loop(
             elapsed = int(time.time() - loop_start)
             meta["status"] = "done"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i, max_iter=config.max_iter,
                 elapsed=elapsed, reason="done",
@@ -415,6 +421,13 @@ def run_prd_loop(
         # Build command with stream-json
         cmd = _build_cmd(config, stream_json=True)
 
+        # Write iteration header to combined log
+        combined_log.write(
+            f"=== iteration {i}/{config.max_iter}  "
+            f"[{current.id}] ===\n"
+        )
+        combined_log.flush()
+
         # Run subprocess, parse stream-json events
         text_buffer: list[str] = []
         with open(log_file, "w") as lf:
@@ -433,6 +446,7 @@ def run_prd_loop(
                 lf.write(raw_line)
                 _parse_stream_event(
                     raw_line, i, text_buffer, on_event,
+                    combined_log=combined_log,
                 )
                 if is_interrupted():
                     proc.terminate()
@@ -444,6 +458,9 @@ def run_prd_loop(
                     break
 
             exit_code = proc.wait()
+
+        combined_log.write(f"=== iteration {i} complete ===\n\n")
+        combined_log.flush()
 
         iter_elapsed = int(time.time() - iter_start)
         on_event(IterationEvent(
@@ -467,6 +484,7 @@ def run_prd_loop(
                 elapsed = int(time.time() - loop_start)
                 meta["status"] = "done"
                 write_meta(meta_path, meta)
+                combined_log.close()
                 on_event(IterationEvent(
                     kind=Event.DONE, iteration=i,
                     max_iter=config.max_iter, elapsed=elapsed,
@@ -489,6 +507,7 @@ def run_prd_loop(
             elapsed = int(time.time() - loop_start)
             meta["status"] = "interrupted"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i, max_iter=config.max_iter,
                 elapsed=elapsed, reason="interrupted",
@@ -499,6 +518,7 @@ def run_prd_loop(
     elapsed = int(time.time() - loop_start)
     meta["status"] = "max_iterations"
     write_meta(meta_path, meta)
+    combined_log.close()
     on_event(IterationEvent(
         kind=Event.DONE, iteration=config.max_iter,
         max_iter=config.max_iter, elapsed=elapsed,
@@ -512,8 +532,12 @@ def _parse_stream_event(
     iteration: int,
     text_buffer: list[str],
     on_event: Callable[[IterationEvent], None],
+    combined_log: object | None = None,
 ) -> None:
-    """Parse a single stream-json line and emit events."""
+    """Parse a single stream-json line and emit events.
+
+    If combined_log is provided, text content is written to it for tailing.
+    """
     try:
         event = json.loads(raw_line)
     except json.JSONDecodeError:
@@ -521,6 +545,9 @@ def _parse_stream_event(
             kind=Event.OUTPUT_LINE, iteration=iteration,
             line=raw_line,
         ))
+        if combined_log:
+            combined_log.write(raw_line)
+            combined_log.flush()
         return
 
     msg_type = event.get("type")
@@ -532,6 +559,9 @@ def _parse_stream_event(
         on_event(IterationEvent(
             kind=Event.OUTPUT_LINE, iteration=iteration, line=text,
         ))
+        if combined_log:
+            combined_log.write(text)
+            combined_log.flush()
     elif msg_type == "assistant" and subtype == "tool_use":
         tool = event.get("tool", "")
         tool_input = _summarize_tool_input(event.get("input", {}))
@@ -539,6 +569,9 @@ def _parse_stream_event(
             kind=Event.TOOL_USE, iteration=iteration,
             tool_name=tool, tool_input=tool_input,
         ))
+        if combined_log:
+            combined_log.write(f"[tool: {tool}] {tool_input}\n")
+            combined_log.flush()
     elif msg_type == "tool_result":
         on_event(IterationEvent(
             kind=Event.TOOL_RESULT, iteration=iteration,
@@ -568,6 +601,7 @@ def run_loop(
     _ensure_git_exclude(ralph_dir.name)
     meta_path = ralph_dir / "meta.json"
     status_file = ralph_dir / "status.md"
+    output_log = ralph_dir / "output.log"
 
     meta = {
         "plan": str(config.plan),
@@ -581,11 +615,15 @@ def run_loop(
     write_meta(meta_path, meta)
     loop_start = time.time()
 
+    # Combined output log for `rt` / `ralph-watch` tailing
+    combined_log = open(output_log, "a")
+
     for i in range(start_iter, config.max_iter + 1):
         if is_interrupted():
             elapsed = int(time.time() - loop_start)
             meta["status"] = "interrupted"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i, max_iter=config.max_iter,
                 elapsed=elapsed, reason="interrupted",
@@ -629,6 +667,10 @@ def run_loop(
         # Build command
         cmd = _build_cmd(config, stream_json=False)
 
+        # Write iteration header to combined log
+        combined_log.write(f"=== iteration {i}/{config.max_iter} ===\n")
+        combined_log.flush()
+
         # Run subprocess, stream output
         with open(log_file, "w") as lf:
             proc = subprocess.Popen(
@@ -644,6 +686,8 @@ def run_loop(
 
             for line in iter(proc.stdout.readline, ""):
                 lf.write(line)
+                combined_log.write(line)
+                combined_log.flush()
                 on_event(IterationEvent(
                     kind=Event.OUTPUT_LINE, iteration=i, line=line,
                 ))
@@ -657,6 +701,9 @@ def run_loop(
                     break
 
             exit_code = proc.wait()
+
+        combined_log.write(f"=== iteration {i} complete ===\n\n")
+        combined_log.flush()
 
         iter_elapsed = int(time.time() - iter_start)
         on_event(IterationEvent(
@@ -676,6 +723,7 @@ def run_loop(
             elapsed = int(time.time() - loop_start)
             meta["status"] = "done"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i,
                 max_iter=config.max_iter, elapsed=elapsed,
@@ -688,6 +736,7 @@ def run_loop(
             elapsed = int(time.time() - loop_start)
             meta["status"] = "interrupted"
             write_meta(meta_path, meta)
+            combined_log.close()
             on_event(IterationEvent(
                 kind=Event.DONE, iteration=i,
                 max_iter=config.max_iter, elapsed=elapsed,
@@ -699,6 +748,7 @@ def run_loop(
     elapsed = int(time.time() - loop_start)
     meta["status"] = "max_iterations"
     write_meta(meta_path, meta)
+    combined_log.close()
     on_event(IterationEvent(
         kind=Event.DONE, iteration=config.max_iter,
         max_iter=config.max_iter, elapsed=elapsed,

@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""ralph-watch — Rich live tail for Ralph output.
+
+Tails .ralph/output.log with color-coded iteration boundaries,
+elapsed time, and status from meta.json. Works with both
+simple-ralph and full ralph.
+
+Usage:
+  ralph-watch              # Watch .ralph/ in cwd
+  ralph-watch /path/to/dir # Watch specific directory
+  ralph-watch -f           # Follow from start of file (not just tail)
+
+Requires: pip install rich (or just use `rt` shell alias for zero-dep tail)
+"""
+
+import json
+import sys
+import time
+from pathlib import Path
+
+try:
+    from rich.console import Console
+    from rich.text import Text
+except ImportError:
+    print("rich not installed. Use `rt` (tail -f) or: pip install rich")
+    sys.exit(1)
+
+console = Console()
+
+
+def read_meta(ralph_dir: Path) -> dict:
+    meta_path = ralph_dir / "meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def format_line(line: str) -> None:
+    """Print a line with rich formatting based on content."""
+    stripped = line.rstrip("\n")
+
+    # Iteration boundaries
+    if stripped.startswith("=== iteration") and "===" in stripped[3:]:
+        console.rule(f"[bold cyan]{stripped.strip('= ')}[/bold cyan]")
+        return
+
+    # Completion signals
+    if "RALPH_DONE" in stripped or "RALPH_STORY_DONE" in stripped:
+        console.print(f"[bold green]{stripped}[/bold green]")
+        return
+
+    # Error lines
+    if any(m in stripped for m in ("FAILED", "Error", "Traceback")):
+        console.print(f"[red]{stripped}[/red]")
+        return
+
+    # Normal output
+    console.print(stripped, highlight=False)
+
+
+def watch(ralph_dir: Path, from_start: bool = False) -> None:
+    output_log = ralph_dir / "output.log"
+
+    # Show header from meta.json
+    meta = read_meta(ralph_dir)
+    if meta:
+        plan = Path(meta.get("plan", "unknown")).name
+        status = meta.get("status", "?")
+        itr = meta.get("iter", 0)
+        mx = meta.get("max_iter", "?")
+        cwd = meta.get("cwd", "")
+        console.rule(f"[bold]ralph-watch[/bold]")
+        console.print(
+            f"  Plan: [cyan]{plan}[/cyan]  |  "
+            f"Iter: [yellow]{itr}/{mx}[/yellow]  |  "
+            f"Status: [bold]{status}[/bold]"
+        )
+        if cwd:
+            console.print(f"  Dir:  [dim]{cwd}[/dim]")
+        console.rule()
+
+    # Wait for log to exist
+    if not output_log.exists():
+        # Try iteration logs as fallback (full ralph doesn't write output.log)
+        latest = _find_latest_iter_log(ralph_dir)
+        if latest:
+            output_log = latest
+            console.print(f"[dim]Following {output_log.name}[/dim]")
+        else:
+            console.print("[yellow]Waiting for Ralph to start...[/yellow]")
+            while not output_log.exists():
+                latest = _find_latest_iter_log(ralph_dir)
+                if latest:
+                    output_log = latest
+                    break
+                time.sleep(0.5)
+
+    with open(output_log) as f:
+        if not from_start:
+            f.seek(0, 2)  # seek to end
+
+        last_meta_check = 0
+        while True:
+            line = f.readline()
+            if line:
+                format_line(line)
+            else:
+                # Periodically check if ralph is still running
+                now = time.time()
+                if now - last_meta_check > 2:
+                    last_meta_check = now
+                    meta = read_meta(ralph_dir)
+                    if meta.get("status") in ("done", "interrupted", "max_iterations"):
+                        console.rule(
+                            f"[bold]Ralph {meta['status']}[/bold] "
+                            f"(iter {meta.get('iter', '?')})"
+                        )
+                        break
+                    # Check if PID is still alive
+                    pid = meta.get("pid")
+                    if pid:
+                        try:
+                            import os
+                            os.kill(pid, 0)
+                        except (OSError, ProcessLookupError):
+                            # Process gone — drain remaining lines
+                            remaining = f.read()
+                            if remaining:
+                                for l in remaining.splitlines():
+                                    format_line(l)
+                            console.rule("[bold]Ralph process exited[/bold]")
+                            break
+                time.sleep(0.1)
+
+
+def _find_latest_iter_log(ralph_dir: Path) -> Path | None:
+    logs = sorted(ralph_dir.glob("iteration-*.log"), key=lambda p: p.stat().st_mtime)
+    return logs[-1] if logs else None
+
+
+def main():
+    from_start = False
+    target = "."
+
+    args = sys.argv[1:]
+    for arg in args:
+        if arg == "-f":
+            from_start = True
+        elif arg in ("-h", "--help"):
+            print(__doc__)
+            return
+        else:
+            target = arg
+
+    ralph_dir = Path(target) / ".ralph"
+    if not ralph_dir.is_dir():
+        console.print(f"[red]No .ralph/ directory in {target}[/red]")
+        console.print("Start Ralph first: simple-ralph plan.md")
+        sys.exit(1)
+
+    try:
+        watch(ralph_dir, from_start=from_start)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching.[/dim]")
+
+
+if __name__ == "__main__":
+    main()

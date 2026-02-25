@@ -245,7 +245,7 @@ echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
-export PATH=$HOME/.local/bin:$PATH
+export PATH=$HOME/.local/bin:$HOME/repos/fun-bash-automations/bin:$PATH
 export PATH=$PATH:$GOPATH/bin
 export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/
@@ -684,8 +684,66 @@ gprunelocal() {
     fi
 }
 
-# Ralph Wiggum is now a Python CLI: `ralph` (installed via uv tool install)
+# Ralph Wiggum — autonomous Claude loop
+# Full: `ralph` (Python CLI via uv tool install)
+# Simple: `simple-ralph` (bash, zero deps)
 # See ~/repos/fun-bash-automations/ralph/ for source
+
+# ralph-tail — follow Ralph output in real time
+# Works for both simple-ralph and full ralph (both write .ralph/ logs)
+rt() {
+  local dir="${1:-.}"
+  local log="$dir/.ralph/output.log"
+  local meta="$dir/.ralph/meta.json"
+
+  # If no output.log, try to find the latest iteration log instead
+  if [[ ! -f "$log" ]]; then
+    local latest
+    latest=$(ls -t "$dir"/.ralph/iteration-*.log 2>/dev/null | head -1)
+    if [[ -n "$latest" ]]; then
+      log="$latest"
+    else
+      echo "No Ralph logs found in $dir/.ralph/"
+      echo "Start Ralph first: simple-ralph plan.md"
+      return 1
+    fi
+  fi
+
+  # Show status header if meta.json exists
+  if [[ -f "$meta" ]] && command -v jq >/dev/null 2>&1; then
+    local plan iter max status
+    plan=$(jq -r '.plan // empty' "$meta" 2>/dev/null | xargs basename 2>/dev/null)
+    iter=$(jq -r '.iter // 0' "$meta" 2>/dev/null)
+    max=$(jq -r '.max_iter // "?"' "$meta" 2>/dev/null)
+    status=$(jq -r '.status // "unknown"' "$meta" 2>/dev/null)
+    echo "ralph | $plan | iter $iter/$max | $status"
+    echo "---"
+  fi
+
+  tail -f "$log"
+}
+
+# ralph-status — quick status check
+ralph-status() {
+  local dir="${1:-.}"
+  local meta="$dir/.ralph/meta.json"
+  if [[ ! -f "$meta" ]]; then
+    echo "No Ralph session in $dir/.ralph/"
+    return 1
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    jq . "$meta"
+  else
+    cat "$meta"
+  fi
+  # Show status.md if present
+  local status="$dir/.ralph/status.md"
+  if [[ -f "$status" ]]; then
+    echo ""
+    echo "--- Progress ---"
+    cat "$status"
+  fi
+}
 
 # ==============================================================================
 # SDK Managers (keep at end for proper initialization)
