@@ -22,7 +22,7 @@ MAX_ITER=20
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
-WATCH=0
+RICH=0
 TOOLS="Edit Read Write Glob Grep Bash"
 WORKTREE_BASE="${HOME}/worktrees"
 
@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     -t|--tools)     TOOLS="$2"; shift 2 ;;
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
-    --watch)        WATCH=1; shift ;;
+    --rich)        RICH=1; shift ;;
     -h|--help)
       cat <<'HELP'
 Usage: simple-ralph [options] plan.md
@@ -44,7 +44,7 @@ Options:
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
                        Creates: ~/worktrees/ralph-NAME (branch: ralph/NAME)
-  --watch              Rich output via ralph-watch (requires Python + Rich)
+  --rich              Rich output via ralph-watch (requires Python + Rich)
 
 Monitor from another terminal:
   rt                        # Shell function (tail -f)
@@ -176,22 +176,22 @@ trap 'INTERRUPTED=1; echo ""; echo ">>> Interrupt received — finishing iterati
 write_meta "running" 0
 
 # --- Watch mode ---
-WATCH_PID=""
-if [[ $WATCH -eq 1 ]]; then
+RICH_PID=""
+if [[ $RICH -eq 1 ]]; then
   if command -v ralph-watch &>/dev/null; then
     exec 3>&1                              # save terminal fd
     ralph-watch -f "$(pwd)" >&3 2>&3 &     # render from log file → terminal
-    WATCH_PID=$!
+    RICH_PID=$!
     exec 1>/dev/null                       # silence simple-ralph's stdout
   else
     echo "Warning: ralph-watch not found, falling back to plain output"
-    WATCH=0
+    RICH=0
   fi
 fi
-trap '[[ -n "${WATCH_PID:-}" ]] && kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null' EXIT
+trap '[[ -n "${RICH_PID:-}" ]] && kill "$RICH_PID" 2>/dev/null; wait "$RICH_PID" 2>/dev/null' EXIT
 
 # --- Header (plain mode only; ralph-watch shows its own) ---
-if [[ $WATCH -eq 0 ]]; then
+if [[ $RICH -eq 0 ]]; then
   echo "simple-ralph | plan: $(basename "$PLAN") | max: $MAX_ITER | dir: $(pwd)"
   echo ""
   echo "Monitor (in another terminal):"
