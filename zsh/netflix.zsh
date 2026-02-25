@@ -53,6 +53,14 @@ function namespace () {
 	grpc -a dgwcontrol.kv -e "$1" com.netflix.dgw.control.DgwControlService/GetNamespaces -d "{\"namespaceFilters\": [ { \"match_name\": \"$2\", \"include_shard_info\": true }, { \"include_provision_desires\": true } ], \"includeClosed\": true}"
 }
 
+function routing () {
+	JSON=$(grpc -e "$1" -a dgwkv."$2" -r "$3" -s routing com.netflix.dgw.kv.KeyValueRoutingService.GetRouting -d "{\"routingMode\": \"$4\"}")
+	echo $JSON | jq ".namespaces_routing_info | .[] | select(.namespace == \"$5\")"
+	echo "Version:"
+	echo $JSON | jq ".version"
+}
+
+
 function clone_ns() {
   # Check if the number of arguments is not equal to 5
   if [ "$#" -ne 4 ]; then
@@ -114,23 +122,6 @@ function cql() {
   cqlsh3 --cluster="$2" --env="$1"
 }
 
-function rps() {
-  # Check if the number of arguments is not equal to 2
-  if [ "$#" -ne 2 ]; then
-      echo "Error: You must provide exactly 2 arguments: (1) shard name and (2) rps."
-      return 1
-  fi
-
-  # Assign arguments to variables for clarity
-  shard_name="$1"
-  rps="$2"
-
-  # Your function logic here
-  echo "Shard Name: $shard_name"
-  echo "RPS: $rps"
-  dgw-managed-scaling hammer-rule --abs kv --env prod --shard-name "$shard_name" --rps "$rps"
-}
-
 function put_item() {
   # Convert the ASCII key and value to base64
   local base64_key=$(echo -n "$4" | base64)
@@ -158,41 +149,6 @@ function kv() {
   local command=$1;
   shift;
   dgw-cli kv --shard acceptanceddb $command acceptance_dynamo $@
-}
-
-function spreadsheet() {
-  # Prequisite: install nflx-temporal
-  if [ -z "$1" ]; then
-    echo "[ERROR] Missing 1st parameter (tier)"
-    return
-  fi
-
-  all_deploys=$(dgw-deploy-monitor list -g -a kv -t $1)
-  latest_kv_deploy=$(echo "$all_deploys" | jq '.workflows | .[0].workflow_id' -r)
-  latest_kv_deploy_status=$(echo "$all_deploys" | jq '.workflows | .[0].status' -r)
-  latest_kv_deploy_run_id=$(echo "$all_deploys" | jq '.workflows | .[0].run_id' -r)
-  echo "[INFO] Latest Kv Deploy Information:"
-  echo "\tworkflow_id = $latest_kv_deploy"
-  echo "\trun_id = $latest_kv_deploy_run_id"
-  echo "\tstatus = $latest_kv_deploy_status"
-  echo "\tlink = https://cloud.temporal.io/namespaces/antigravity-dabp-prod.hzun2/workflows/$latest_kv_deploy"
-
-  short_sha=$(deployment_sha "$latest_kv_deploy" "$latest_kv_deploy_run_id")
-  full_sha=$(git -C "$KV_REPO_PATH" rev-parse "$short_sha")
-  echo "\tshort_sha = $short_sha"
-  echo "\tfull_sha = $full_sha"
-
-  if [ "$latest_kv_deploy_status" = "RUNNING" ]; then
-    echo "\n=============================================================================="
-    echo "[WARNING] The latest KV deployment is still running. Returning a partial result"
-    echo "==============================================================================\n"
-  fi
-
-  echo "\ndgw-deploy-monitor describe --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha\n"
-  dgw-deploy-monitor describe --failed --csv --page_size 2000 --global-workflow-id $latest_kv_deploy --csv-sha $full_sha | pbcopy
-  # | tee >(pbcopy)
-  echo "\nFound $(( $(pbpaste | wc -l) - 1 )) failed deploy(s)"
-  echo "📋 Copied Spreadsheet to clipboard"
 }
 
 export EASY_CASS_LAB_SSH_KEY=~/.ssh/cassandra_workship
@@ -593,5 +549,5 @@ if [ "$funcstack[1]" = "_nflxlog" ]; then
         _nflxlog
 fi
 
-# export NFLX_CLAUDE_FORCE_CHANNEL=latest
-# NFLX_CLAUDE_FORCE_CHANNEL=latest
+export NFLX_CLAUDE_FORCE_CHANNEL=latest
+NFLX_CLAUDE_FORCE_CHANNEL=latest

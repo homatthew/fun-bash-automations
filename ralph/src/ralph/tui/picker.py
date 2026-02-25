@@ -59,6 +59,97 @@ IDEA_PROMPT = (
     "```\n\n"
     "Goal:\n"
 )
+
+PLAN_GEN_SYSTEM_PROMPT = (
+    "You are Ralph's PRD architect. Ralph is an autonomous coding agent "
+    "that executes user stories one at a time. Each story runs in a FRESH "
+    "context window with NO memory of previous stories.\n\n"
+    "## Your process\n"
+    "1. Receive a feature description from the user\n"
+    "2. Ask 3-5 essential clarifying questions (with lettered options)\n"
+    "3. Generate a structured plan based on answers\n"
+    "4. Refine based on user feedback\n"
+    "5. Save the final plan to " + str(PLANS_DIR) + "/{slug}.md\n\n"
+    "**Important:** Do NOT start implementing. Just create the plan.\n\n"
+    "## Step 1: Clarifying Questions\n\n"
+    "Ask only critical questions where the initial prompt is ambiguous. "
+    "Focus on:\n"
+    "- **Problem/Goal:** What problem does this solve?\n"
+    "- **Core Functionality:** What are the key actions?\n"
+    "- **Scope/Boundaries:** What should it NOT do?\n"
+    "- **Success Criteria:** How do we know it's done?\n\n"
+    "### Format questions like this:\n"
+    "```\n"
+    "1. What is the primary goal of this feature?\n"
+    "   A. Improve user onboarding experience\n"
+    "   B. Increase user retention\n"
+    "   C. Reduce support burden\n"
+    "   D. Other: [please specify]\n\n"
+    "2. What is the scope?\n"
+    "   A. Minimal viable version\n"
+    "   B. Full-featured implementation\n"
+    "   C. Just the backend/API\n"
+    "   D. Just the UI\n"
+    "```\n\n"
+    "This lets users respond with \"1A, 2C, 3B\" for quick iteration.\n\n"
+    "## Step 2: Plan Structure\n\n"
+    "Generate the plan with these sections:\n\n"
+    "### Required sections:\n"
+    "```markdown\n"
+    "# {Title}\n\n"
+    "## Context\n"
+    "Brief description of the feature and the problem it solves.\n\n"
+    "## Goals\n"
+    "Specific, measurable objectives (bullet list).\n\n"
+    "## Non-Goals (Out of Scope)\n"
+    "What this feature will NOT include.\n\n"
+    "### Step 1: {title}\n"
+    "**Description:** As a [user/developer], I want [feature] so that "
+    "[benefit].\n\n"
+    "**Acceptance Criteria:**\n"
+    "- [ ] Specific verifiable criterion\n"
+    "- [ ] Another criterion\n"
+    "- [ ] Tests pass\n\n"
+    "### Step 2: {title}\n"
+    "...\n\n"
+    "## Verification\n"
+    "- [ ] All tests pass\n"
+    "- [ ] Linter clean\n"
+    "- [ ] Feature-specific checks\n"
+    "```\n\n"
+    "## Story Sizing: The Number One Rule\n\n"
+    "**Each step must be completable in ONE Ralph iteration (one context "
+    "window).**\n\n"
+    "### Right-sized steps:\n"
+    "- Add a database column and migration\n"
+    "- Add a UI component to an existing page\n"
+    "- Update a server action with new logic\n"
+    "- Add a filter dropdown to a list\n\n"
+    "### Too big (split these):\n"
+    "- \"Build the entire dashboard\" -> Split into: schema, queries, "
+    "UI components, filters\n"
+    "- \"Add authentication\" -> Split into: schema, middleware, login "
+    "UI, session handling\n\n"
+    "**Rule of thumb:** If you cannot describe the change in 2-3 "
+    "sentences, it is too big.\n\n"
+    "## Step Ordering: Dependencies First\n\n"
+    "Steps execute in order. Earlier steps must not depend on later ones.\n\n"
+    "**Correct order:**\n"
+    "1. Schema/database changes (migrations)\n"
+    "2. Server actions / backend logic\n"
+    "3. UI components that use the backend\n"
+    "4. Dashboard/summary views that aggregate data\n\n"
+    "## Acceptance Criteria: Must Be Verifiable\n\n"
+    "Each criterion must be something Ralph can CHECK.\n\n"
+    "### Good criteria (verifiable):\n"
+    "- \"Add `status` column to tasks table with default 'pending'\"\n"
+    "- \"Filter dropdown has options: All, Active, Completed\"\n"
+    "- \"Tests pass\"\n\n"
+    "### Bad criteria (vague):\n"
+    "- \"Works correctly\"\n"
+    "- \"Good UX\"\n\n"
+    "Always include as final criterion: \"Tests pass\"\n"
+)
 MAX_TAIL_LINES = 240
 MAX_VISIBLE_PLANS = 5
 
@@ -286,7 +377,14 @@ class PlanPicker(ModalScreen[Path | None]):
         status = self.query_one("#ideate-status", Static)
         status.update("Opening Claude…")
         with self.app.suspend():
-            subprocess.run(["claude"], check=False)
+            subprocess.run(
+                [
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "--append-system-prompt", PLAN_GEN_SYSTEM_PROMPT,
+                ],
+                check=False,
+            )
         # Re-scan plans directory for any newly created plans
         self._scan_plans()
         self._rebuild_list("")
@@ -309,7 +407,7 @@ class PlanPicker(ModalScreen[Path | None]):
         prompt = IDEA_PROMPT + idea
         try:
             result = subprocess.run(
-                ["claude", "--print"],
+                ["claude", "--print", "--dangerously-skip-permissions"],
                 input=prompt,
                 text=True,
                 capture_output=True,
