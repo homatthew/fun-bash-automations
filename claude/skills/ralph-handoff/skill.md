@@ -134,10 +134,10 @@ ralph ~/.claude/plans/<plan-name>.md
 simple-ralph ~/.claude/plans/<plan-name>.md
 
 # Simple Ralph with rich output (recommended):
-simple-ralph --watch ~/.claude/plans/<plan-name>.md
+simple-ralph --rich ~/.claude/plans/<plan-name>.md
 
 # In a worktree (isolated):
-simple-ralph --watch -w <slug> ~/.claude/plans/<plan-name>.md
+simple-ralph --rich -w <slug> ~/.claude/plans/<plan-name>.md
 
 # Or monitor separately (in another terminal):
 rt                          # tail -f .ralph/output.log
