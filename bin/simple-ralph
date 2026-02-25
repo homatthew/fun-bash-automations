@@ -184,7 +184,7 @@ for ((i=1; i<=MAX_ITER; i++)); do
 
   # Run claude with streaming JSON, extract text + tool calls in real time
   set +eo pipefail  # pipe may have non-zero exits from jq on non-JSON lines
-  claude -p --dangerously-skip-permissions \
+  claude -p --verbose --dangerously-skip-permissions \
     --output-format stream-json \
     --allowedTools "$TOOLS" \
     <<< "$PROMPT" 2>>"$ITER_LOG.err" \
