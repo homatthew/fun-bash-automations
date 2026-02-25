@@ -50,7 +50,7 @@ def _format_line(line: str, elapsed: int) -> str | None:
         return None  # handled by progress bar update
 
     # Completion signals
-    if "RALPH_DONE" in stripped or "RALPH_STORY_DONE" in stripped:
+    if any(s in stripped for s in ("RALPH_DONE", "RALPH_STEP_DONE", "RALPH_STORY_DONE")):
         return f"  [dim]│[/dim] {ts} [bold green]{stripped}[/bold green]"
 
     # Tool calls

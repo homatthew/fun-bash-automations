@@ -1,6 +1,6 @@
 """Tests for prompt builder and progress parsing."""
 
-from ralph.prompt import build_prompt, parse_progress
+from ralph.prompt import _CONVERTER_PROMPT, build_prompt, parse_progress
 
 
 def test_build_prompt_warns_against_premature_done(tmp_path):
@@ -57,3 +57,8 @@ def test_parse_progress_with_descriptions():
 
 def test_parse_progress_case_insensitive_done():
     assert parse_progress("- [X] Step 1\n- [x] Step 2\n- [ ] Step 3\n") == (2, 3)
+
+
+def test_converter_prompt_preserves_gates():
+    assert "self-review" in _CONVERTER_PROMPT.lower()
+    assert "exact" in _CONVERTER_PROMPT.lower()  # EXACT commands
