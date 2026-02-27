@@ -88,6 +88,8 @@ Every step must end with a verification block. If a step doesn't have one, add i
 # 3. Lint (if applicable)
 <project-specific lint command>
 \```
+
+All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP.
 ```
 
 Use the project's actual build/test commands (check for `gradlew`, `pytest`, `npm test`, `cargo test`, etc. in the working directory).
@@ -103,6 +105,8 @@ After the verification checklist, add:
 - [ ] Read the verification checklists of remaining steps — does what I built here support what comes next?
 - [ ] Would a code reviewer flag anything? (naming, error handling, edge cases, style)
 - [ ] Are there any TODO/FIXME/HACK comments I introduced that should be resolved now?
+
+All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP.
 ```
 
 The third bullet is the key insight: **use the future steps' verifications as a forward-looking code review**. If Step 3's verification says "test that the API returns 404 for missing resources", and you're currently on Step 2 building the API handler, your Step 2 self-review should ask "will my handler make Step 3's verification pass?"
@@ -113,9 +117,8 @@ Between each step, add:
 
 ```markdown
 ---
-
-### Context checkpoint
-If context is large, this is a safe place to clear. The next step touches: [list key files/modules for next step].
+STOP. Output RALPH_STEP_DONE now. Do not continue.
+Next step touches: [list key files/modules for next step]
 ```
 
 ### 4. Write the augmented plan
