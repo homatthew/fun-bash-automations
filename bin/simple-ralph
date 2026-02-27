@@ -18,7 +18,8 @@
 set -euo pipefail
 
 # --- Defaults ---
-MAX_ITER=20
+MAX_ITER=50
+MAX_FAILURES=3
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
@@ -30,6 +31,7 @@ WORKTREE_BASE="${HOME}/worktrees"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--max)       MAX_ITER="$2"; shift 2 ;;
+    -r|--max-retries) MAX_FAILURES="$2"; shift 2 ;;
     -t|--tools)     TOOLS="$2"; shift 2 ;;
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
@@ -39,7 +41,8 @@ while [[ $# -gt 0 ]]; do
 Usage: simple-ralph [options] plan.md
 
 Options:
-  -n, --max N          Max iterations (default: 20)
+  -n, --max N          Absolute iteration cap (default: 50)
+  -r, --max-retries N  Consecutive failures before stopping (default: 3)
   -t, --tools T        Tool scope (default: Edit Read Write Glob Grep Bash)
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
@@ -199,16 +202,20 @@ if [[ $RICH -eq 0 ]]; then
 fi
 
 # --- Main loop ---
-for ((i=1; i<=MAX_ITER; i++)); do
+iter=0
+failures=0
+
+while ((iter < MAX_ITER)); do
   [[ $INTERRUPTED -eq 1 ]] && break
+  ((iter++))
 
-  ITER_LOG="$RALPH_DIR/iteration-$i.log"
-  write_meta "running" "$i"
+  ITER_LOG="$RALPH_DIR/iteration-$iter.log"
+  write_meta "running" "$iter"
 
-  HEADER="=== iteration $i/$MAX_ITER  $(date '+%H:%M:%S') ==="
+  HEADER="=== iteration $iter  $(date '+%H:%M:%S') ==="
   echo "$HEADER" | tee -a "$OUTPUT_LOG"
 
-  PROMPT=$(build_prompt "$i")
+  PROMPT=$(build_prompt "$iter")
 
   # Run claude with streaming JSON, extract text + tool calls in real time
   set +eo pipefail  # pipe may have non-zero exits from jq on non-JSON lines
@@ -238,7 +245,7 @@ for ((i=1; i<=MAX_ITER; i++)); do
   EXIT=${PIPESTATUS[0]}  # capture claude's exit code (first in pipe)
   set -eo pipefail
 
-  FOOTER="=== iteration $i complete ==="
+  FOOTER="=== iteration $iter complete ==="
   echo "$FOOTER" | tee -a "$OUTPUT_LOG"
   echo "" | tee -a "$OUTPUT_LOG"
 
@@ -246,30 +253,40 @@ for ((i=1; i<=MAX_ITER; i++)); do
   # (e.g., "when all steps complete, output RALPH_DONE") which false-triggers the
   # RALPH_DONE grep. Checking RALPH_STEP_DONE first and continuing skips that.
   if grep -q "RALPH_STEP_DONE" "$ITER_LOG"; then
+    failures=0  # progress — reset failure counter
     echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
     continue
   fi
 
   # All steps complete
   if grep -q "RALPH_DONE" "$ITER_LOG"; then
-    write_meta "done" "$i"
-    echo "Done after $i iteration(s)." | tee -a "$OUTPUT_LOG"
+    write_meta "done" "$iter"
+    echo "Done after $iter iteration(s)." | tee -a "$OUTPUT_LOG"
     trap - INT
     exit 0
   fi
 
-  [[ $EXIT -ne 0 ]] && echo "Warning: claude exited $EXIT on iteration $i" | tee -a "$OUTPUT_LOG"
+  # No signal — count as failure
+  ((failures++))
+  [[ $EXIT -ne 0 ]] && echo "Warning: claude exited $EXIT on iteration $iter" | tee -a "$OUTPUT_LOG"
+  if ((failures >= MAX_FAILURES)); then
+    write_meta "failed" "$iter"
+    echo "Stopping: $failures consecutive failures (no RALPH_STEP_DONE or RALPH_DONE)." | tee -a "$OUTPUT_LOG"
+    trap - INT
+    exit 1
+  fi
+  echo "No completion signal ($failures/$MAX_FAILURES consecutive failures)." | tee -a "$OUTPUT_LOG"
 done
 
 trap - INT
 
 # --- Summary ---
 if [[ $INTERRUPTED -eq 1 ]]; then
-  write_meta "interrupted" "$i"
-  echo "Interrupted at iteration $i." | tee -a "$OUTPUT_LOG"
+  write_meta "interrupted" "$iter"
+  echo "Interrupted at iteration $iter." | tee -a "$OUTPUT_LOG"
   exit 130
 else
   write_meta "max_iterations" "$MAX_ITER"
-  echo "Hit max iterations ($MAX_ITER)." | tee -a "$OUTPUT_LOG"
+  echo "Hit absolute iteration cap ($MAX_ITER)." | tee -a "$OUTPUT_LOG"
   exit 1
 fi
