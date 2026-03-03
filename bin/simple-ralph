@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# simple-ralph — minimal autonomous Claude loop
+# simple-ralph — autonomous Claude execution loop
 #
-# Zero deps beyond bash + claude CLI. Best practices from full Ralph
-# distilled into a single script. Use this to bootstrap the real Ralph.
+# Rich output by default (requires Python + Rich for ralph-watch).
+# Falls back to plain output if ralph-watch is not available.
 #
 # Usage:
 #   simple-ralph plan.md                      # Execute plan in cwd
 #   simple-ralph -n 5 plan.md                # Max 5 iterations
 #   simple-ralph -w my-feature plan.md       # Run in a fresh worktree
-#   simple-ralph -d ~/worktrees/foo plan.md  # Run in existing directory
+#   simple-ralph --plain plan.md             # Plain output (no Rich)
 #
 # Monitor (from another terminal):
 #   rt                        # Shell function (tail -f .ralph/output.log)
 #   ralph-watch               # Rich console version
-#   tail -f .ralph/output.log # Raw (zero deps)
 
 set -euo pipefail
 
@@ -24,7 +23,7 @@ MAX_TURNS=20
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
-RICH=0
+RICH=1
 TOOLS="Edit Read Write Glob Grep Bash"
 WORKTREE_BASE="${HOME}/worktrees"
 
@@ -37,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     -t|--tools)     TOOLS="$2"; shift 2 ;;
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
-    --rich)        RICH=1; shift ;;
+    --plain)       RICH=0; shift ;;
     -h|--help)
       cat <<'HELP'
 Usage: simple-ralph [options] plan.md
@@ -50,7 +49,7 @@ Options:
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
                        Creates: ~/worktrees/ralph-NAME (branch: ralph/NAME)
-  --rich              Rich output via ralph-watch (requires Python + Rich)
+  --plain             Plain output (no Rich; default is rich via ralph-watch)
 
 Monitor from another terminal:
   rt                        # Shell function (tail -f)
@@ -107,13 +106,49 @@ if [[ -f ".ralphrc" ]]; then
   done < .ralphrc
 fi
 
+# --- Session naming ---
+_ADJECTIVES=(bold calm cool dark fast keen mild neat pale soft warm wild)
+_NOUNS=(bear crow deer dove fawn fox hawk hare lark lynx moth pike seal swan wolf wren)
+_VERBS=(dash drift glow hum leap roam sail soar spin surf wade weave)
+session_name() {
+  local a=${_ADJECTIVES[$((RANDOM % ${#_ADJECTIVES[@]}))]}
+  local n=${_NOUNS[$((RANDOM % ${#_NOUNS[@]}))]}
+  local v=${_VERBS[$((RANDOM % ${#_VERBS[@]}))]}
+  echo "$a-$n-$v"
+}
+
 # --- Setup ---
 RALPH_DIR=".ralph"
+SESSION_NAME=$(session_name)
 mkdir -p "$RALPH_DIR"
 
 # Hide .ralph from git
 EXCLUDE=".git/info/exclude"
 [[ -f "$EXCLUDE" ]] && ! grep -qx ".ralph" "$EXCLUDE" 2>/dev/null && echo ".ralph" >> "$EXCLUDE"
+
+# Lockfile — prevent concurrent sessions in the same directory
+LOCKFILE="$RALPH_DIR/lock"
+if [[ -f "$LOCKFILE" ]]; then
+  LOCK_PID=$(cat "$LOCKFILE")
+  if kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "Another simple-ralph session (PID $LOCK_PID) is running in this directory."
+    echo "Use a worktree for parallel runs: simple-ralph -w <name> plan.md"
+    exit 1
+  fi
+fi
+echo $$ > "$LOCKFILE"
+trap 'rm -f "$LOCKFILE"; [[ -n "${RICH_PID:-}" ]] && kill "$RICH_PID" 2>/dev/null; wait "$RICH_PID" 2>/dev/null' EXIT
+
+# Archive previous session if present
+if [[ -f "$RALPH_DIR/meta.json" ]]; then
+  PREV_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session','prev'))" "$RALPH_DIR/meta.json" 2>/dev/null || echo "prev")
+  PREV_DIR="$RALPH_DIR/sessions/$PREV_NAME"
+  mkdir -p "$PREV_DIR"
+  mv "$RALPH_DIR"/{meta.json,status.md,output.log,iteration-*.log*,directive-*,status-prev.md} "$PREV_DIR/" 2>/dev/null
+fi
+
+# TTL: prune archived sessions older than 24h
+find "$RALPH_DIR/sessions" -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
 
 # Combined output log — this is what you tail
 OUTPUT_LOG="$RALPH_DIR/output.log"
@@ -125,6 +160,7 @@ write_meta() {
 	{
 	  "plan": "$PLAN",
 	  "pid": $$,
+	  "session": "$SESSION_NAME",
 	  "status": "$1",
 	  "iter": $2,
 	  "max_iter": $MAX_ITER,
@@ -149,9 +185,13 @@ build_prompt() {
   cat <<PROMPT
 ## You are executing ONE step of a plan.
 
-Read the plan: $PLAN
-Read .ralph/status.md to find where you left off.
-Execute the NEXT incomplete step. ONLY that step.
+1. Read the plan: $PLAN — this is the AUTHORITATIVE list of all steps.
+2. Read .ralph/status.md to see which steps are already done.
+3. Cross-reference: find the first step in the PLAN that is NOT marked done in status.md.
+4. Execute that step. ONLY that step.
+
+IMPORTANT: status.md only tracks what's been completed. The PLAN defines all steps.
+If status.md shows 3 steps done but the plan has 7 steps, you have 4 steps remaining.
 
 ## After completing the step:
 1. Run verification (build/test/lint as specified in the plan)
@@ -199,11 +239,11 @@ if [[ $RICH -eq 1 ]]; then
     RICH=0
   fi
 fi
-trap '[[ -n "${RICH_PID:-}" ]] && kill "$RICH_PID" 2>/dev/null; wait "$RICH_PID" 2>/dev/null' EXIT
+# Note: EXIT trap (lockfile + RICH_PID cleanup) is set in the setup section above
 
 # --- Header (plain mode only; ralph-watch shows its own) ---
 if [[ $RICH -eq 0 ]]; then
-  echo "simple-ralph | plan: $(basename "$PLAN") | max: $MAX_ITER | dir: $(pwd)"
+  echo "simple-ralph | $SESSION_NAME | plan: $(basename "$PLAN") | max: $MAX_ITER | dir: $(pwd)"
   echo ""
   echo "Monitor (in another terminal):"
   echo "  rt $(pwd)"
@@ -259,17 +299,23 @@ while ((iter < MAX_ITER)); do
   echo "$FOOTER" | tee -a "$OUTPUT_LOG"
   echo "" | tee -a "$OUTPUT_LOG"
 
-  # Check step completion FIRST — Claude's narration often mentions "RALPH_DONE"
-  # (e.g., "when all steps complete, output RALPH_DONE") which false-triggers the
-  # RALPH_DONE grep. Checking RALPH_STEP_DONE first and continuing skips that.
-  if grep -q "RALPH_STEP_DONE" "$ITER_LOG"; then
+  # Signal detection — must match signals as standalone output, not narration.
+  # Claude often echoes "output RALPH_DONE when finished" which false-triggers grep.
+  # Use the PARSED output log (text only) and require the signal on its own line
+  # or as the dominant content of a line (not embedded in a sentence about signals).
+  PARSED_OUTPUT=$(jq -r '
+    select(.type == "assistant") |
+    .message.content[]? // empty |
+    select(.type == "text") | .text // empty
+  ' "$ITER_LOG" 2>/dev/null || true)
+
+  if echo "$PARSED_OUTPUT" | grep -qE '^[[:space:]]*RALPH_STEP_DONE[[:space:]]*$'; then
     failures=0  # progress — reset failure counter
     echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
     continue
   fi
 
-  # All steps complete
-  if grep -q "RALPH_DONE" "$ITER_LOG"; then
+  if echo "$PARSED_OUTPUT" | grep -qE '^[[:space:]]*RALPH_DONE[[:space:]]*$'; then
     write_meta "done" "$iter"
     echo "Done after $iter iteration(s)." | tee -a "$OUTPUT_LOG"
     trap - INT
