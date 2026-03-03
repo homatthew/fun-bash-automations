@@ -23,6 +23,7 @@ Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never
 | Commit + push + PR | `/commit-push-pr` | All-in-one workflow |
 | Address review comments | `/address-comments-by <reviewer>` | Fetch and respond to specific reviewer |
 | Split large PR | `/split-pr` | Analyze and propose atomic commits |
+| Create stacked PRs | `/stacked-pr` | Dependent PR chains with incremental diffs |
 | Isolated development | `/worktree-dev` | Create worktree, develop, return results |
 | Verify build passes | `/verify-build` | Run tests and fix issues |
 | Simplify code | `/simplify` | Simplify code after implementation |

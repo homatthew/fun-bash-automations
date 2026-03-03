@@ -94,7 +94,7 @@ class EngineConfig:
     sandbox: bool
     ralph_dir: Path = field(default_factory=lambda: Path.cwd() / ".ralph")
     min_iter: int = 0
-    max_step_turns: int = 25
+    max_step_turns: int = 20
     git_checkpoint: bool = False
 
 

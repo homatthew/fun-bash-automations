@@ -20,8 +20,10 @@ deny() {
 
 # --- 1. Git Force/Destructive ---
 check_git_force() {
+  # Allow --force-with-lease (safe for stacked PRs — fails if remote diverged)
+  echo "$COMMAND" | grep -qE -- 'git\s+push\s+.*--force-with-lease' && return
   echo "$COMMAND" | grep -qE -- 'git\s+push\s+.*(-f |--force)' &&
-    deny "Blocked: git push --force rewrites remote history."
+    deny "Blocked: git push --force rewrites remote history. Use --force-with-lease."
   echo "$COMMAND" | grep -qE -- 'git\s+reset\s+--hard' &&
     deny "Blocked: git reset --hard discards all uncommitted changes."
   echo "$COMMAND" | grep -qE -- 'git\s+checkout\s+--\s*\.' &&
@@ -70,8 +72,22 @@ check_broad_staging() {
 
 # --- 5. Git Rebase ---
 check_git_rebase() {
-  echo "$COMMAND" | grep -qE 'git\s+rebase(\s|$)' &&
-    deny "Blocked: git rebase rewrites history."
+  # Allow safe operations
+  echo "$COMMAND" | grep -qE -- 'git\s+rebase\s+--(abort|continue|skip)' && return
+
+  # Block interactive rebase
+  echo "$COMMAND" | grep -qE -- 'git\s+rebase\s+.*(-i|--interactive)' &&
+    deny "Blocked: git rebase -i (interactive) is not allowed."
+
+  # Allow --onto (re-parenting for stacked PRs)
+  echo "$COMMAND" | grep -qE -- 'git\s+rebase\s+--onto\s' && return
+
+  # Allow rebase with explicit branch target
+  echo "$COMMAND" | grep -qE 'git\s+rebase\s+[a-zA-Z0-9_./-]+\s*$' && return
+
+  # Block bare rebase (no target)
+  echo "$COMMAND" | grep -qE 'git\s+rebase\s*$' &&
+    deny "Blocked: bare git rebase with no target. Specify a branch."
 }
 
 # --- 6. File System Destruction ---
