@@ -19,11 +19,12 @@ set -euo pipefail
 # --- Defaults ---
 MAX_ITER=20
 MAX_FAILURES=3
-MAX_TURNS=20
+MAX_TURNS=50
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
 RICH=1
+STATUS_MODE=0
 TOOLS="Edit Read Write Glob Grep Bash"
 WORKTREE_BASE="${HOME}/worktrees"
 
@@ -37,19 +38,26 @@ while [[ $# -gt 0 ]]; do
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
     --plain)       RICH=0; shift ;;
+    --status)
+      STATUS_MODE=1
+      if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+        WORK_DIR="$2"; shift
+      fi
+      shift ;;
     -h|--help)
       cat <<'HELP'
 Usage: simple-ralph [options] plan.md
 
 Options:
   -n, --max N          Absolute iteration cap (default: 20)
-  -T, --max-turns N    Claude max turns per iteration (default: 20)
+  -T, --max-turns N    Claude max turns per iteration (default: 50)
   -r, --max-retries N  Consecutive failures before stopping (default: 3)
   -t, --tools T        Tool scope (default: Edit Read Write Glob Grep Bash)
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
                        Creates: ~/worktrees/ralph-NAME (branch: ralph/NAME)
   --plain             Plain output (no Rich; default is rich via ralph-watch)
+  --status [DIR]       Show session status and health info
 
 Monitor from another terminal:
   rt                        # Shell function (tail -f)
@@ -66,6 +74,67 @@ HELP
     *)  PLAN="$1"; shift ;;
   esac
 done
+
+# --- Status mode (early exit) ---
+if [[ $STATUS_MODE -eq 1 ]]; then
+  [[ -n "$WORK_DIR" ]] && cd "$WORK_DIR"
+  RALPH_ROOT=".ralph"
+  echo "=== simple-ralph status ==="
+  echo "Directory: $(pwd)"
+  echo ""
+
+  # Lock status
+  LOCKFILE="$RALPH_ROOT/lock"
+  if [[ -f "$LOCKFILE" ]]; then
+    LOCK_CONTENT=$(cat "$LOCKFILE")
+    LOCK_PID="${LOCK_CONTENT%%:*}"
+    LOCK_EPOCH="${LOCK_CONTENT##*:}"
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+      LOCK_AGE=$(( $(date +%s) - ${LOCK_EPOCH:-0} ))
+      echo "Lock: ACTIVE (PID $LOCK_PID, age $(( LOCK_AGE / 60 ))m)"
+    else
+      echo "Lock: STALE (PID $LOCK_PID not running)"
+    fi
+  else
+    echo "Lock: none"
+  fi
+  echo ""
+
+  # Current session from meta.json
+  META="$RALPH_ROOT/meta.json"
+  if [[ -f "$META" ]]; then
+    echo "Current session:"
+    jq -r '  "  Session:  \(.session)",
+      "  Status:   \(.status)",
+      "  Plan:     \(.plan)",
+      "  Iter:     \(.iter)/\(.max_iter)",
+      "  Started:  \(.started)",
+      "  CWD:      \(.cwd)"
+    ' "$META" 2>/dev/null || echo "  (meta.json unreadable)"
+  else
+    echo "No active session (no meta.json)"
+  fi
+  echo ""
+
+  # Crash report
+  if [[ -f "$RALPH_ROOT/meta.json" ]]; then
+    CURRENT_DIR=$(jq -r '.session' "$META" 2>/dev/null)
+    CRASH="$RALPH_ROOT/sessions/$CURRENT_DIR/crash-report.txt"
+    if [[ -f "$CRASH" ]]; then
+      echo "Crash report: $CRASH"
+    fi
+  fi
+
+  # Session count and disk usage
+  if [[ -d "$RALPH_ROOT/sessions" ]]; then
+    SESS_COUNT=$(find "$RALPH_ROOT/sessions" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    DISK_USAGE=$(du -sh "$RALPH_ROOT/sessions" 2>/dev/null | cut -f1)
+    echo "Sessions: $SESS_COUNT ($DISK_USAGE on disk)"
+  else
+    echo "Sessions: none"
+  fi
+  exit 0
+fi
 
 [[ -z "$PLAN" ]] && { echo "Usage: simple-ralph [-n N] [-w name] plan.md"; exit 1; }
 
@@ -128,16 +197,23 @@ EXCLUDE=".git/info/exclude"
 [[ -f "$EXCLUDE" ]] && ! grep -qx ".ralph" "$EXCLUDE" 2>/dev/null && echo ".ralph" >> "$EXCLUDE"
 
 # Lockfile — prevent concurrent sessions in the same directory
+# Format: PID:EPOCH (prevents PID recycling false positives)
 LOCKFILE="$RALPH_ROOT/lock"
 if [[ -f "$LOCKFILE" ]]; then
-  LOCK_PID=$(cat "$LOCKFILE")
-  if kill -0 "$LOCK_PID" 2>/dev/null; then
+  LOCK_CONTENT=$(cat "$LOCKFILE")
+  LOCK_PID="${LOCK_CONTENT%%:*}"
+  LOCK_EPOCH="${LOCK_CONTENT##*:}"
+  NOW_EPOCH=$(date +%s)
+  LOCK_AGE=$(( NOW_EPOCH - ${LOCK_EPOCH:-0} ))
+  if kill -0 "$LOCK_PID" 2>/dev/null && (( LOCK_AGE < 86400 )); then
     echo "Another simple-ralph session (PID $LOCK_PID) is running in this directory."
     echo "Use a worktree for parallel runs: simple-ralph -w <name> plan.md"
     exit 1
   fi
+  # Stale lock (PID dead or >24h old) — remove it
+  rm -f "$LOCKFILE"
 fi
-echo $$ > "$LOCKFILE"
+echo "$$:$(date +%s)" > "$LOCKFILE"
 RICH_PID=""
 trap 'rm -f "$LOCKFILE"; [[ -n "$RICH_PID" ]] && kill "$RICH_PID" 2>/dev/null && wait "$RICH_PID" 2>/dev/null' EXIT
 
@@ -147,12 +223,17 @@ ln -s "sessions/$SESSION_NAME" "$RALPH_ROOT/current"
 ln -s "sessions/$SESSION_NAME/output.log" "$RALPH_ROOT/output.log"
 ln -s "sessions/$SESSION_NAME/meta.json" "$RALPH_ROOT/meta.json"
 
-# TTL: prune sessions older than 24h
-find "$RALPH_ROOT/sessions" -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
-
 # Combined output log — this is what you tail
 OUTPUT_LOG="$RALPH_DIR/output.log"
 : > "$OUTPUT_LOG"
+
+# TTL: prune sessions older than 24h (log what gets removed)
+STALE_SESSIONS=$(find "$RALPH_ROOT/sessions" -maxdepth 1 -mindepth 1 -type d -mmin +1440 2>/dev/null || true)
+if [[ -n "$STALE_SESSIONS" ]]; then
+  STALE_COUNT=$(echo "$STALE_SESSIONS" | wc -l | tr -d ' ')
+  echo "$STALE_SESSIONS" | xargs rm -rf 2>/dev/null || true
+  echo "Pruned $STALE_COUNT stale session(s) older than 24h" >> "$OUTPUT_LOG"
+fi
 
 # --- Meta tracking ---
 write_meta() {
@@ -168,6 +249,35 @@ write_meta() {
 	  "cwd": "$(pwd)"
 	}
 	JSON
+}
+
+# --- Crash report ---
+write_crash_report() {
+  local fail_iter="$1" result_subtype="$2" exit_code="$3"
+  local report="$RALPH_DIR/crash-report.txt"
+  {
+    echo "=== simple-ralph crash report ==="
+    echo "Time:      $(date)"
+    echo "Session:   $SESSION_NAME"
+    echo "Plan:      $PLAN"
+    echo "Directory: $(pwd)"
+    echo ""
+    echo "=== Failure details ==="
+    echo "Failed at iteration: $fail_iter"
+    echo "Result subtype:      $result_subtype"
+    echo "Exit code:           $exit_code"
+    echo "Consecutive failures: $failures/$MAX_FAILURES"
+    echo ""
+    echo "=== Last 20 lines of output ==="
+    tail -20 "$OUTPUT_LOG" 2>/dev/null || echo "(output log not available)"
+    echo ""
+    echo "=== Full iteration log ==="
+    echo "$RALPH_DIR/iteration-$fail_iter.log"
+    echo ""
+    echo "=== Re-run command ==="
+    echo "simple-ralph -T $MAX_TURNS -n $MAX_ITER -r $MAX_FAILURES \"$PLAN\""
+  } > "$report"
+  echo "Crash report: $report" | tee -a "$OUTPUT_LOG"
 }
 
 # --- Prompt builder ---
@@ -262,8 +372,8 @@ while ((iter < MAX_ITER)); do
   ITER_LOG="$RALPH_DIR/iteration-$iter.log"
   write_meta "running" "$iter"
 
-  HEADER="=== iteration $iter  $(date '+%H:%M:%S') ==="
-  echo "$HEADER" | tee -a "$OUTPUT_LOG"
+  ITER_START=$(date '+%H:%M:%S')
+  echo "=== iteration $iter  $ITER_START  started ===" | tee -a "$OUTPUT_LOG"
 
   PROMPT=$(build_prompt "$iter")
 
@@ -295,9 +405,9 @@ while ((iter < MAX_ITER)); do
   EXIT=${PIPESTATUS[0]}  # capture claude's exit code (first in pipe)
   set -eo pipefail
 
-  FOOTER="=== iteration $iter complete ==="
-  echo "$FOOTER" | tee -a "$OUTPUT_LOG"
-  echo "" | tee -a "$OUTPUT_LOG"
+  # Parse result event for diagnostics
+  RESULT_SUBTYPE=$(jq -r 'select(.type == "result") | .subtype // empty' "$ITER_LOG" 2>/dev/null | head -1)
+  [[ -z "$RESULT_SUBTYPE" ]] && RESULT_SUBTYPE="unknown"
 
   # Signal detection — must match signals as standalone output, not narration.
   # Claude often echoes "output RALPH_DONE when finished" which false-triggers grep.
@@ -311,11 +421,14 @@ while ((iter < MAX_ITER)); do
 
   if echo "$PARSED_OUTPUT" | grep -qE '^[[:space:]]*RALPH_STEP_DONE[[:space:]]*$'; then
     failures=0  # progress — reset failure counter
-    echo "Step completed — resetting context for next step." | tee -a "$OUTPUT_LOG"
+    echo "=== iteration $iter  $(date '+%H:%M:%S')  result: success  exit: $EXIT  failures: 0/$MAX_FAILURES ===" | tee -a "$OUTPUT_LOG"
+    echo "" | tee -a "$OUTPUT_LOG"
     continue
   fi
 
   if echo "$PARSED_OUTPUT" | grep -qE '^[[:space:]]*RALPH_DONE[[:space:]]*$'; then
+    echo "=== iteration $iter  $(date '+%H:%M:%S')  result: plan_complete  exit: $EXIT ===" | tee -a "$OUTPUT_LOG"
+    echo "" | tee -a "$OUTPUT_LOG"
     write_meta "done" "$iter"
     echo "Done after $iter iteration(s)." | tee -a "$OUTPUT_LOG"
     trap - INT
@@ -324,10 +437,23 @@ while ((iter < MAX_ITER)); do
 
   # No signal — count as failure
   ((failures++))
-  [[ $EXIT -ne 0 ]] && echo "Warning: claude exited $EXIT on iteration $iter" | tee -a "$OUTPUT_LOG"
+
+  # Log specific failure reason
+  if [[ "$RESULT_SUBTYPE" == "error_max_turns" ]]; then
+    echo "Claude hit turn limit ($MAX_TURNS) — step was too complex for one iteration" | tee -a "$OUTPUT_LOG"
+  elif [[ $EXIT -ne 0 ]]; then
+    echo "Warning: claude exited $EXIT on iteration $iter (result: $RESULT_SUBTYPE)" | tee -a "$OUTPUT_LOG"
+  fi
+
+  echo "=== iteration $iter  $(date '+%H:%M:%S')  result: $RESULT_SUBTYPE  exit: $EXIT  failures: $failures/$MAX_FAILURES ===" | tee -a "$OUTPUT_LOG"
+  echo "" | tee -a "$OUTPUT_LOG"
+
   if ((failures >= MAX_FAILURES)); then
+    FAIL_ITER=$iter
+    FAIL_REASON="$failures consecutive failures (last result: $RESULT_SUBTYPE)"
     write_meta "failed" "$iter"
-    echo "Stopping: $failures consecutive failures (no RALPH_STEP_DONE or RALPH_DONE)." | tee -a "$OUTPUT_LOG"
+    write_crash_report "$FAIL_ITER" "$RESULT_SUBTYPE" "$EXIT"
+    echo "Stopping: $FAIL_REASON" | tee -a "$OUTPUT_LOG"
     trap - INT
     exit 1
   fi
@@ -339,10 +465,12 @@ trap - INT
 # --- Summary ---
 if [[ $INTERRUPTED -eq 1 ]]; then
   write_meta "interrupted" "$iter"
+  write_crash_report "$iter" "interrupted" "130"
   echo "Interrupted at iteration $iter." | tee -a "$OUTPUT_LOG"
   exit 130
 else
   write_meta "max_iterations" "$MAX_ITER"
+  write_crash_report "$iter" "max_iterations" "1"
   echo "Hit absolute iteration cap ($MAX_ITER)." | tee -a "$OUTPUT_LOG"
   exit 1
 fi
