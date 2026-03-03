@@ -4,8 +4,7 @@ version = "0.1.0"
 description = "Ralph Wiggum — Autonomous Claude Code Loop"
 requires-python = ">=3.11"
 dependencies = [
-    "typer>=0.9",
-    "textual>=4.0",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -16,7 +15,6 @@ dev = [
 ]
 
 [project.scripts]
-ralph = "ralph.cli:app"
 ralph-watch = "ralph.watch:main"
 
 [build-system]
