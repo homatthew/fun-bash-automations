@@ -228,14 +228,16 @@ write_meta "running" 0
 
 # --- Watch mode ---
 RICH_PID=""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ $RICH -eq 1 ]]; then
-  if command -v ralph-watch &>/dev/null; then
+  RALPH_WATCH="${SCRIPT_DIR}/ralph-watch"
+  if [[ -x "$RALPH_WATCH" ]]; then
     exec 3>&1                              # save terminal fd
-    ralph-watch -f "$(pwd)" >&3 2>&3 &     # render from log file → terminal
+    "$RALPH_WATCH" -f "$(pwd)" >&3 2>&3 &  # render from log file → terminal
     RICH_PID=$!
     exec 1>/dev/null                       # silence simple-ralph's stdout
   else
-    echo "Warning: ralph-watch not found, falling back to plain output"
+    echo "Warning: ralph-watch not found at $RALPH_WATCH, falling back to plain output"
     RICH=0
   fi
 fi
