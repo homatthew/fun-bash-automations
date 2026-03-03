@@ -671,7 +671,7 @@ def test_engine_config_max_step_turns_default():
         tools="Edit Read Write",
         sandbox=True,
     )
-    assert config.max_step_turns == 25
+    assert config.max_step_turns == 20
 
 
 @patch("ralph.engine.subprocess.Popen")

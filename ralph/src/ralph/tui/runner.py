@@ -335,7 +335,7 @@ class LoopRunner(Screen):
             self.min_iter if self.min_iter != 0
             else (rc.get("min_iter") or 0)
         )
-        effective_max_step = rc.get("max_step_turns") or 25
+        effective_max_step = rc.get("max_step_turns") or 20
 
         config = EngineConfig(
             plan=self.plan,
