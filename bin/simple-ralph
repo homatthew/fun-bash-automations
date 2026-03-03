@@ -280,6 +280,37 @@ write_crash_report() {
   echo "Crash report: $report" | tee -a "$OUTPUT_LOG"
 }
 
+# --- Exit banner ---
+fmt_duration() {
+  local secs=$1
+  if (( secs >= 3600 )); then
+    printf "%dh%dm" $((secs/3600)) $(( (secs%3600)/60 ))
+  elif (( secs >= 60 )); then
+    printf "%dm%ds" $((secs/60)) $((secs%60))
+  else
+    printf "%ds" "$secs"
+  fi
+}
+
+print_exit_banner() {
+  local status="$1" detail="$2"
+  local elapsed=$(( $(date +%s) - SESSION_START_EPOCH ))
+  local dur
+  dur=$(fmt_duration "$elapsed")
+  {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  $status"
+    echo ""
+    echo "  Session:    $SESSION_NAME"
+    echo "  Plan:       $(basename "$PLAN")"
+    echo "  Iterations: $iter/$MAX_ITER"
+    echo "  Duration:   $dur"
+    [[ -n "$detail" ]] && echo "  $detail"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  } | tee -a "$OUTPUT_LOG"
+}
+
 # --- Prompt builder ---
 build_prompt() {
   local progress="Fresh start — no prior iterations."
@@ -362,6 +393,7 @@ if [[ $RICH -eq 0 ]]; then
 fi
 
 # --- Main loop ---
+SESSION_START_EPOCH=$(date +%s)
 iter=0
 failures=0
 
@@ -430,7 +462,7 @@ while ((iter < MAX_ITER)); do
     echo "=== iteration $iter  $(date '+%H:%M:%S')  result: plan_complete  exit: $EXIT ===" | tee -a "$OUTPUT_LOG"
     echo "" | tee -a "$OUTPUT_LOG"
     write_meta "done" "$iter"
-    echo "Done after $iter iteration(s)." | tee -a "$OUTPUT_LOG"
+    print_exit_banner "Plan complete" ""
     trap - INT
     exit 0
   fi
@@ -449,11 +481,9 @@ while ((iter < MAX_ITER)); do
   echo "" | tee -a "$OUTPUT_LOG"
 
   if ((failures >= MAX_FAILURES)); then
-    FAIL_ITER=$iter
-    FAIL_REASON="$failures consecutive failures (last result: $RESULT_SUBTYPE)"
     write_meta "failed" "$iter"
-    write_crash_report "$FAIL_ITER" "$RESULT_SUBTYPE" "$EXIT"
-    echo "Stopping: $FAIL_REASON" | tee -a "$OUTPUT_LOG"
+    write_crash_report "$iter" "$RESULT_SUBTYPE" "$EXIT"
+    print_exit_banner "Stopped — $failures consecutive failures" "Last result: $RESULT_SUBTYPE"
     trap - INT
     exit 1
   fi
@@ -466,11 +496,11 @@ trap - INT
 if [[ $INTERRUPTED -eq 1 ]]; then
   write_meta "interrupted" "$iter"
   write_crash_report "$iter" "interrupted" "130"
-  echo "Interrupted at iteration $iter." | tee -a "$OUTPUT_LOG"
+  print_exit_banner "Interrupted" ""
   exit 130
 else
   write_meta "max_iterations" "$MAX_ITER"
   write_crash_report "$iter" "max_iterations" "1"
-  echo "Hit absolute iteration cap ($MAX_ITER)." | tee -a "$OUTPUT_LOG"
+  print_exit_banner "Stopped — hit iteration cap" ""
   exit 1
 fi
