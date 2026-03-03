@@ -3,13 +3,14 @@
   "apiKeyHelper": "echo sk-1234",
   "autoUpdatesChannel": "latest",
   "enabledPlugins": {
+    "beads@beads-marketplace": true,
     "elements-of-style@superpowers-marketplace": true,
     "frontend-design@claude-plugins-official": true,
     "interface-design@interface-design": true,
     "superpowers@superpowers-marketplace": true
   },
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:9123/",
+    "ANTHROPIC_BASE_URL": "http://claudecode.local.dev.netflix.net:9123/",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "DISABLE_AUTOUPDATER": "1",
@@ -18,20 +19,10 @@
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_RESOURCE_ATTRIBUTES": "runtime_environment=local"
+    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,wrapper.version=2602251823"
   },
+  "fastMode": false,
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/dgw-write-guard.sh",
-            "type": "command"
-          }
-        ]
-      }
-    ],
     "Notification": [
       {
         "hooks": [
@@ -41,6 +32,66 @@
           }
         ],
         "matcher": ""
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "node \"/Users/matthewho/.claude/hooks/gsd-context-monitor.js\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/bash-safety-guard.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/dgw-write-guard.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "node \"/Users/matthewho/.claude/hooks/gsd-check-update.js\"",
+            "type": "command"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -55,14 +106,14 @@
       }
     ]
   },
-  "model": "sonnet[1m]",
+  "model": "opus[1m]",
   "permissions": {
     "allow": [],
     "defaultMode": "plan"
   },
   "skipDangerousModePermissionPrompt": true,
   "statusLine": {
-    "command": "~/.claude/statusline.sh",
+    "command": "node \"/Users/matthewho/.claude/hooks/gsd-statusline.js\"",
     "type": "command"
   }
 }
