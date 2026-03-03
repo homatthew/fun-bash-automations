@@ -137,14 +137,15 @@ if [[ -f "$LOCKFILE" ]]; then
   fi
 fi
 echo $$ > "$LOCKFILE"
-trap 'rm -f "$LOCKFILE"; [[ -n "${RICH_PID:-}" ]] && kill "$RICH_PID" 2>/dev/null; wait "$RICH_PID" 2>/dev/null' EXIT
+RICH_PID=""
+trap 'rm -f "$LOCKFILE"; [[ -n "$RICH_PID" ]] && kill "$RICH_PID" 2>/dev/null && wait "$RICH_PID" 2>/dev/null' EXIT
 
 # Archive previous session if present
 if [[ -f "$RALPH_DIR/meta.json" ]]; then
   PREV_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session','prev'))" "$RALPH_DIR/meta.json" 2>/dev/null || echo "prev")
   PREV_DIR="$RALPH_DIR/sessions/$PREV_NAME"
   mkdir -p "$PREV_DIR"
-  mv "$RALPH_DIR"/{meta.json,status.md,output.log,iteration-*.log*,directive-*,status-prev.md} "$PREV_DIR/" 2>/dev/null
+  mv "$RALPH_DIR"/{meta.json,status.md,output.log,iteration-*.log*,directive-*,status-prev.md} "$PREV_DIR/" 2>/dev/null || true
 fi
 
 # TTL: prune archived sessions older than 24h
