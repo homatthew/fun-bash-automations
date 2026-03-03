@@ -76,13 +76,19 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
     # Show header from meta.json
     meta = _read_meta(ralph_dir)
     plan_name = "unknown"
+    session = ""
     if meta:
         plan_name = Path(meta.get("plan", "unknown")).name
+        session = meta.get("session", "")
         status = meta.get("status", "?")
         itr = meta.get("iter", 0)
         mx = meta.get("max_iter", "?")
         cwd = meta.get("cwd", "")
-        console.rule("[bold]ralph-watch[/bold]")
+        if session:
+            title = f"[bold magenta]{session}[/bold magenta]"
+        else:
+            title = "[bold]ralph-watch[/bold]"
+        console.rule(title)
         console.print(
             f"  Plan: [cyan]{plan_name}[/cyan]  |  "
             f"Iter: [yellow]{itr}/{mx}[/yellow]  |  "
@@ -117,8 +123,9 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
         console=console,
         transient=False,
     ) as progress:
+        label = session if session else plan_name
         task = progress.add_task(
-            f"Watching {plan_name}...", total=None,
+            f"[magenta]{label}[/magenta] watching...", total=None,
         )
 
         with open(output_log) as f:
@@ -234,6 +241,7 @@ def _list_sessions() -> None:
     console.rule("[bold]Ralph sessions[/bold]")
     for ralph_dir, meta in sessions:
         plan = Path(meta.get("plan", "?")).name
+        session = meta.get("session", "")
         status = meta.get("status", "?")
         itr = meta.get("iter", 0)
         mx = meta.get("max_iter", "?")
@@ -256,8 +264,9 @@ def _list_sessions() -> None:
         else:
             icon = "[dim].[/dim]"
 
+        name = f"[magenta]{session}[/magenta] " if session else ""
         console.print(
-            f"  {icon} [cyan]{plan}[/cyan]  "
+            f"  {icon} {name}[cyan]{plan}[/cyan]  "
             f"iter {itr}/{mx}  "
             f"[{'bold' if alive else 'dim'}]{status}[/{'bold' if alive else 'dim'}]"
         )

@@ -5,6 +5,12 @@ Personal shell config and Claude Code configuration for Matthew Ho.
 ## Repository Structure
 
 ```
+├── bin/
+│   └── simple-ralph     # Autonomous Claude execution loop (bash, zero deps)
+├── ralph/
+│   ├── src/ralph/watch.py  # ralph-watch Rich monitor (installed via uv tool)
+│   ├── pyproject.toml      # Only exposes ralph-watch entry point
+│   └── DEPRECATED.md       # Full Ralph package is deprecated
 ├── zsh/
 │   ├── personal.zsh     # Custom functions, aliases, key bindings
 │   └── netflix.zsh      # Netflix-specific config
@@ -51,9 +57,24 @@ Two workflows:
 1. Create `claude/skills/<skill-name>/skill.md`
 2. Symlink: `ln -s ~/repos/fun-bash-automations/claude/skills/<skill-name> ~/.claude/skills/`
 
+## Ralph (Autonomous Execution)
+
+**simple-ralph** (`bin/simple-ralph`) is the execution engine. Zero deps beyond bash + claude CLI.
+
+**ralph-watch** (`ralph/src/ralph/watch.py`) is the Rich monitor. Installed via:
+```bash
+uv tool install -e ~/repos/fun-bash-automations/ralph
+```
+This is the source of truth. Do NOT create standalone copies in `bin/`.
+
+**Session isolation**: Each run creates `.ralph/sessions/<session-name>/` with a 3-word name
+(e.g., `bold-crow-leap`). Symlinks at `.ralph/{output.log,meta.json}` point to the current session.
+
 ## Shell Functions
 
 The `zsh/personal.zsh` file defines these functions that Claude should know about:
 - `claude-deploy` - Deploy repo config to ~/.claude (make changes live)
 - `claude-sync` - Sync ~/.claude config back to this repo
 - `gwt`, `gwtl`, `gwtr`, `gwtc`, `gwtclean` - Git worktree helpers
+- `rt` - Tail Ralph output (`tail -f .ralph/output.log`)
+- `ralph-status` - Quick status check from `.ralph/meta.json`
