@@ -44,6 +44,8 @@ check_git_force() {
 check_branch_protection() {
   echo "$COMMAND" | grep -qE 'git\s+push\s+origin\s+(main|master)(\s|$)' &&
     deny "Blocked: pushing directly to main/master is not allowed."
+  echo "$COMMAND" | grep -qE 'git\s+push\s+.*\bmh-netflix\b' &&
+    deny "Blocked: pushing to mh-netflix requires human approval."
   echo "$COMMAND" | grep -qE 'git\s+push\s+upstream(\s|$)' &&
     deny "Blocked: pushing to upstream is never allowed."
 }
