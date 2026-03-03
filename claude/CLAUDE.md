@@ -43,6 +43,8 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
   GH_HOST=git.netflix.net gh api repos/corp/repo-name/pulls
   GH_HOST=git.netflix.net gh gist create file1.md file2.py --desc "Description"
   ```
+- **Gist file naming**: Prefix filenames with `NN_` (zero-padded two digits) to control display order (e.g., `01_analysis.md`, `02_discover.py`, `10_helper.py`). Gists sort alphabetically, so the prefix ensures correct ordering even with 10+ files.
+- **Analysis gists**: The analysis/report always comes first, scripts come after. People care about the findings, not the implementation details.
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 
@@ -54,6 +56,14 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
   - Finding similar implementations
   - Checking how other services handle auth, errors, configs
   - Copying patterns for consistency across projects
+
+## Beads (Issue Tracking)
+
+Beads are centralized in `~/repos/dump/.beads/beads.db`. The `BD_DB` env var is set in zshrc, so `bd` commands work from any CWD without `--db`. If `BD_DB` is not set (e.g., fresh agent), pass `--db ~/repos/dump/.beads/beads.db` explicitly.
+
+- Use `repo:<name>` labels to filter by repo (e.g., `bd ready -l repo:cde-dgw-kv`)
+- Use `/beads` skill for creating beads from plan breakdowns
+- Beads survive context compaction — run `bd ready` to resume work cold
 
 ## Plan Mode Preference
 - I prefer to use plan mode for non-trivial changes
