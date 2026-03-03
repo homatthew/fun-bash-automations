@@ -29,8 +29,7 @@ Read the plan file. Check whether it has the required sections for autonomous ex
 - [ ] **Per-step Self-Review Gate** — Each step must include a self-review checklist that asks: "Does this match the original design intent? Did I only touch the files listed? Do the remaining steps still make sense?"
 - [ ] **Context Checkpoint** — Between steps, a clear marker that says whether to `/clear` and what the next step touches (so the agent knows what context it needs).
 - [ ] **Completion Signal** — Each step ends with the exact text the agent must output when done:
-  - simple-ralph: `RALPH_STEP_DONE` per step, `RALPH_DONE` for the final step
-  - full ralph: `RALPH_STORY_DONE` per story
+  - `RALPH_STEP_DONE` per step, `RALPH_DONE` for the final step
 
 ### 3. Augment the plan
 
@@ -60,7 +59,7 @@ Add this after the design intent:
 1. Run the verification checklist (must all pass)
 2. Run the self-review gate (must all pass)
 3. Commit with a descriptive message
-4. Output RALPH_STEP_DONE (simple-ralph) or RALPH_STORY_DONE (full ralph)
+4. Output RALPH_STEP_DONE (or RALPH_DONE for the final step)
 
 **On session start / after context clear**: Run these commands to recover:
 \```bash
@@ -89,7 +88,7 @@ Every step must end with a verification block. If a step doesn't have one, add i
 <project-specific lint command>
 \```
 
-All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP.
+All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP (or RALPH_DONE for the final step).
 ```
 
 Use the project's actual build/test commands (check for `gradlew`, `pytest`, `npm test`, `cargo test`, etc. in the working directory).
@@ -106,7 +105,7 @@ After the verification checklist, add:
 - [ ] Would a code reviewer flag anything? (naming, error handling, edge cases, style)
 - [ ] Are there any TODO/FIXME/HACK comments I introduced that should be resolved now?
 
-All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP.
+All checks pass? Commit, update .ralph/status.md, output RALPH_STEP_DONE and STOP (or RALPH_DONE for the final step).
 ```
 
 The third bullet is the key insight: **use the future steps' verifications as a forward-looking code review**. If Step 3's verification says "test that the API returns 404 for missing resources", and you're currently on Step 2 building the API handler, your Step 2 self-review should ask "will my handler make Step 3's verification pass?"
@@ -130,19 +129,16 @@ Write the enhanced plan back to the same path (`~/.claude/plans/<name>.md`). Tel
 ```
 Plan: ~/.claude/plans/<plan-name>.md (augmented for autonomous execution)
 
-# Full Ralph (TUI + PRD stories):
-ralph ~/.claude/plans/<plan-name>.md
-
-# Simple Ralph (bash, zero deps):
+# Execute:
 simple-ralph ~/.claude/plans/<plan-name>.md
 
-# Simple Ralph with rich output (recommended):
+# With rich output:
 simple-ralph --rich ~/.claude/plans/<plan-name>.md
 
 # In a worktree (isolated):
-simple-ralph --rich -w <slug> ~/.claude/plans/<plan-name>.md
+simple-ralph -w <slug> ~/.claude/plans/<plan-name>.md
 
-# Or monitor separately (in another terminal):
+# Monitor (in another terminal):
 rt                          # tail -f .ralph/output.log
 ralph-watch                 # rich console version
 ```
@@ -151,8 +147,7 @@ ralph-watch                 # rich console version
 
 If `.ralphrc` does NOT exist in the project root:
 - simple-ralph defaults to broad tools (`Edit Read Write Glob Grep Bash`)
-- full ralph defaults to scoped bash (safer)
-- `ralph init` creates a project-specific .ralphrc
+- Create `.ralphrc` manually if tighter tool scoping is desired
 
 ## Rules
 
@@ -162,4 +157,3 @@ If `.ralphrc` does NOT exist in the project root:
 - Preserve all existing implementation content when augmenting
 - The self-review gate is NOT optional — it replaces the human reviewer
 - Use the project's ACTUAL build/test/lint commands, not generic placeholders
-- Prefer simple-ralph for quick runs, full ralph for complex multi-story plans

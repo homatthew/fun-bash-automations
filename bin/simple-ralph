@@ -20,6 +20,7 @@ set -euo pipefail
 # --- Defaults ---
 MAX_ITER=50
 MAX_FAILURES=3
+MAX_TURNS=20
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--max)       MAX_ITER="$2"; shift 2 ;;
     -r|--max-retries) MAX_FAILURES="$2"; shift 2 ;;
+    -T|--max-turns) MAX_TURNS="$2"; shift 2 ;;
     -t|--tools)     TOOLS="$2"; shift 2 ;;
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
@@ -42,6 +44,7 @@ Usage: simple-ralph [options] plan.md
 
 Options:
   -n, --max N          Absolute iteration cap (default: 50)
+  -T, --max-turns N    Claude max turns per iteration (default: 20)
   -r, --max-retries N  Consecutive failures before stopping (default: 3)
   -t, --tools T        Tool scope (default: Edit Read Write Glob Grep Bash)
   -d, --dir DIR        Run in this directory
@@ -95,9 +98,10 @@ if [[ -f ".ralphrc" ]]; then
     key="${key## }"; key="${key%% }"
     val="${val## }"; val="${val%% }"; val="${val#\"}"; val="${val%\"}"
     case "$key" in
-      RALPH_TOOLS)    TOOLS="$val" ;;
-      RALPH_MAX_ITER) MAX_ITER="$val" ;;
-      \#*|"")         ;; # skip comments and blanks
+      RALPH_TOOLS)      TOOLS="$val" ;;
+      RALPH_MAX_ITER)   MAX_ITER="$val" ;;
+      RALPH_MAX_TURNS)  MAX_TURNS="$val" ;;
+      \#*|"")           ;; # skip comments and blanks
       *)              echo "Warning: ignoring unknown .ralphrc key: $key" ;;
     esac
   done < .ralphrc
@@ -153,9 +157,15 @@ Execute the NEXT incomplete step. ONLY that step.
 1. Run verification (build/test/lint as specified in the plan)
 2. Self-review: check for bugs, wrong files modified, code review issues
 3. Fix issues found
-4. Commit with a descriptive message
-5. Update .ralph/status.md with progress
-6. Output RALPH_STEP_DONE and STOP
+4. Run a final lint/format pass (ruff check, ruff format --check, or the project's linter). Fix issues before declaring done.
+5. If the project has a code-review or simplify skill, use it on changed files before declaring done.
+6. Commit with a descriptive message
+7. Update .ralph/status.md with progress
+8. Output RALPH_STEP_DONE and STOP
+
+## Stacked PRs (if applicable)
+- Use git rebase <parent-branch> to keep branches in sync
+- Use gh pr create --base <parent-branch> not --base main
 
 ## Signals
 - RALPH_STEP_DONE = step done, STOP immediately (do NOT continue to next step)
@@ -221,7 +231,7 @@ while ((iter < MAX_ITER)); do
   set +eo pipefail  # pipe may have non-zero exits from jq on non-JSON lines
   claude -p --verbose --dangerously-skip-permissions \
     --output-format stream-json \
-    --max-turns 30 \
+    --max-turns "$MAX_TURNS" \
     --allowedTools "$TOOLS" \
     <<< "$PROMPT" 2>>"$ITER_LOG.err" \
     | tee "$ITER_LOG" \
