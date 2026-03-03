@@ -1,6 +1,6 @@
 ---
 name: ralph-run
-description: "Export the current plan and generate the command to run it with simple-ralph or ralph. Use when you want to hand off a plan for autonomous execution."
+description: "Export the current plan and generate the command to run it with simple-ralph. Use when you want to hand off a plan for autonomous execution."
 ---
 
 # Ralph Run — Plan Export & Execute
@@ -27,11 +27,6 @@ Export the current plan and output the command to run it autonomously.
    ```
    Where `<slug>` is derived from the plan filename (e.g., `refactor-auth.md` → `refactor-auth`).
 
-   **Option C: Run with full Ralph (TUI)**
-   ```
-   ralph ~/.claude/plans/<plan>.md
-   ```
-
 3. **Output the command block** with monitoring instructions:
    ```
    # Execute:
@@ -47,13 +42,11 @@ Export the current plan and output the command to run it autonomously.
    ```
 
 4. **If `.ralphrc` is missing** in the target directory, mention it:
-   - For simple-ralph: defaults to `Edit Read Write Glob Grep Bash` (broad)
-   - For full ralph: defaults to scoped bash (safer)
-   - Suggest `ralph init` if they want tighter scoping
+   - Defaults to `Edit Read Write Glob Grep Bash` (broad)
+   - Create `.ralphrc` manually if tighter tool scoping is desired
 
 ## Rules
 
 - Don't execute the plan — this is informational only
-- Prefer simple-ralph unless the user asks for the TUI
 - Use `-w` worktree mode if the plan would modify the current repo and isolation is desired
 - Always show the monitoring commands — that's the whole point

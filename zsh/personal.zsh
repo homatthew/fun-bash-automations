@@ -685,9 +685,9 @@ gprunelocal() {
 }
 
 # Ralph Wiggum — autonomous Claude loop
-# Full: `ralph` (Python CLI via uv tool install)
-# Simple: `simple-ralph` (bash, zero deps)
-# See ~/repos/fun-bash-automations/ralph/ for source
+# Execution: `simple-ralph` (bash, zero deps)
+# Monitoring: `ralph-watch` (Python + Rich) or `rt` (bash tail)
+# See ~/repos/fun-bash-automations/bin/ for source
 
 # ralph-tail — follow Ralph output in real time
 # Works for both simple-ralph and full ralph (both write .ralph/ logs)

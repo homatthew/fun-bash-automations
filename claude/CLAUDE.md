@@ -73,11 +73,11 @@ Beads are centralized in `~/repos/dump/.beads/beads.db`. The `BD_DB` env var is 
 
 ### Ralph Handoff
 When the plan is approved and I exit plan mode, include a one-line reminder at the end:
-> To execute autonomously: `ralph ~/.claude/plans/<plan-name>.md`
+> To execute autonomously: `simple-ralph ~/.claude/plans/<plan-name>.md`
 
 **Keyword trigger:** When I say "ralph", "ralph it", or "hand this off to ralph":
 1. Find the most recent plan file in `~/.claude/plans/`
-2. Output the `ralph` command for that plan
+2. Output the `simple-ralph` command for that plan
 3. **STOP. Do not implement the plan. Do not write code. Do not make changes.**
 
 ## Git Worktree Workflow
