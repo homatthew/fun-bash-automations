@@ -129,11 +129,8 @@ Write the enhanced plan back to the same path (`~/.claude/plans/<name>.md`). Tel
 ```
 Plan: ~/.claude/plans/<plan-name>.md (augmented for autonomous execution)
 
-# Execute:
+# Execute (rich output by default):
 simple-ralph ~/.claude/plans/<plan-name>.md
-
-# With rich output:
-simple-ralph --rich ~/.claude/plans/<plan-name>.md
 
 # In a worktree (isolated):
 simple-ralph -w <slug> ~/.claude/plans/<plan-name>.md
