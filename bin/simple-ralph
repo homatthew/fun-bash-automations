@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # --- Defaults ---
-MAX_ITER=50
+MAX_ITER=20
 MAX_FAILURES=3
 MAX_TURNS=20
 PLAN=""
@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 Usage: simple-ralph [options] plan.md
 
 Options:
-  -n, --max N          Absolute iteration cap (default: 50)
+  -n, --max N          Absolute iteration cap (default: 20)
   -T, --max-turns N    Claude max turns per iteration (default: 20)
   -r, --max-retries N  Consecutive failures before stopping (default: 3)
   -t, --tools T        Tool scope (default: Edit Read Write Glob Grep Bash)
@@ -118,8 +118,9 @@ session_name() {
 }
 
 # --- Setup ---
-RALPH_DIR=".ralph"
+RALPH_ROOT=".ralph"
 SESSION_NAME=$(session_name)
+RALPH_DIR="$RALPH_ROOT/sessions/$SESSION_NAME"
 mkdir -p "$RALPH_DIR"
 
 # Hide .ralph from git
@@ -127,7 +128,7 @@ EXCLUDE=".git/info/exclude"
 [[ -f "$EXCLUDE" ]] && ! grep -qx ".ralph" "$EXCLUDE" 2>/dev/null && echo ".ralph" >> "$EXCLUDE"
 
 # Lockfile — prevent concurrent sessions in the same directory
-LOCKFILE="$RALPH_DIR/lock"
+LOCKFILE="$RALPH_ROOT/lock"
 if [[ -f "$LOCKFILE" ]]; then
   LOCK_PID=$(cat "$LOCKFILE")
   if kill -0 "$LOCK_PID" 2>/dev/null; then
@@ -140,20 +141,18 @@ echo $$ > "$LOCKFILE"
 RICH_PID=""
 trap 'rm -f "$LOCKFILE"; [[ -n "$RICH_PID" ]] && kill "$RICH_PID" 2>/dev/null && wait "$RICH_PID" 2>/dev/null' EXIT
 
-# Archive previous session if present
-if [[ -f "$RALPH_DIR/meta.json" ]]; then
-  PREV_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session','prev'))" "$RALPH_DIR/meta.json" 2>/dev/null || echo "prev")
-  PREV_DIR="$RALPH_DIR/sessions/$PREV_NAME"
-  mkdir -p "$PREV_DIR"
-  mv "$RALPH_DIR"/{meta.json,status.md,output.log,iteration-*.log*,directive-*,status-prev.md} "$PREV_DIR/" 2>/dev/null || true
-fi
+# Symlinks for monitoring tools (rt, ralph-watch read .ralph/output.log)
+rm -f "$RALPH_ROOT/current" "$RALPH_ROOT/output.log" "$RALPH_ROOT/meta.json"
+ln -s "sessions/$SESSION_NAME" "$RALPH_ROOT/current"
+ln -s "sessions/$SESSION_NAME/output.log" "$RALPH_ROOT/output.log"
+ln -s "sessions/$SESSION_NAME/meta.json" "$RALPH_ROOT/meta.json"
 
-# TTL: prune archived sessions older than 24h
-find "$RALPH_DIR/sessions" -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+# TTL: prune sessions older than 24h
+find "$RALPH_ROOT/sessions" -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
 
 # Combined output log — this is what you tail
 OUTPUT_LOG="$RALPH_DIR/output.log"
-: > "$OUTPUT_LOG"  # truncate on fresh start
+: > "$OUTPUT_LOG"
 
 # --- Meta tracking ---
 write_meta() {
@@ -187,7 +186,7 @@ build_prompt() {
 ## You are executing ONE step of a plan.
 
 1. Read the plan: $PLAN — this is the AUTHORITATIVE list of all steps.
-2. Read .ralph/status.md to see which steps are already done.
+2. Read $RALPH_DIR/status.md to see which steps are already done.
 3. Cross-reference: find the first step in the PLAN that is NOT marked done in status.md.
 4. Execute that step. ONLY that step.
 
@@ -201,7 +200,7 @@ If status.md shows 3 steps done but the plan has 7 steps, you have 4 steps remai
 4. Run a final lint/format pass (ruff check, ruff format --check, or the project's linter). Fix issues before declaring done.
 5. If the project has a code-review or simplify skill, use it on changed files before declaring done.
 6. Commit with a descriptive message
-7. Update .ralph/status.md with progress
+7. Update $RALPH_DIR/status.md with progress
 8. Output RALPH_STEP_DONE and STOP
 
 ## Stacked PRs (if applicable)
