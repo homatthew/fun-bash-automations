@@ -215,7 +215,17 @@ if [[ -f "$LOCKFILE" ]]; then
 fi
 echo "$$:$(date +%s)" > "$LOCKFILE"
 RICH_PID=""
-trap 'rm -f "$LOCKFILE"; [[ -n "$RICH_PID" ]] && kill "$RICH_PID" 2>/dev/null && wait "$RICH_PID" 2>/dev/null' EXIT
+cleanup() {
+  rm -f "$LOCKFILE"
+  if [[ -n "$RICH_PID" ]]; then
+    sleep 0.5                              # let ralph-watch read final log lines
+    kill "$RICH_PID" 2>/dev/null
+    wait "$RICH_PID" 2>/dev/null
+  fi
+  printf '\033[?25h' >&3 2>/dev/null       # restore cursor (fd3 = real terminal)
+  printf '\033[?25h' 2>/dev/null           # also try stdout in case fd3 is closed
+}
+trap cleanup EXIT
 
 # Symlinks for monitoring tools (rt, ralph-watch read .ralph/output.log)
 rm -f "$RALPH_ROOT/current" "$RALPH_ROOT/output.log" "$RALPH_ROOT/meta.json"
