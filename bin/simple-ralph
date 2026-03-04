@@ -23,7 +23,7 @@ MAX_TURNS=50
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
-RICH=1
+RICH=0
 STATUS_MODE=0
 TOOLS="Edit Read Write Glob Grep Bash"
 WORKTREE_BASE="${HOME}/worktrees"
@@ -38,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     -d|--dir)       WORK_DIR="$2"; shift 2 ;;
     -w|--worktree)  WORKTREE_NAME="$2"; shift 2 ;;
     --plain)       RICH=0; shift ;;
+    --rich)        RICH=1; shift ;;
     --status)
       STATUS_MODE=1
       if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
@@ -56,7 +57,8 @@ Options:
   -d, --dir DIR        Run in this directory
   -w, --worktree NAME  Create worktree and run there
                        Creates: ~/worktrees/ralph-NAME (branch: ralph/NAME)
-  --plain             Plain output (no Rich; default is rich via ralph-watch)
+  --plain             Plain output (default)
+  --rich              Rich output via ralph-watch (requires ralph-watch installed)
   --status [DIR]       Show session status and health info
 
 Monitor from another terminal:
