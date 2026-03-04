@@ -24,35 +24,41 @@ which metatron || echo "metatron not found"
 
 If Docker isn't running, start it with `open -a Docker` and wait ~30s for the daemon.
 
-## Step 1: Build
+## Step 1: Dev Setup (Build + Dependencies)
 
 ```bash
 cd ~/repos/<antigravity-repo>
-newt build
+newt dev-setup
 ```
 
-This creates `.venv/` with all dependencies. Alternative: `newt dev-setup` does build + starts DynamoDB + installs pre-commit hooks (requires Docker running first).
+This does everything in one command:
+- Creates `.venv/` with all dependencies
+- Starts local DynamoDB container (required on `localhost:8000`)
+- Starts metatron mesh local docker (for service-to-service auth)
+- Installs pre-commit hooks
 
-## Step 2: Start Local DynamoDB
+**Requires Docker running first.** If not: `open -a Docker` and wait ~30s.
+
+If you only need to rebuild without restarting containers, use `newt build` instead.
+
+## Step 2: Identify the App Module
+
+Antigravity repos follow a naming convention: `antigravity-<shard>` with a Python module named `antigravity_<shard>`.
 
 ```bash
-docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local
+# Find the webapp entrypoint
+ls */webapp.py
 ```
 
-If the container already exists: `docker start dynamodb-local`
+This gives you the `<module>` name (e.g., `antigravity_cass`, `antigravity_edda`, `antigravity_memcached`).
 
-The webapp requires DynamoDB on `localhost:8000` — startup fails at `ensure_dynamodb_tables_are_provisioned` without it.
+The metatron app identity is typically `antigravity.<shard>` (e.g., `antigravity.cass`). Check `newt.yml` or `appconfig.yaml` if unsure.
 
 ## Step 3: Start the Webapp
 
 ```bash
 source .venv/bin/activate
-ALLOW_ANONYMOUS_ACCESS=true python <app_module>/webapp.py
-```
-
-For antigravity-cass specifically:
-```bash
-ALLOW_ANONYMOUS_ACCESS=true python antigravity_cass/webapp.py
+ALLOW_ANONYMOUS_ACCESS=true python <module>/webapp.py
 ```
 
 - Runs on `http://127.0.0.1:7101`
@@ -63,39 +69,38 @@ ALLOW_ANONYMOUS_ACCESS=true python antigravity_cass/webapp.py
 ## Step 4: Hit Endpoints with Metatron Curl
 
 ```bash
-metatron curl -a <app-name> -allowPlaintext \
+metatron curl -a antigravity.<shard> -allowPlaintext \
   -X POST "http://127.0.0.1:7101/<path>?<params>" \
   -H "Content-Type: application/json" \
   -d '<json-body>'
 ```
 
 Key flags:
-- `-a <app-name>` — metatron app identity (e.g., `antigravity.cass`)
+- `-a antigravity.<shard>` — metatron app identity
 - `-allowPlaintext` — required because local server is HTTP, not HTTPS
 - `-d '{}'` — empty JSON body for endpoints with default body params
 
-### Example: Fleet Recommendation (specific apps)
+### Discovering Endpoints
+
 ```bash
-metatron curl -a antigravity.cass -allowPlaintext \
-  -X POST "http://127.0.0.1:7101/scale/fleet-recommendation?scale_type=right_size&app_names=cass_turtle&app_names=cass_vms&export_to_spreadsheet=true" \
-  -H "Content-Type: application/json" -d '{}'
+# List available routes from the running webapp
+metatron curl -a antigravity.<shard> -allowPlaintext \
+  "http://127.0.0.1:7101/openapi.json" | python -m json.tool
 ```
 
-### Example: Fleet Recommendation (full fleet via ODS discovery)
-```bash
-metatron curl -a antigravity.cass -allowPlaintext \
-  -X POST "http://127.0.0.1:7101/scale/fleet-recommendation?scale_type=right_size&export_to_spreadsheet=true" \
-  -H "Content-Type: application/json" -d '{}'
-```
+Or check the repo's route definitions directly (typically in `<module>/routes/`).
 
-### Example: Single App Recommendation
-```bash
-metatron curl -a antigravity.cass -allowPlaintext \
-  -X POST "http://127.0.0.1:7101/scale/recommendation/account:persistence_prod/app:cass_turtle" \
-  -H "Content-Type: application/json" -d '{}'
-```
+---
 
-## Discovering Real App Names
+## Shard-Specific Reference
+
+### antigravity-cass
+
+- **Repo**: `~/repos/antigravity-cass`
+- **Module**: `antigravity_cass`
+- **Metatron app**: `antigravity.cass`
+
+#### Discovering App Names
 
 ```python
 # Run in the activated venv
@@ -105,12 +110,36 @@ for i in impacts[:10]:
     print(i.appname)
 ```
 
+#### Example: Fleet Recommendation (specific apps)
+```bash
+metatron curl -a antigravity.cass -allowPlaintext \
+  -X POST "http://127.0.0.1:7101/scale/fleet-recommendation?scale_type=right_size&app_names=cass_turtle&app_names=cass_vms&export_to_spreadsheet=true" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+#### Example: Fleet Recommendation (full fleet via ODS discovery)
+```bash
+metatron curl -a antigravity.cass -allowPlaintext \
+  -X POST "http://127.0.0.1:7101/scale/fleet-recommendation?scale_type=right_size&export_to_spreadsheet=true" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+#### Example: Single App Recommendation
+```bash
+metatron curl -a antigravity.cass -allowPlaintext \
+  -X POST "http://127.0.0.1:7101/scale/recommendation/account:persistence_prod/app:cass_turtle" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+---
+
 ## Common Issues
 
 | Symptom | Fix |
 |---------|-----|
 | `Cannot connect to Docker daemon` | `open -a Docker`, wait 30s |
-| `ConnectionRefusedError` on port 8000 | Start DynamoDB: `docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local` |
+| `ConnectionRefusedError` on port 8000 | Re-run `newt dev-setup` to start DynamoDB container |
+| Metatron mesh auth failures | Re-run `newt dev-setup` to start metatron mesh local docker |
 | `401 Unauthorized` | Restart webapp with `ALLOW_ANONYMOUS_ACCESS=true` |
 | `server gave HTTP response to HTTPS client` | Use `-allowPlaintext` flag with metatron curl |
 | `WorksheetNotFound` on export | Create the worksheet in Google Sheets manually |
@@ -121,8 +150,8 @@ for i in impacts[:10]:
 
 ```bash
 # Stop webapp: Ctrl+C or kill the process
-# Stop DynamoDB:
-docker stop dynamodb-local
-# Remove DynamoDB container (optional):
-docker rm dynamodb-local
+# Stop containers started by newt dev-setup:
+docker stop dynamodb-local metatron-mesh-local 2>/dev/null
+# Remove containers (optional):
+docker rm dynamodb-local metatron-mesh-local 2>/dev/null
 ```
