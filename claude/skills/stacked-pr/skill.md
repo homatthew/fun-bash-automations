@@ -24,27 +24,65 @@ main
 
 Each PR targets its parent branch, NOT main (except the first).
 
-## Creating the Stack
+## Step 1: Create all branches and commits locally
 
-### 1. Create the base branch and first PR
+Do ALL the work first. No pushing yet.
 
 ```bash
-git checkout -b mho/feature-base
+# Base branch
+git checkout -b mho/feature-base main
 # ... make changes, commit ...
+
+# Child branch
+git checkout -b mho/feature-api
+# ... make changes, commit ...
+
+# More children as needed
+git checkout -b mho/feature-ui
+# ... make changes, commit ...
+```
+
+## Step 2: Collect push-gate info for the user
+
+Gather the HEAD of each branch so the user can batch-approve:
+
+```bash
+echo "Branch HEADs for push-gate-batch:"
+for branch in mho/feature-base mho/feature-api mho/feature-ui; do
+  echo "  $(git rev-parse $branch | head -c 7)  $branch"
+done
+```
+
+Tell the user:
+
+> All branches ready. Run in your terminal:
+> ```
+> push-gate-batch <base-hash> <api-hash> <ui-hash>
+> ```
+> Then I'll push all branches and create the PRs.
+
+## Step 3: Push all branches and create PRs
+
+Once the user confirms they've run `push-gate-batch`:
+
+```bash
+# Push each branch (one push-gate token consumed per push)
 git push -u origin mho/feature-base
-gh pr create --base main --title "feat: add base infrastructure"
-```
-
-### 2. Create child branches from parent
-
-```bash
-git checkout -b mho/feature-api   # branches from mho/feature-base
-# ... make changes, commit ...
 git push -u origin mho/feature-api
-gh pr create --base mho/feature-base --title "feat: add API layer"
+git push -u origin mho/feature-ui
+
+# Create PRs with correct base targets
+gh pr create --base main --head mho/feature-base \
+  --title "feat: add base infrastructure" --body "..." --draft
+
+gh pr create --base mho/feature-base --head mho/feature-api \
+  --title "feat: add API layer" --body "> Depends on #<base-PR>" --draft
+
+gh pr create --base mho/feature-api --head mho/feature-ui \
+  --title "feat: add UI layer" --body "> Depends on #<api-PR>" --draft
 ```
 
-### 3. PR description conventions
+## PR Description Conventions
 
 In each child PR description, add:
 ```
@@ -64,6 +102,7 @@ When you update a parent branch, rebase children to pick up changes:
 # After updating mho/feature-base
 git checkout mho/feature-api
 git rebase mho/feature-base
+# HEAD changed — user needs to push-gate the new HEAD before pushing
 git push --force-with-lease origin mho/feature-api
 ```
 
@@ -96,6 +135,7 @@ If the diff includes parent changes, the `--base` is wrong — fix with `gh pr e
 
 ## Rules for Autonomous Agents
 
+- Do all work locally first. Push only after user runs `push-gate-batch`.
 - Always create PRs with `--base <parent-branch>`, not `--base main` (except the first)
 - Use `git rebase <parent>` to sync, never merge
 - Use `--force-with-lease` to push rebased branches

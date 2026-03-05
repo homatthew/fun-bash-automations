@@ -1,14 +1,13 @@
 ---
 name: create-nflx-pr
-description: Create a PR on Netflix Enterprise GitHub
+description: "DEPRECATED — use /commit-push-pr instead. Kept as a redirect."
 ---
 
 # Create a PR
 
-> **Related skills:**
-> - `/update-pr-description <PR#>` - Update an existing PR's description
-> - `/commit-push-pr` - Commit, push, and create PR in one workflow
-> - `/address-comments-by <reviewer>` - Address review comments after PR is created
+> **This skill is deprecated.** Use `/commit-push-pr` instead — it handles commit, push (with push-gate), and PR creation in one flow.
+>
+> If you are here, invoke `/commit-push-pr` and stop reading this file.
 
 ## Step 1: Detect the repo type
 
@@ -99,7 +98,7 @@ gh pr create \
 - Netflix `gh` fork installed (`/usr/local/bin/gh`)
 - Authenticated: `gh auth status` should show `git.netflix.net`
 - Remotes use canonical URLs (`nfgit canonical origin`)
-- Branch must be pushed first
+- Branch must be pushed first — use `/commit-push-pr` (raw `git push` is blocked by the push guard hook)
 
 ---
 
