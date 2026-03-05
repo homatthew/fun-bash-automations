@@ -1,16 +1,17 @@
 ---
 name: commit-push-pr
-description: Commit, push, and create a PR in one workflow
+description: "Commit, push, and create/update a PR. This is the ONLY sanctioned way to push code. Use when the user explicitly asks to push, create a PR, or update a PR with new commits."
 ---
 
-# Commit, Push, and Create PR
+# Commit, Push, and Create/Update PR
+
+> **When to use:** ONLY when the user explicitly asks to push, create a PR, or update an existing PR with new commits. Do NOT invoke this skill proactively at the end of a task.
 
 > **Related skills:**
-> - `/create-nflx-pr` - Create PR only (if already committed and pushed)
-> - `/update-pr-description <PR#>` - Update an existing PR's description
+> - `/update-pr-description <PR#>` - Update an existing PR's description text (no push needed)
 > - `/address-comments-by <reviewer>` - Address review comments after PR is created
 
-First, gather context by running these commands:
+## Step 1: Gather Context
 
 ```bash
 git status
@@ -20,17 +21,60 @@ git branch --show-current
 git remote -v
 ```
 
-Then:
+## Step 2: Check for Existing PR
 
-1. **Commit** - Create a concise commit message based on staged changes
-2. **Push** - Push the current branch to origin
-3. **Create PR** - Create a draft PR using the template below
+```bash
+BRANCH=$(git branch --show-current)
+gh pr list --head "$BRANCH" --json number,title,url
+```
 
-## PR Description Template
+- If a PR already exists → this is an **update** (commit + push only, skip PR creation)
+- If no PR exists → this is a **new PR** (commit + push + create)
 
-Use this structure for all PR descriptions (GitHub supports Mermaid diagrams):
+## Step 3: Commit
 
-```markdown
+Create a concise commit message based on staged changes. Follow repo conventions from `git log`.
+
+## Step 4: Push
+
+**Before pushing, give the user the exact `push-gate` command to run.** The push guard hook blocks all pushes until the user approves the specific commit.
+
+First, get the current HEAD:
+```bash
+git rev-parse HEAD
+```
+
+Then tell the user (with the actual hash):
+> Ready to push. Run in your terminal:
+> `push-gate <full-commit-hash>`
+
+Once the user confirms they've run it:
+
+```bash
+git push -u origin "$BRANCH"
+```
+
+If the push is blocked with a "stale token" message, the HEAD has changed since approval — ask the user to run `push-gate` again.
+
+## Step 5: Create PR (new PRs only)
+
+Skip this step if a PR already exists (Step 2 found one).
+
+First, detect repo type and fork topology:
+
+```bash
+git remote -v
+# git.netflix.net → Netflix GHE workflow
+# github.com → Public GitHub workflow
+# If "upstream" remote exists → cross-fork PR
+```
+
+### For Netflix GHE repos (git.netflix.net)
+
+```bash
+gh pr create \
+  --title "<title>" \
+  --body "$(cat <<'EOF'
 ## What am I trying to do?
 [1-3 sentences explaining the goal/problem being solved]
 
@@ -44,36 +88,10 @@ Use this structure for all PR descriptions (GitHub supports Mermaid diagrams):
 [Example usage, API changes, or migration notes if applicable]
 
 ## Architecture (optional)
-[Include a Mermaid diagram if the change involves multiple components]
-
-\`\`\`mermaid
-graph LR
-    A[Component A] --> B[Component B]
-    B --> C[Component C]
-\`\`\`
-```
-
-## Creating the PR
-
-First, detect repo type and fork topology:
-
-```bash
-git remote -v
-# git.netflix.net → Netflix GHE workflow
-# github.com → Public GitHub workflow
-# If "upstream" remote exists → cross-fork PR (target upstream, head from fork)
-```
-
-### For Netflix GHE repos (git.netflix.net)
-
-Netflix's `gh` fork works directly — no proxy setup needed.
-
-```bash
-BRANCH=$(git branch --show-current)
-
-gh pr create \
-  --title "Your PR title" \
-  --body "[Use the full PR Description Template above - do not abbreviate]" \
+[Include a Mermaid diagram ONLY if data flows through 3+ components,
+there's a non-obvious ordering, or the text explanation exceeds 5 sentences]
+EOF
+)" \
   --base main \
   --head "$BRANCH" \
   --draft
@@ -86,10 +104,10 @@ gh pr create \
 ```bash
 gh pr create \
   --repo <org>/<repo> \
-  --title "Your PR title" \
-  --body "[Use the full PR Description Template above]" \
+  --title "<title>" \
+  --body "<use template above>" \
   --base main \
-  --head <branch-name> \
+  --head "$BRANCH" \
   --draft
 ```
 
@@ -100,11 +118,27 @@ Create the PR on the **upstream** repo with your fork's branch as head:
 ```bash
 gh pr create \
   --repo <upstream-org>/<repo> \
-  --title "Your PR title" \
-  --body "[Use the full PR Description Template above]" \
+  --title "<title>" \
+  --body "<use template above>" \
   --base main \
-  --head <fork-owner>:<branch-name> \
+  --head <fork-owner>:"$BRANCH" \
   --draft
 ```
 
-Always create PRs in draft mode unless explicitly told otherwise.
+Example: fork is `homatthew/service-capacity-modeling`, upstream is `Netflix-Skunkworks/service-capacity-modeling`:
+```bash
+gh pr create \
+  --repo Netflix-Skunkworks/service-capacity-modeling \
+  --title "My change" \
+  --body "..." \
+  --base main \
+  --head homatthew:"$BRANCH" \
+  --draft
+```
+
+## General Rules
+
+- Always create PRs in **draft mode** unless explicitly told otherwise
+- Use the full PR description template — do not abbreviate
+- Pass the body via HEREDOC for multi-line descriptions
+- Return the PR URL when done
