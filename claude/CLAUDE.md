@@ -12,15 +12,26 @@ Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never
 
 **Exception:** `service-capacity-model` repo allows direct pushes to `origin main` (but NOT `upstream main`).
 
+## Push Policy
+
+**`git push` is blocked by a PreToolUse hook.** All pushes require the user to run `push-gate` in their terminal first.
+
+- `push-gate` creates a one-time token tied to the current HEAD commit
+- If you make more commits after approval, the token becomes stale — the user must run `push-gate` again
+- Token is consumed after one push (one approval = one push)
+- Do NOT push proactively — only push when the user explicitly asks
+- At the end of a task: **commit locally, then stop**. Do not push unless asked.
+- When the user asks to push or create a PR, use `/commit-push-pr` and ask them to run `push-gate` before the push step.
+
 ## Skills Quick Reference
 
 **IMPORTANT**: Use skills for PR operations on Netflix repos for consistent templates and formatting.
 
 | Task | Skill | Notes |
 |------|-------|-------|
-| Create new PR | `/create-nflx-pr` | Uses `gh pr create`, creates in draft mode |
+| Create new PR | `/commit-push-pr` | Subsumes `/create-nflx-pr` (deprecated) |
 | Update PR description | `/update-pr-description <PR#>` | Full template with "What/Why/Tests/How" |
-| Commit + push + PR | `/commit-push-pr` | All-in-one workflow |
+| Push + create/update PR | `/commit-push-pr` | **ONLY way to push** — works for new and existing PRs |
 | Address review comments | `/address-comments-by <reviewer>` | Fetch and respond to specific reviewer |
 | Split large PR | `/split-pr` | Analyze and propose atomic commits |
 | Create stacked PRs | `/stacked-pr` | Dependent PR chains with incremental diffs |
