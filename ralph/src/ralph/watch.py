@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from rich.console import Console
@@ -35,6 +36,67 @@ def _read_meta(ralph_dir: Path) -> dict:
 def _find_latest_iter_log(ralph_dir: Path) -> Path | None:
     logs = sorted(ralph_dir.glob("iteration-*.log"), key=lambda p: p.stat().st_mtime)
     return logs[-1] if logs else None
+
+
+class IterStats:
+    """Track activity within an iteration for the spinner status line."""
+
+    def __init__(self):
+        self.reset()
+        self.steps_done = 0  # across all iterations
+        self.total_tools = 0
+
+    def reset(self):
+        self.tools = Counter()
+        self.files_touched: set[str] = set()
+        self.last_activity = ""
+        self.iter_tools = 0
+
+    def record_tool(self, tool: str, detail: str):
+        self.tools[tool] += 1
+        self.iter_tools += 1
+        self.total_tools += 1
+        self.last_activity = tool
+        # Track files from Read/Edit/Write/Grep/Glob
+        if tool in ("Read", "Edit", "Write") and detail:
+            # Extract just filename from path
+            name = Path(detail.strip()).name
+            if name:
+                self.files_touched.add(name)
+
+    def record_step_done(self):
+        self.steps_done += 1
+
+    def spinner_text(self, current_iter: str) -> str:
+        parts = [f"[bold cyan]{current_iter}[/bold cyan]"]
+        if self.iter_tools:
+            parts.append(f"[dim]{self.iter_tools} tools[/dim]")
+        if self.files_touched:
+            n = len(self.files_touched)
+            parts.append(f"[dim]{n} file{'s' if n != 1 else ''}[/dim]")
+        if self.last_activity:
+            parts.append(f"[magenta]{self.last_activity}[/magenta]")
+        if self.steps_done:
+            parts.append(f"[green]step {self.steps_done} done[/green]")
+        return "  ".join(parts)
+
+    def iter_summary(self) -> str:
+        """One-line summary printed after an iteration completes."""
+        parts = []
+        if self.iter_tools:
+            # Top 3 tools
+            top = self.tools.most_common(3)
+            tool_str = " ".join(f"{t}:{n}" for t, n in top)
+            parts.append(f"tools: {tool_str}")
+        if self.files_touched:
+            files = sorted(self.files_touched)
+            if len(files) <= 4:
+                parts.append(f"files: {', '.join(files)}")
+            else:
+                parts.append(f"files: {', '.join(files[:3])} +{len(files)-3}")
+        if not parts:
+            return ""
+        return "  [dim]│  " + "  |  ".join(parts) + "[/dim]"
 
 
 def _format_line(line: str, elapsed: int) -> str | None:
@@ -60,6 +122,16 @@ def _format_line(line: str, elapsed: int) -> str | None:
         rest = stripped[bracket_end + 2:]
         return f"  [dim]│[/dim] {ts} [bold]{tool}[/bold] [dim]{rest}[/dim]"
 
+    # Failure diagnostics — make these stand out
+    if "No completion signal" in stripped or "consecutive failures" in stripped:
+        return f"  [dim]│[/dim] {ts} [bold yellow]{stripped}[/bold yellow]"
+
+    if "hit turn limit" in stripped or "error_max_turns" in stripped:
+        return f"  [dim]│[/dim] {ts} [bold yellow]{stripped}[/bold yellow]"
+
+    if stripped.startswith("Crash report:"):
+        return f"  [dim]│[/dim] {ts} [bold red]{stripped}[/bold red]"
+
     # Error lines
     if any(m in stripped for m in ("FAILED", "Error", "Traceback", "error:")):
         return f"  [dim]│[/dim] {ts} [red]{stripped}[/red]"
@@ -68,6 +140,15 @@ def _format_line(line: str, elapsed: int) -> str | None:
     if len(stripped) > 120:
         stripped = stripped[:117] + "..."
     return f"  [dim]│[/dim] {ts} {stripped}"
+
+
+def _parse_tool(line: str) -> tuple[str, str] | None:
+    """Extract (tool_name, detail) from a tool-call line, or None."""
+    stripped = line.rstrip("\n")
+    if stripped.startswith("[") and "]" in stripped[:30]:
+        bracket_end = stripped.index("]")
+        return stripped[1:bracket_end], stripped[bracket_end + 2:]
+    return None
 
 
 def _watch(ralph_dir: Path, from_start: bool = False) -> None:
@@ -115,13 +196,14 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
 
     iter_start = time.monotonic()
     current_iter = ""
+    stats = IterStats()
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         TimeElapsedColumn(),
         console=console,
-        transient=False,
+        transient=True,
     ) as progress:
         label = session if session else plan_name
         task = progress.add_task(
@@ -133,28 +215,61 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
                 f.seek(0, 2)
 
             last_meta_check = 0.0
+            last_line_time = time.monotonic()
+            stale_warned = False
             while True:
                 line = f.readline()
                 if line:
+                    last_line_time = time.monotonic()
+                    stale_warned = False
                     stripped = line.rstrip("\n")
 
+                    # Track tool calls for spinner
+                    tool_info = _parse_tool(stripped)
+                    if tool_info:
+                        stats.record_tool(*tool_info)
+                        if current_iter:
+                            progress.update(
+                                task,
+                                description=stats.spinner_text(current_iter),
+                            )
+
+                    # Track step completions
+                    if "RALPH_STEP_DONE" in stripped:
+                        stats.record_step_done()
+
                     # Detect iteration boundaries — update spinner
+                    # Check completion FIRST (both formats start with "=== iteration")
+                    if stripped.startswith("=== iteration") and "result:" in stripped:
+                        result_text = stripped.strip("= ")
+                        # Color-code by result type
+                        if "plan_complete" in stripped:
+                            style = "bold green"
+                        elif "success" in stripped:
+                            style = "cyan"
+                        else:
+                            style = "yellow"
+                        # Print iteration summary before result
+                        summary = stats.iter_summary()
+                        if summary:
+                            progress.console.print(summary, highlight=False)
+                        progress.console.print(
+                            f"\n  [dim]┌─[/dim] [{style}]{result_text}[/{style}]"
+                        )
+                        stats.reset()
+                        continue
+
                     if stripped.startswith("=== iteration") and "===" in stripped[3:]:
-                        # Extract iteration info
+                        # New iteration — reset per-iter stats
                         current_iter = stripped.strip("= ")
                         iter_start = time.monotonic()
+                        stats.reset()
                         progress.update(
                             task,
-                            description=f"[bold cyan]{current_iter}[/bold cyan]",
+                            description=stats.spinner_text(current_iter),
                         )
                         progress.console.print(
                             f"\n  [dim]┌─[/dim] [bold cyan]{current_iter}[/bold cyan]"
-                        )
-                        continue
-
-                    if stripped.startswith("=== iteration") and "complete" in stripped:
-                        progress.console.print(
-                            f"  [dim]└─[/dim] [dim]{stripped.strip('= ')}[/dim]\n"
                         )
                         continue
 
@@ -168,7 +283,9 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
                     if now - last_meta_check > 2:
                         last_meta_check = now
                         meta = _read_meta(ralph_dir)
-                        if meta.get("status") in ("done", "interrupted", "max_iterations"):
+                        if meta.get("status") in (
+                            "done", "interrupted", "max_iterations", "failed",
+                        ):
                             progress.update(
                                 task,
                                 description=(
@@ -181,6 +298,10 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
                             if remaining:
                                 for rem_line in remaining.splitlines():
                                     elapsed = int(time.monotonic() - iter_start)
+                                    # Track tools from drained lines too
+                                    tool_info = _parse_tool(rem_line)
+                                    if tool_info:
+                                        stats.record_tool(*tool_info)
                                     fmt = _format_line(rem_line, elapsed)
                                     if fmt:
                                         progress.console.print(fmt, highlight=False)
@@ -198,10 +319,41 @@ def _watch(ralph_dir: Path, from_start: bool = False) -> None:
                                         if fmt:
                                             progress.console.print(fmt, highlight=False)
                                 progress.update(
-                                    task, description="[bold]Ralph exited[/bold]",
+                                    task,
+                                    description="[bold]Ralph exited[/bold] (process gone)",
                                 )
                                 break
+                        # Stale warning — no output for 60s
+                        silence = time.monotonic() - last_line_time
+                        if silence > 60 and not stale_warned:
+                            stale_warned = True
+                            progress.console.print(
+                                f"  [dim]│[/dim] [dim yellow]"
+                                f"    No output for {int(silence)}s — "
+                                f"Claude may be thinking or stuck[/dim yellow]"
+                            )
                     time.sleep(0.1)
+
+    # End summary after Progress exits (cursor restored, spinner gone)
+    meta = _read_meta(ralph_dir)
+    status = meta.get("status", "exited")
+    itr = meta.get("iter", "?")
+    mx = meta.get("max_iter", "?")
+    label = meta.get("session", plan_name)
+
+    if status == "done":
+        style = "bold green"
+    elif status in ("interrupted", "max_iterations"):
+        style = "bold yellow"
+    elif status == "failed":
+        style = "bold red"
+    else:
+        style = "bold"
+
+    console.print(f"\n  [{style}]Ralph {status}[/{style}] — {label} (iter {itr}/{mx})")
+    if stats.total_tools:
+        console.print(f"  [dim]{stats.total_tools} total tool calls, {stats.steps_done} steps completed[/dim]")
+    console.print()
 
 
 def _find_sessions() -> list[tuple[Path, dict]]:
@@ -318,6 +470,8 @@ def main():
         _watch(ralph_dir, from_start=from_start)
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching.[/dim]")
+    finally:
+        console.show_cursor(True)
 
 
 if __name__ == "__main__":
