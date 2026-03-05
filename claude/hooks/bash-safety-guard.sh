@@ -40,14 +40,46 @@ check_git_force() {
     deny "Blocked: git stash drop/clear loses stashed work."
 }
 
-# --- 2. Branch Protection ---
-check_branch_protection() {
-  echo "$COMMAND" | grep -qE 'git\s+push\s+origin\s+(main|master)(\s|$)' &&
-    deny "Blocked: pushing directly to main/master is not allowed."
-  echo "$COMMAND" | grep -qE 'git\s+push\s+.*\bmh-netflix\b' &&
-    deny "Blocked: pushing to mh-netflix requires human approval."
+# --- 2. Push Guard ---
+# Blocks ALL git push by default. Pushes require a one-time token
+# created by the user running `push-gate` in their terminal.
+# The token is tied to a specific commit hash — if the agent makes
+# more commits after approval, the token becomes stale and push is blocked.
+# Token is consumed (deleted) after one successful push.
+check_push_guard() {
+  echo "$COMMAND" | grep -qE 'git\s+push' || return
+
+  # Absolute blocks — no bypass
   echo "$COMMAND" | grep -qE 'git\s+push\s+upstream(\s|$)' &&
     deny "Blocked: pushing to upstream is never allowed."
+  echo "$COMMAND" | grep -qE 'git\s+push\s+.*\s(main|master)(\s|$)' &&
+    deny "Blocked: pushing directly to main/master is not allowed."
+
+  # Check for push token (created by user running push-gate or push-gate-batch).
+  # Token file contains one commit hash per line. Matching line is consumed;
+  # file is deleted when empty. Supports both single and batch approvals.
+  local TOKEN_FILE="/tmp/.claude-push-token"
+  if [ -f "$TOKEN_FILE" ]; then
+    local CURRENT_HEAD
+    CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null)
+    if [ -n "$CURRENT_HEAD" ] && grep -qx "$CURRENT_HEAD" "$TOKEN_FILE" 2>/dev/null; then
+      # Consume this entry (remove matching line)
+      local REMAINING
+      REMAINING=$(grep -vx "$CURRENT_HEAD" "$TOKEN_FILE")
+      if [ -z "$REMAINING" ]; then
+        rm -f "$TOKEN_FILE"  # last entry consumed
+      else
+        echo "$REMAINING" > "$TOKEN_FILE"
+      fi
+      return
+    fi
+    # Token exists but HEAD doesn't match any entry
+    local FIRST_APPROVED
+    FIRST_APPROVED=$(head -1 "$TOKEN_FILE")
+    deny "Blocked: push token has no entry for HEAD ${CURRENT_HEAD:0:7} (first approved: ${FIRST_APPROVED:0:7}). Run push-gate again to approve current HEAD."
+  fi
+
+  deny "Blocked: git push requires approval. Ask the user to run push-gate in their terminal, then retry."
 }
 
 # --- 3. Git Config & Hook Bypass ---
@@ -176,7 +208,7 @@ check_docker_destructive() {
 
 # --- Run all checks ---
 check_git_force
-check_branch_protection
+check_push_guard
 check_git_config
 check_broad_staging
 check_git_rebase

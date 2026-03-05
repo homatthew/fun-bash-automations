@@ -310,6 +310,46 @@ claude-deploy() {
     echo "Changes are now live"
 }
 
+# push-gate: Approve a specific commit for pushing via Claude agents.
+# Creates a one-time token tied to a commit hash. The PreToolUse hook
+# checks HEAD matches this commit before allowing git push.
+# Usage: push-gate <commit-hash>  (short or full)
+push-gate() {
+    if [ -z "$1" ]; then
+        echo "Usage: push-gate <commit-hash>"
+        return 1
+    fi
+    local full=$(git rev-parse "$1" 2>/dev/null)
+    if [ -z "$full" ]; then
+        echo "Unknown commit: $1"
+        return 1
+    fi
+    echo "$full" > /tmp/.claude-push-token
+    echo "Push approved for $(git log --oneline -1 "$full")"
+}
+
+# push-gate-batch: Approve multiple commits for stacked PR workflows.
+# Writes all commits to the token file. The hook pops matching entries.
+# Usage: push-gate-batch <hash1> <hash2> <hash3> ...
+push-gate-batch() {
+    if [ $# -eq 0 ]; then
+        echo "Usage: push-gate-batch <hash1> [hash2] [hash3] ..."
+        return 1
+    fi
+    local token_file="/tmp/.claude-push-token"
+    > "$token_file"  # truncate
+    for ref in "$@"; do
+        local full=$(git rev-parse "$ref" 2>/dev/null)
+        if [ -z "$full" ]; then
+            echo "Unknown commit: $ref"
+            return 1
+        fi
+        echo "$full" >> "$token_file"
+        echo "  approved: $(git log --oneline -1 "$full")"
+    done
+    echo "Push gate opened for $# commits (batch mode)"
+}
+
 alias claude='claude --dangerously-skip-permissions'
 alias codex="codex --dangerously-bypass-approvals-and-sandbox"
 
