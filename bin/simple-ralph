@@ -23,7 +23,7 @@ MAX_TURNS=50
 PLAN=""
 WORK_DIR=""
 WORKTREE_NAME=""
-RICH=0
+RICH=1
 STATUS_MODE=0
 TOOLS="Edit Read Write Glob Grep Bash"
 WORKTREE_BASE="${HOME}/worktrees"
@@ -360,10 +360,14 @@ If status.md shows 3 steps done but the plan has 7 steps, you have 4 steps remai
 - Use git rebase <parent-branch> to keep branches in sync
 - Use gh pr create --base <parent-branch> not --base main
 
+## Push Policy
+- Do NOT run git push — it WILL be blocked by the push guard hook.
+- Commit locally only. The user will review and push after you finish.
+- If the plan says "push" or "create PR", skip that part and note it in status.md.
+
 ## Signals
 - RALPH_STEP_DONE = step done, STOP immediately (do NOT continue to next step)
 - RALPH_DONE = ALL steps complete, plan finished
-- Do NOT push to main or master
 $([ -n "$directive" ] && echo "
 ## Operator directive (priority)
 $directive")
