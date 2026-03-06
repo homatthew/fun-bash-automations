@@ -92,6 +92,8 @@ check_git_config() {
     deny "Blocked: git commit --amend modifies previous commit."
   echo "$COMMAND" | grep -qE 'commit\.gpgsign=false' &&
     deny "Blocked: disabling GPG signing is not allowed."
+  echo "$COMMAND" | grep -qE '(CHECKSTYLE_SKIP|VERIFY_SKIP|SPOTLESS_SKIP)=' &&
+    deny "Blocked: skipping pre-commit checks is not allowed."
 }
 
 # --- 4. Broad Git Staging ---
