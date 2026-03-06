@@ -350,7 +350,10 @@ push-gate-batch() {
     echo "Push gate opened for $# commits (batch mode)"
 }
 
+alias claude-safe='/opt/nflx/bin/claude'
 alias claude='claude --dangerously-skip-permissions'
+alias cld='claude --dangerously-skip-permissions'
+alias cldr='claude --dangerously-skip-permissions --resume'
 alias codex="codex --dangerously-bypass-approvals-and-sandbox"
 
 # ==============================================================================
