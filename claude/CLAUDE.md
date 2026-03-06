@@ -41,6 +41,7 @@ Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never
 | Design architecture | `/architect` | Design and maintain feature architecture |
 | Persist insights | `/second-brain` | Save architectural learnings |
 | Hand off to Ralph | `/ralph-handoff` | Auto-triggered by "ralph" keyword |
+| Review before push | `/push-review` | Analyze DAG, map branches to PRs, push one-by-one |
 
 ## GitHub CLI Usage
 
