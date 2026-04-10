@@ -52,7 +52,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "~/.claude/hooks/beads-prime.sh",
             "type": "command"
           }
         ],
@@ -83,7 +83,7 @@
       {
         "hooks": [
           {
-            "command": "bd prime",
+            "command": "~/.claude/hooks/beads-prime.sh",
             "type": "command"
           }
         ],
