@@ -177,61 +177,39 @@ echo "✓ Ghostty config symlinked"
 echo ""
 echo "Setting up shared LLM configuration..."
 
-# Create target directory structures if they don't exist
-mkdir -p ~/.claude/agents ~/.claude/skills ~/.codex/skills
+# Use the canonical projection path so setupPermissions stays aligned with
+# dotfiles installers and the portable LLM config model.
+"$HOME/repos/fun-bash-automations/bin/fba-deploy"
+echo "✓ repo-owned Claude/Codex runtime files projected"
 
-# Symlink Claude adapter + shared AGENTS.md
-rm -f ~/.claude/CLAUDE.md
-ln -s ~/repos/fun-bash-automations/claude/CLAUDE.md ~/.claude/CLAUDE.md
-echo "✓ CLAUDE.md symlinked"
-rm -f ~/.claude/AGENTS.md
-ln -s ~/repos/fun-bash-automations/llm/AGENTS.md ~/.claude/AGENTS.md
-echo "✓ ~/.claude/AGENTS.md symlinked"
+# Re-lock selected symlinks after projection for local safety.
+lock_symlink ~/.claude/CLAUDE.md
+LOCKED_SYMLINKS+=("~/.claude/CLAUDE.md")
+lock_symlink ~/.claude/AGENTS.md
+LOCKED_SYMLINKS+=("~/.claude/AGENTS.md")
+lock_symlink ~/.codex/AGENTS.md
+LOCKED_SYMLINKS+=("~/.codex/AGENTS.md")
 
-# Symlink Codex AGENTS.md
-rm -f ~/.codex/AGENTS.md
-ln -s ~/repos/fun-bash-automations/llm/AGENTS.md ~/.codex/AGENTS.md
-echo "✓ ~/.codex/AGENTS.md symlinked"
-
-# Symlink portable Codex config template
-rm -f ~/.codex/config.toml
-ln -s ~/repos/fun-bash-automations/codex/config.toml ~/.codex/config.toml
-echo "✓ ~/.codex/config.toml symlinked"
-
-# Symlink settings.json (NOT protected - Claude writes to this file)
-rm -f ~/.claude/settings.json
-ln -s ~/repos/fun-bash-automations/claude/settings.json ~/.claude/settings.json
-echo "✓ settings.json symlinked"
-
-# Symlink agents (individual files, protected)
-for agent in ~/repos/fun-bash-automations/claude/agents/*.md; do
-	name=$(basename "$agent")
-	unlock_symlink ~/.claude/agents/"$name"
-	rm -f ~/.claude/agents/"$name"
-	ln -s "$agent" ~/.claude/agents/"$name"
-	lock_symlink ~/.claude/agents/"$name"
-	LOCKED_SYMLINKS+=("~/.claude/agents/$name")
+for agent in ~/.claude/agents/*.md; do
+	[ -L "$agent" ] || continue
+	lock_symlink "$agent"
+	LOCKED_SYMLINKS+=("~/.claude/agents/$(basename "$agent")")
 done
-echo "✓ agents symlinked (protected)"
+echo "✓ Claude agents symlinked (protected)"
 
-# Symlink shared skills into Claude (directories, protected)
-for skill in ~/repos/fun-bash-automations/llm/skills/*/; do
-	name=$(basename "$skill")
-	unlock_symlink ~/.claude/skills/"$name"
-	rm -rf ~/.claude/skills/"$name"
-	ln -s "$skill" ~/.claude/skills/"$name"
-	lock_symlink ~/.claude/skills/"$name"
-	LOCKED_SYMLINKS+=("~/.claude/skills/$name")
+for skill in ~/.claude/skills/*; do
+	[ -L "$skill" ] || continue
+	lock_symlink "$skill"
+	LOCKED_SYMLINKS+=("~/.claude/skills/$(basename "$skill")")
 done
 echo "✓ shared skills symlinked to ~/.claude/skills (protected)"
 
-# Symlink shared skills into Codex (~/.codex/skills/.system is preserved)
-for skill in ~/repos/fun-bash-automations/llm/skills/*/; do
-	name=$(basename "$skill")
-	rm -rf ~/.codex/skills/"$name"
-	ln -s "$skill" ~/.codex/skills/"$name"
+for skill in ~/.codex/skills/*; do
+	[ -L "$skill" ] || continue
+	lock_symlink "$skill"
+	LOCKED_SYMLINKS+=("~/.codex/skills/$(basename "$skill")")
 done
-echo "✓ shared skills symlinked to ~/.codex/skills"
+echo "✓ shared skills symlinked to ~/.codex/skills (protected)"
 
 # ==============================================================================
 # Summary
