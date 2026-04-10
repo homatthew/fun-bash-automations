@@ -1,13 +1,15 @@
 # Portable Codex configuration source-of-truth.
 # This file is copied/rendered into ~/.codex/config.toml by dotfiles installers.
 
-model = "gpt-5.3-codex"
+model = "gpt-5.4"
 review_model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
 plan_mode_reasoning_effort = "high"
 model_provider = "openai-chat-completions"
 file_opener = "cursor"
 personality = "pragmatic"
+model_context_window = 1000000
+model_auto_compact_token_limit = 950000
 
 [analytics]
 enabled = false
@@ -24,3 +26,6 @@ base_url = "__CODEX_BASE_URL__"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
