@@ -51,18 +51,18 @@ You receive insights inline in the prompt:
 3. **If NEW topic:**
    - Create directory: `mkdir -p topics/<topic>`
    - Read template: `cat _templates/topic.md`
-   - Write CLAUDE.md filling in all sections
+   - Write README.md filling in all sections
    - Get current commit for Last Reviewed: `git rev-parse --short HEAD`
-   - Add to topic index in root CLAUDE.md
+   - Add to topic index in root README.md
 
 4. **If EXISTING topic:**
-   - Read existing: `cat topics/<topic>/CLAUDE.md`
+   - Read existing: `cat topics/<topic>/README.md`
    - Merge new insights (preserve structure)
    - Update Last Reviewed date and commit hash
    - Update topic graph if connections changed
 
 5. **Commit**
-   - Stage: `git add topics/<topic>/CLAUDE.md CLAUDE.md`
+   - Stage: `git add topics/<topic>/README.md README.md`
    - Commit: `git commit -m "second-brain: add|update <topic> - <brief description>"`
 
 ## Output
@@ -70,5 +70,5 @@ You receive insights inline in the prompt:
 Return a brief summary:
 - Topic: <name>
 - Action: added | updated
-- Path: ~/repos/dump/second-brain/topics/<topic>/CLAUDE.md
+- Path: ~/repos/dump/second-brain/topics/<topic>/README.md
 - Commit: <hash>

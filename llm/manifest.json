@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "canonical": {
+    "repo_agent_doc": "AGENTS.md",
+    "shared_agent_doc": "llm/AGENTS.md",
+    "shared_skills_dir": "llm/skills"
+  },
+  "adapters": {
+    "claude_repo_shim": "CLAUDE.md",
+    "claude_runtime_doc": "claude/CLAUDE.md"
+  },
+  "projections": {
+    "claude": {
+      "instructions": {
+        "~/.claude/CLAUDE.md": "claude/CLAUDE.md",
+        "~/.claude/AGENTS.md": "llm/AGENTS.md"
+      },
+      "skills_dir": {
+        "target": "~/.claude/skills",
+        "source": "llm/skills"
+      }
+    },
+    "codex": {
+      "instructions": {
+        "~/.codex/AGENTS.md": "llm/AGENTS.md"
+      },
+      "skills_dir": {
+        "target": "~/.codex/skills",
+        "source": "llm/skills",
+        "preserve_entries": [
+          ".system"
+        ]
+      }
+    }
+  }
+}
+
