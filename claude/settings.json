@@ -4,9 +4,12 @@
   "autoUpdatesChannel": "latest",
   "enabledPlugins": {
     "beads@beads-marketplace": true,
+    "code-review@claude-plugins-official": true,
     "elements-of-style@superpowers-marketplace": true,
     "frontend-design@claude-plugins-official": true,
     "interface-design@interface-design": true,
+    "ods-first-team@ods-first-team-skills": true,
+    "pr-review-toolkit@claude-plugins-official": true,
     "superpowers@superpowers-marketplace": true
   },
   "env": {
@@ -19,10 +22,21 @@
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,wrapper.version=2602251823"
+    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,wrapper.version=2603081044"
   },
   "fastMode": false,
   "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/worktree-create.sh",
+            "timeout": 900
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [
@@ -88,11 +102,12 @@
       }
     ]
   },
-  "model": "opus[1m]",
+  "model": "sonnet[1m]",
   "permissions": {
     "allow": [],
     "defaultMode": "plan"
   },
+  "showClearContextOnPlanAccept": true,
   "skipDangerousModePermissionPrompt": true,
   "statusLine": {
     "command": "~/.claude/statusline.sh",

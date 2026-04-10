@@ -42,28 +42,22 @@ git checkout -b mho/feature-ui
 # ... make changes, commit ...
 ```
 
-## Step 2: Collect push-gate info for the user
+## Step 2: Request push-gate approval
 
-Gather the HEAD of each branch so the user can batch-approve:
-
-```bash
-echo "Branch HEADs for push-gate-batch:"
-for branch in mho/feature-base mho/feature-api mho/feature-ui; do
-  echo "  $(git rev-parse $branch | head -c 7)  $branch"
-done
-```
+Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
 
 Tell the user:
 
 > All branches ready. Run in your terminal:
 > ```
-> push-gate-batch <base-hash> <api-hash> <ui-hash>
+> cd <working-directory>
+> push-gate 5
 > ```
-> Then I'll push all branches and create the PRs.
+> (5-minute window for multiple pushes.) Then I'll push all branches and create the PRs.
 
 ## Step 3: Push all branches and create PRs
 
-Once the user confirms they've run `push-gate-batch`:
+Once the user confirms they've run `push-gate`:
 
 ```bash
 # Push each branch (one push-gate token consumed per push)
@@ -102,7 +96,7 @@ When you update a parent branch, rebase children to pick up changes:
 # After updating mho/feature-base
 git checkout mho/feature-api
 git rebase mho/feature-base
-# HEAD changed — user needs to push-gate the new HEAD before pushing
+# HEAD changed — user needs to run push-gate before pushing
 git push --force-with-lease origin mho/feature-api
 ```
 
@@ -135,7 +129,7 @@ If the diff includes parent changes, the `--base` is wrong — fix with `gh pr e
 
 ## Rules for Autonomous Agents
 
-- Do all work locally first. Push only after user runs `push-gate-batch`.
+- Do all work locally first. Push only after user runs `push-gate`.
 - Always create PRs with `--base <parent-branch>`, not `--base main` (except the first)
 - Use `git rebase <parent>` to sync, never merge
 - Use `--force-with-lease` to push rebased branches

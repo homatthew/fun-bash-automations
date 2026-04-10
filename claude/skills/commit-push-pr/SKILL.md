@@ -37,16 +37,14 @@ Create a concise commit message based on staged changes. Follow repo conventions
 
 ## Step 4: Push
 
-**Before pushing, give the user the exact `push-gate` command to run.** The push guard hook blocks all pushes until the user approves the specific commit.
+**Before pushing, ask the user to run `push-gate` to open a time-based approval window.** The push guard hook blocks all pushes until the user approves. Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
 
-First, get the current HEAD:
-```bash
-git rev-parse HEAD
-```
-
-Then tell the user (with the actual hash):
-> Ready to push. Run in your terminal:
-> `push-gate <full-commit-hash>`
+Tell the user (substitute the actual working directory and branch):
+> Ready to push `$BRANCH`. Run in your terminal:
+> ```
+> cd <working-directory>
+> push-gate
+> ```
 
 Once the user confirms they've run it:
 
@@ -54,7 +52,7 @@ Once the user confirms they've run it:
 git push -u origin "$BRANCH"
 ```
 
-If the push is blocked with a "stale token" message, the HEAD has changed since approval — ask the user to run `push-gate` again.
+If the push is blocked with an expired token message, ask the user to run `push-gate` again.
 
 ## Step 5: Create PR (new PRs only)
 
