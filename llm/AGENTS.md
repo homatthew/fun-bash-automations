@@ -7,6 +7,8 @@ workflows across Claude, Codex, and future harnesses.
 
 - Keep history linear in `fun-bash-automations` on branch `mh-netflix`.
 - Do not push unless explicitly asked.
+- Treat that as a hard workflow rule even if a shell path or harness would
+  technically allow `git push`.
 - Use `push-gate` before any push operation that requires approval.
 - Keep shared behavior harness-agnostic in this file and in `llm/skills`.
 
