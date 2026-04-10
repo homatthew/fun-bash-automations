@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE="all"
+
+usage() {
+    cat <<'EOF'
+Usage: fba-deploy [--claude-only | --codex-only | --shared-only]
+
+Project repo-owned LLM config from fun-bash-automations into local runtimes.
+
+Modes:
+  --claude-only  Update ~/.claude plus shared AGENTS/skills
+  --codex-only   Update ~/.codex plus shared AGENTS/skills
+  --shared-only  Update only shared AGENTS/skills in both runtimes
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --claude-only)
+            MODE="claude"
+            ;;
+        --codex-only)
+            MODE="codex"
+            ;;
+        --shared-only)
+            MODE="shared"
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+codex_base_url() {
+    if [[ -n "${MODEL_GATEWAY_PROJECT_ID:-}" ]]; then
+        printf '%s\n' "http://copilotdppython-secure.us-east-1.prod.svip.mesh.netflix.net:22022/proxy/${MODEL_GATEWAY_PROJECT_ID}/v1"
+    else
+        printf '%s\n' "http://mgp.local.dev.netflix.net:9123/proxy/odsdgitools/v1"
+    fi
+}
+
+link_path() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if command -v chflags >/dev/null 2>&1; then
+        chflags -h nouchg "$dest_path" 2>/dev/null || true
+    fi
+
+    if [[ -L "$dest_path" || -f "$dest_path" ]]; then
+        rm -f "$dest_path"
+    elif [[ -d "$dest_path" ]]; then
+        echo "Skipping existing directory: $dest_path" >&2
+        return 0
+    fi
+
+    ln -s "$source_path" "$dest_path"
+}
+
+copy_path() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if command -v chflags >/dev/null 2>&1; then
+        chflags -h nouchg "$dest_path" 2>/dev/null || true
+    fi
+
+    if [[ -L "$dest_path" || -f "$dest_path" ]]; then
+        rm -f "$dest_path"
+    elif [[ -d "$dest_path" ]]; then
+        echo "Skipping existing directory: $dest_path" >&2
+        return 0
+    fi
+
+    cp "$source_path" "$dest_path"
+}
+
+project_shared() {
+    local home_dir="$1"
+    mkdir -p "$home_dir/skills"
+
+    if [[ -f "$ROOT/llm/AGENTS.md" ]]; then
+        link_path "$ROOT/llm/AGENTS.md" "$home_dir/AGENTS.md"
+    fi
+
+    for skill_dir in "$ROOT"/llm/skills/*/; do
+        [[ -d "$skill_dir" ]] || continue
+        local name
+        name="$(basename "$skill_dir")"
+        link_path "$skill_dir" "$home_dir/skills/$name"
+    done
+}
+
+deploy_claude() {
+    mkdir -p "$HOME/.claude/agents" "$HOME/.claude/skills" "$HOME/.claude/hooks"
+
+    if [[ -f "$ROOT/claude/CLAUDE.md" ]]; then
+        link_path "$ROOT/claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+    fi
+
+    project_shared "$HOME/.claude"
+
+    if [[ -f "$ROOT/claude/settings.json" ]]; then
+        copy_path "$ROOT/claude/settings.json" "$HOME/.claude/settings.json"
+    fi
+
+    if [[ -f "$ROOT/claude/statusline.sh" ]]; then
+        copy_path "$ROOT/claude/statusline.sh" "$HOME/.claude/statusline.sh"
+        chmod +x "$HOME/.claude/statusline.sh"
+    fi
+
+    for agent in "$ROOT"/claude/agents/*.md; do
+        [[ -f "$agent" ]] || continue
+        link_path "$agent" "$HOME/.claude/agents/$(basename "$agent")"
+    done
+
+    for hook in "$ROOT"/claude/hooks/*.sh; do
+        [[ -f "$hook" ]] || continue
+        copy_path "$hook" "$HOME/.claude/hooks/$(basename "$hook")"
+        chmod +x "$HOME/.claude/hooks/$(basename "$hook")"
+    done
+}
+
+deploy_codex() {
+    local base_url
+    base_url="$(codex_base_url)"
+
+    mkdir -p "$HOME/.codex" "$HOME/.codex/skills"
+    project_shared "$HOME/.codex"
+
+    if [[ -f "$ROOT/codex/config.toml" ]]; then
+        sed "s|__CODEX_BASE_URL__|$base_url|g" "$ROOT/codex/config.toml" > "$HOME/.codex/config.toml"
+        chmod 600 "$HOME/.codex/config.toml"
+    fi
+}
+
+case "$MODE" in
+    all)
+        deploy_claude
+        deploy_codex
+        ;;
+    claude)
+        deploy_claude
+        ;;
+    codex)
+        deploy_codex
+        ;;
+    shared)
+        mkdir -p "$HOME/.claude" "$HOME/.codex"
+        project_shared "$HOME/.claude"
+        project_shared "$HOME/.codex"
+        ;;
+esac
+
+echo "Projected fun-bash-automations LLM config ($MODE)"

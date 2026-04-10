@@ -18,6 +18,8 @@ harnesses.
 3. Keep harness-specific deltas in adapter files (`claude/CLAUDE.md`, Claude
    runtime hooks/settings).
 4. Never treat `~/.claude` or `~/.codex` as source of truth.
+5. After changing repo-owned runtime files, run `fba-deploy` to project them
+   into local harness homes.
 
 ## Projection Targets
 
