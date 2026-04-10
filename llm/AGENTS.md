@@ -41,4 +41,5 @@ workflows across Claude, Codex, and future harnesses.
 - Structural source of truth: `llm/manifest.json`
 - Human maintainer guide: `llm/README.md`
 - Integration parity + MCP mapping: `llm/integrations.md`
-
+- Use `fba-deploy` after editing repo-owned runtime files so `~/.claude` and
+  `~/.codex` stay in sync with this repo.

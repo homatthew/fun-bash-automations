@@ -286,7 +286,7 @@ alias squash='rbi && gca'
 # LLM Config Sync
 # ==============================================================================
 # Shared instructions/skills are canonical in ~/repos/fun-bash-automations/llm.
-# Claude runtime settings live in ~/.claude and can be synced/deployed below.
+# Use fba-deploy to project repo-owned runtime files into ~/.claude and ~/.codex.
 
 # claude-sync: Copy ~/.claude config back to repo
 claude-sync() {
@@ -299,36 +299,26 @@ claude-sync() {
     echo "Run 'cd $dst && git diff' to review changes"
 }
 
-# claude-deploy: Copy repo config to ~/.claude (makes changes live)
-claude-deploy() {
-    local src=~/repos/fun-bash-automations/claude
-    local dst=~/.claude
+# fba-deploy: Project repo-owned LLM config into local runtimes.
+fba-deploy() {
+    "$HOME/repos/fun-bash-automations/bin/fba-deploy" "$@"
+}
 
-    cp "$src/CLAUDE.md" "$dst/CLAUDE.md"
-    cp "$src/settings.json" "$dst/settings.json"
-    echo "Deployed $src → ~/.claude"
-    echo "Changes are now live"
+# Backward-compatible wrappers
+claude-deploy() {
+    fba-deploy --claude-only "$@"
+}
+
+codex-deploy() {
+    fba-deploy --codex-only "$@"
 }
 
 # agent-refresh: project shared AGENTS + skills into both Claude and Codex homes.
 agent-refresh() {
-    local root=~/repos/fun-bash-automations
-    mkdir -p ~/.claude/skills ~/.codex/skills
-
-    ln -sfn "$root/llm/AGENTS.md" ~/.claude/AGENTS.md
-    ln -sfn "$root/llm/AGENTS.md" ~/.codex/AGENTS.md
-
-    for skill in "$root"/llm/skills/*/; do
-        [ -d "$skill" ] || continue
-        local name
-        name="$(basename "$skill")"
-        ln -sfn "$skill" ~/.claude/skills/"$name"
-        ln -sfn "$skill" ~/.codex/skills/"$name"
-    done
-
-    echo "Refreshed shared LLM projection for ~/.claude and ~/.codex"
+    fba-deploy --shared-only
 }
 alias llm-refresh=agent-refresh
+alias llm-deploy=fba-deploy
 
 # push-gate: Approve git pushes by Claude agents for a time window.
 # Creates a time-based token valid for N minutes (default: 3).
