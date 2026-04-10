@@ -11,6 +11,7 @@ harnesses.
 - `integrations.md` Claude plugin vs Codex MCP parity map
 - `../codex/config.toml` portable Codex config template
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
+- `../codex/hooks.json` portable Codex hooks template
 - `command-guard-policy.md` shared command safety policy
 
 ## Canonical Editing Rules
@@ -33,15 +34,18 @@ harnesses.
   - `~/.claude/skills/*` -> `llm/skills/*`
 - Codex:
   - `~/.codex/auth.json` -> copied from `codex/auth.json`
+  - `~/.codex/hooks.json` -> copied from `codex/hooks.json`
+  - `~/.codex/hooks/*.sh` -> copied from shared guard script implementations
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
 
 ## Guardrail Sync
 
 - Shared command guard intent lives in `llm/command-guard-policy.md`.
-- Claude currently has native command-hook enforcement.
-- Codex currently inherits the same policy through shared instructions rather
-  than a repo-local native hook implementation.
+- Claude has native command-hook enforcement.
+- Codex has experimental native command-hook enforcement for supported events.
+- Both harnesses use the same guard script implementations for Bash pre-tool
+  checks.
 
 ## Compaction Recovery
 

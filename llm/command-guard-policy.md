@@ -17,10 +17,9 @@ Codex, and future harnesses.
   - Native enforcement via `claude/hooks/bash-safety-guard.sh`
   - Native enforcement via `claude/hooks/dgw-write-guard.sh`
 - Codex:
-  - No documented equivalent to Claude `PreToolUse` hooks in this repo's
-    portable config model
-  - Follow this policy through shared `AGENTS.md` guidance and tool-approval
-    behavior
+  - Native enforcement via `codex/hooks.json`
+  - Current Codex runtime support is experimental and currently Bash-focused
+  - Codex and Claude both call the same shared guard script implementations
 
 ## Shared Guard Categories
 
@@ -97,5 +96,4 @@ Codex, and future harnesses.
 
 - Update this file first when command guard policy changes.
 - Keep Claude hook implementations aligned with this document.
-- If Codex gains a documented native pre-command hook surface, map it to this
-  policy instead of introducing a second source of truth.
+- Keep Codex hook wiring aligned with the same shared guard scripts.

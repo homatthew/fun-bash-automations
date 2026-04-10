@@ -5,6 +5,7 @@
     "shared_agent_doc": "llm/AGENTS.md",
     "shared_skills_dir": "llm/skills",
     "codex_config_template": "codex/config.toml",
+    "codex_hooks_template": "codex/hooks.json",
     "shared_command_guard_policy": "llm/command-guard-policy.md"
   },
   "adapters": {

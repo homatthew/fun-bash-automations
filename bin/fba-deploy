@@ -135,7 +135,7 @@ deploy_codex() {
     local base_url
     base_url="$(codex_base_url)"
 
-    mkdir -p "$HOME/.codex" "$HOME/.codex/skills"
+    mkdir -p "$HOME/.codex" "$HOME/.codex/skills" "$HOME/.codex/hooks"
     project_shared "$HOME/.codex"
 
     if [[ -f "$ROOT/codex/config.toml" ]]; then
@@ -147,6 +147,16 @@ deploy_codex() {
         copy_path "$ROOT/codex/auth.json" "$HOME/.codex/auth.json"
         chmod 600 "$HOME/.codex/auth.json"
     fi
+
+    if [[ -f "$ROOT/codex/hooks.json" ]]; then
+        copy_path "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
+    fi
+
+    for hook in "$ROOT"/claude/hooks/bash-safety-guard.sh "$ROOT"/claude/hooks/dgw-write-guard.sh; do
+        [[ -f "$hook" ]] || continue
+        copy_path "$hook" "$HOME/.codex/hooks/$(basename "$hook")"
+        chmod +x "$HOME/.codex/hooks/$(basename "$hook")"
+    done
 }
 
 case "$MODE" in
