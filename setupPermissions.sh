@@ -193,6 +193,11 @@ rm -f ~/.codex/AGENTS.md
 ln -s ~/repos/fun-bash-automations/llm/AGENTS.md ~/.codex/AGENTS.md
 echo "✓ ~/.codex/AGENTS.md symlinked"
 
+# Symlink portable Codex config template
+rm -f ~/.codex/config.toml
+ln -s ~/repos/fun-bash-automations/codex/config.toml ~/.codex/config.toml
+echo "✓ ~/.codex/config.toml symlinked"
+
 # Symlink settings.json (NOT protected - Claude writes to this file)
 rm -f ~/.claude/settings.json
 ln -s ~/repos/fun-bash-automations/claude/settings.json ~/.claude/settings.json

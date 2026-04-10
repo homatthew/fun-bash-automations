@@ -9,6 +9,7 @@ harnesses.
 - `skills/*/SKILL.md` shared skills
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
+- `../codex/config.toml` portable Codex config template
 
 ## Canonical Editing Rules
 
@@ -36,4 +37,3 @@ harnesses.
   1. `AGENTS.md`
   2. `llm/manifest.json`
   3. `llm/integrations.md`
-
