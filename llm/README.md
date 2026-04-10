@@ -11,6 +11,7 @@ harnesses.
 - `integrations.md` Claude plugin vs Codex MCP parity map
 - `../codex/config.toml` portable Codex config template
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
+- `command-guard-policy.md` shared command safety policy
 
 ## Canonical Editing Rules
 
@@ -21,6 +22,8 @@ harnesses.
 4. Never treat `~/.claude` or `~/.codex` as source of truth.
 5. After changing repo-owned runtime files, run `fba-deploy` to project them
    into local harness homes.
+6. Update `llm/command-guard-policy.md` before changing Claude hook guard
+   behavior.
 
 ## Projection Targets
 
@@ -32,6 +35,13 @@ harnesses.
   - `~/.codex/auth.json` -> copied from `codex/auth.json`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
+
+## Guardrail Sync
+
+- Shared command guard intent lives in `llm/command-guard-policy.md`.
+- Claude currently has native command-hook enforcement.
+- Codex currently inherits the same policy through shared instructions rather
+  than a repo-local native hook implementation.
 
 ## Compaction Recovery
 
