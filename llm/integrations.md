@@ -3,6 +3,15 @@
 This inventory distinguishes portable MCP integrations from Claude-specific
 plugin behavior.
 
+## Command Guardrail Parity
+
+- Shared command safety policy lives in `llm/command-guard-policy.md`.
+- Claude currently enforces part of that policy with native `PreToolUse` hook
+  scripts under `claude/hooks/`.
+- Codex in this repo currently relies on shared `AGENTS.md` policy and native
+  approval/sandbox controls rather than a documented repo-local pre-command
+  hook adapter.
+
 ## Portable MCP (configure in Codex)
 
 - `chrome-devtools-mcp@chrome-devtools-plugins`
@@ -26,4 +35,3 @@ plugin behavior.
   - Treat as Claude plugin UX unless an explicit MCP server contract exists.
   - Parity strategy: document as Claude-only or re-create high-value behavior
     via shared `llm/skills`.
-

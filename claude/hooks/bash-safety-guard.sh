@@ -1,5 +1,7 @@
 #!/bin/bash
 # bash-safety-guard.sh
+# Claude-native implementation of the shared policy in:
+#   ~/repos/fun-bash-automations/llm/command-guard-policy.md
 # PreToolUse hook on Bash: blocks dangerous commands from autonomous agents.
 # Each guard category is a function. To disable a category, comment out its call.
 # Compatible with macOS BSD grep (no \b or \d).

@@ -4,7 +4,8 @@
     "repo_agent_doc": "AGENTS.md",
     "shared_agent_doc": "llm/AGENTS.md",
     "shared_skills_dir": "llm/skills",
-    "codex_config_template": "codex/config.toml"
+    "codex_config_template": "codex/config.toml",
+    "shared_command_guard_policy": "llm/command-guard-policy.md"
   },
   "adapters": {
     "claude_repo_shim": "CLAUDE.md",
