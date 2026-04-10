@@ -10,6 +10,7 @@ canonical instruction entrypoint.
 - Shared layout + migration notes: `llm/README.md`
 - Machine-readable mapping: `llm/manifest.json`
 - Portable Codex config template: `codex/config.toml`
+- Portable Codex auth template: `codex/auth.json`
 
 ## Compatibility Adapters
 

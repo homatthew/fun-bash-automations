@@ -142,6 +142,11 @@ deploy_codex() {
         sed "s|__CODEX_BASE_URL__|$base_url|g" "$ROOT/codex/config.toml" > "$HOME/.codex/config.toml"
         chmod 600 "$HOME/.codex/config.toml"
     fi
+
+    if [[ -f "$ROOT/codex/auth.json" ]]; then
+        copy_path "$ROOT/codex/auth.json" "$HOME/.codex/auth.json"
+        chmod 600 "$HOME/.codex/auth.json"
+    fi
 }
 
 case "$MODE" in
