@@ -172,18 +172,26 @@ ln -s ~/repos/fun-bash-automations/ghostty/config ~/.config/ghostty/config
 echo "✓ Ghostty config symlinked"
 
 # ==============================================================================
-# Claude Code Configuration
+# Claude + Codex Configuration
 # ==============================================================================
 echo ""
-echo "Setting up Claude Code configuration..."
+echo "Setting up shared LLM configuration..."
 
-# Create ~/.claude directory structure if it doesn't exist
-mkdir -p ~/.claude/agents ~/.claude/skills
+# Create target directory structures if they don't exist
+mkdir -p ~/.claude/agents ~/.claude/skills ~/.codex/skills
 
-# Symlink CLAUDE.md (NOT protected - Claude writes to this file)
+# Symlink Claude adapter + shared AGENTS.md
 rm -f ~/.claude/CLAUDE.md
 ln -s ~/repos/fun-bash-automations/claude/CLAUDE.md ~/.claude/CLAUDE.md
 echo "✓ CLAUDE.md symlinked"
+rm -f ~/.claude/AGENTS.md
+ln -s ~/repos/fun-bash-automations/llm/AGENTS.md ~/.claude/AGENTS.md
+echo "✓ ~/.claude/AGENTS.md symlinked"
+
+# Symlink Codex AGENTS.md
+rm -f ~/.codex/AGENTS.md
+ln -s ~/repos/fun-bash-automations/llm/AGENTS.md ~/.codex/AGENTS.md
+echo "✓ ~/.codex/AGENTS.md symlinked"
 
 # Symlink settings.json (NOT protected - Claude writes to this file)
 rm -f ~/.claude/settings.json
@@ -201,8 +209,8 @@ for agent in ~/repos/fun-bash-automations/claude/agents/*.md; do
 done
 echo "✓ agents symlinked (protected)"
 
-# Symlink skills (directories, protected)
-for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
+# Symlink shared skills into Claude (directories, protected)
+for skill in ~/repos/fun-bash-automations/llm/skills/*/; do
 	name=$(basename "$skill")
 	unlock_symlink ~/.claude/skills/"$name"
 	rm -rf ~/.claude/skills/"$name"
@@ -210,7 +218,15 @@ for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
 	lock_symlink ~/.claude/skills/"$name"
 	LOCKED_SYMLINKS+=("~/.claude/skills/$name")
 done
-echo "✓ skills symlinked (protected)"
+echo "✓ shared skills symlinked to ~/.claude/skills (protected)"
+
+# Symlink shared skills into Codex (~/.codex/skills/.system is preserved)
+for skill in ~/repos/fun-bash-automations/llm/skills/*/; do
+	name=$(basename "$skill")
+	rm -rf ~/.codex/skills/"$name"
+	ln -s "$skill" ~/.codex/skills/"$name"
+done
+echo "✓ shared skills symlinked to ~/.codex/skills"
 
 # ==============================================================================
 # Summary

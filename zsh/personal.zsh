@@ -283,10 +283,10 @@ alias squash='rbi && gca'
 [ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
 
 # ==============================================================================
-# Claude Code Config Sync
+# LLM Config Sync
 # ==============================================================================
-# ~/.claude is the live config (Claude writes freely)
-# Sync back to repo when you want to version control changes
+# Shared instructions/skills are canonical in ~/repos/fun-bash-automations/llm.
+# Claude runtime settings live in ~/.claude and can be synced/deployed below.
 
 # claude-sync: Copy ~/.claude config back to repo
 claude-sync() {
@@ -309,6 +309,26 @@ claude-deploy() {
     echo "Deployed $src → ~/.claude"
     echo "Changes are now live"
 }
+
+# agent-refresh: project shared AGENTS + skills into both Claude and Codex homes.
+agent-refresh() {
+    local root=~/repos/fun-bash-automations
+    mkdir -p ~/.claude/skills ~/.codex/skills
+
+    ln -sfn "$root/llm/AGENTS.md" ~/.claude/AGENTS.md
+    ln -sfn "$root/llm/AGENTS.md" ~/.codex/AGENTS.md
+
+    for skill in "$root"/llm/skills/*/; do
+        [ -d "$skill" ] || continue
+        local name
+        name="$(basename "$skill")"
+        ln -sfn "$skill" ~/.claude/skills/"$name"
+        ln -sfn "$skill" ~/.codex/skills/"$name"
+    done
+
+    echo "Refreshed shared LLM projection for ~/.claude and ~/.codex"
+}
+alias llm-refresh=agent-refresh
 
 # push-gate: Approve git pushes by Claude agents for a time window.
 # Creates a time-based token valid for N minutes (default: 3).

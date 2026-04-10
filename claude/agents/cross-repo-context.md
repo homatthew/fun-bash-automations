@@ -50,7 +50,7 @@ grep -ri "<relevant-terms>" ~/repos/dump/second-brain/topics/
 ```
 
 If a relevant topic exists:
-1. Read it: `cat ~/repos/dump/second-brain/topics/<topic>/CLAUDE.md`
+1. Read it: `cat ~/repos/dump/second-brain/topics/<topic>/README.md`
 2. Check freshness via the "Last Reviewed" date and verification command
 3. If fresh and relevant → use its "How to Find" pointers to guide Phase 3
 4. If stale → proceed with full exploration, then update the topic
@@ -115,13 +115,13 @@ ls topics/<topic>/ 2>/dev/null
 
 # If new: create from template
 mkdir -p topics/<topic>
-cp _templates/topic.md topics/<topic>/CLAUDE.md
+cp _templates/topic.md topics/<topic>/README.md
 # Fill in: Overview, How to Find, Key Insights
 
 # If existing: merge new insights
 
 # Commit
-git add topics/<topic>/CLAUDE.md CLAUDE.md
+git add topics/<topic>/README.md README.md
 git commit -m "second-brain: add|update <topic> - <brief description>"
 ```
 
