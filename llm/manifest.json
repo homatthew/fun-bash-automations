@@ -3,7 +3,8 @@
   "canonical": {
     "repo_agent_doc": "AGENTS.md",
     "shared_agent_doc": "llm/AGENTS.md",
-    "shared_skills_dir": "llm/skills"
+    "shared_skills_dir": "llm/skills",
+    "codex_config_template": "codex/config.toml"
   },
   "adapters": {
     "claude_repo_shim": "CLAUDE.md",
@@ -34,4 +35,3 @@
     }
   }
 }
-

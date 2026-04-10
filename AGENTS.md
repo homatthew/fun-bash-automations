@@ -9,6 +9,7 @@ canonical instruction entrypoint.
 - Shared skills: `llm/skills/*/SKILL.md`
 - Shared layout + migration notes: `llm/README.md`
 - Machine-readable mapping: `llm/manifest.json`
+- Portable Codex config template: `codex/config.toml`
 
 ## Compatibility Adapters
 
@@ -25,4 +26,3 @@ canonical instruction entrypoint.
 - Use setup/install scripts to project shared files to home directories.
 - For durable resumption across compaction, use beads (`bd ready`) and second
   brain topics in `~/repos/dump/second-brain/topics/*/README.md`.
-
