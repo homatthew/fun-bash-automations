@@ -10,6 +10,7 @@ file_opener = "cursor"
 personality = "pragmatic"
 model_context_window = 1000000
 model_auto_compact_token_limit = 950000
+shell_environment_policy.inherit = "all"
 
 [analytics]
 enabled = false

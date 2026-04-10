@@ -10,6 +10,7 @@ harnesses.
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
 - `../codex/config.toml` portable Codex config template
+- `../codex/auth.json` portable Codex auth template (dummy gateway token)
 
 ## Canonical Editing Rules
 
@@ -28,6 +29,7 @@ harnesses.
   - `~/.claude/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.claude/skills/*` -> `llm/skills/*`
 - Codex:
+  - `~/.codex/auth.json` -> copied from `codex/auth.json`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
 

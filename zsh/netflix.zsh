@@ -4,6 +4,9 @@
 # Netflix environment variables
 export DGI_ARTIFACT_PATH=$HOME/repos/dgi-artifact
 export KV_REPO_PATH="$HOME/repos/cde-dgw-kv"
+# Codex against Netflix Model Gateway still requires OPENAI_API_KEY to exist.
+# The gateway only needs a non-empty placeholder value.
+export OPENAI_API_KEY="${OPENAI_API_KEY:-netflix-model-gateway}"
 
 # Netflix-specific aliases
 alias agclean='pynt clean && newt dev-setup &&  newt start-local-deps && pynt lock-deps'
