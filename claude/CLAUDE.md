@@ -16,12 +16,13 @@ Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never
 
 **`git push` is blocked by a PreToolUse hook.** All pushes require the user to run `push-gate` in their terminal first.
 
-- `push-gate` creates a one-time token tied to the current HEAD commit
-- If you make more commits after approval, the token becomes stale — the user must run `push-gate` again
-- Token is consumed after one push (one approval = one push)
+- `push-gate` opens a 3-minute approval window — any push within that window is allowed
+- `push-gate 5` opens a 5-minute window (useful for stacked PRs with multiple pushes)
+- `push-gate status` checks if an approval is currently active
 - Do NOT push proactively — only push when the user explicitly asks
 - At the end of a task: **commit locally, then stop**. Do not push unless asked.
 - When the user asks to push or create a PR, use `/commit-push-pr` and ask them to run `push-gate` before the push step.
+- **When asking the user to run `push-gate`**: explain what is being pushed (branch name, target remote, brief summary) so they can make an informed decision
 
 ## Skills Quick Reference
 
@@ -41,7 +42,6 @@ Notifications are handled automatically via `~/.claude/hooks/notify.sh`. **Never
 | Design architecture | `/architect` | Design and maintain feature architecture |
 | Persist insights | `/second-brain` | Save architectural learnings |
 | Hand off to Ralph | `/ralph-handoff` | Auto-triggered by "ralph" keyword |
-| Review before push | `/push-review` | Analyze DAG, map branches to PRs, push one-by-one |
 
 ## GitHub CLI Usage
 
@@ -58,6 +58,7 @@ Netflix's `gh` CLI fork (`/usr/local/bin/gh`) uses metatron auth natively. No pr
   ```
 - **Gist file naming**: Prefix filenames with `NN_` (zero-padded two digits) to control display order (e.g., `01_analysis.md`, `02_discover.py`, `10_helper.py`). Gists sort alphabetically, so the prefix ensures correct ordering even with 10+ files.
 - **Analysis gists**: The analysis/report always comes first, scripts come after. People care about the findings, not the implementation details.
+- **Gist URL format**: The `gh gist create` output omits the username. The correct shareable URL is `https://github.netflix.net/gist/<username>/<gist-id>` (e.g., `https://github.netflix.net/gist/matthewho/abc123`). Always include the username when sharing links.
 - For public GitHub (github.com):
   - Use regular `gh` commands (no special handling needed)
 

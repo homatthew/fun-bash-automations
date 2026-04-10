@@ -214,15 +214,14 @@ git diff --stat <remote-tracking>..<branch>
 
 ### 5b. Request push-gate approval
 
-```bash
-COMMIT=$(git rev-parse <branch>)
-```
+Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
 
 Tell the user:
 > **Branch 1 of N: `<branch>`**
 > Pushing <N> commits. Run in your terminal:
 > ```
-> push-gate <full-commit-hash>
+> cd <working-directory>
+> push-gate
 > ```
 
 ### 5c. Push after approval

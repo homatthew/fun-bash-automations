@@ -3,15 +3,17 @@ name: code-review
 description: Use when reviewing a PR, branch diff, or staged changes. Use when the user says "review", "code review", "/code-review", or "review this PR". Use INSTEAD of the superpowers code-reviewer agent.
 ---
 
-# Hypothesis-First Code Review
+# Multi-Agent Code Review
 
-A phased review that reads tests before implementation and requires independent hypothesis formation. This catches false-pass bugs, premise errors, and test bloat that verification-oriented reviews miss.
+An orchestrated review that gathers context, then spawns two independent sub-agent reviews in parallel (Claude and Codex) with fresh context. Consolidates findings into a unified report. Each reviewer forms its own hypothesis independently — no shared bias.
 
 **This is a RIGID skill. Follow the phases in exact order. Do not skip or reorder.**
 
-## Input Detection
+## Phase 1: Context Gathering
 
-Detect review scope automatically. Try in order:
+### 1a: Detect review scope
+
+Try in order:
 
 1. If user provides a PR number: `gh pr view <N> --json files,body,title,commits` and `gh pr diff <N>`
 2. If on a feature branch: `git log main..HEAD --oneline` and `git diff main...HEAD`
@@ -22,34 +24,21 @@ Collect the list of changed files. Partition into:
 - **test files** (paths containing `test_`, `_test`, `tests/`, `spec/`, `.test.`)
 - **implementation files** (everything else)
 
-## Phase 1: Problem Understanding
-
-**RULE: Do NOT read implementation files or test files yet.**
-
-### Step 1a: Read what the author explains
+### 1b: Gather author context
 
 - PR description / title
 - Commit messages (`git log --format="%s%n%n%b" main..HEAD`)
 - Any linked issues
 
-### Step 1b: Search for domain context
+### 1c: Gather domain context
 
 Search these sources for relevant background:
 - Second-brain topics: `~/repos/dump/second-brain/topics/` — glob for keywords from the PR
 - Project memory: `.claude/projects/*/memory/` — check MEMORY.md
 - Project CLAUDE.md files
-- Architecture docs in the repo (look for `ARCHITECTURE.md`, `docs/`, `design/`)
+- Architecture docs in the repo (`ARCHITECTURE.md`, `docs/`, `design/`)
 
-### Step 1c: Ask the user (if still unclear)
-
-If after 1a-1b the business problem is ambiguous, ask:
-- "What problem does this solve for the end user?"
-- "What breaks if a default value or assumption is wrong?"
-- "What entities are involved and what are the constraints?"
-
-Do NOT proceed past Phase 1 if you cannot state the business invariant.
-
-### Step 1d: State hypothesis
+### 1d: Form and present hypothesis
 
 Output to user before proceeding:
 
@@ -57,127 +46,150 @@ Output to user before proceeding:
 ## Phase 1: Problem Hypothesis
 
 **Business invariant:** [restate in your own words what must be true]
-**What a wrong solution looks like:** [describe a plausible implementation that appears correct but solves the wrong problem or misses the key constraint]
+**What a wrong solution looks like:** [describe a plausible implementation that appears correct but solves the wrong problem]
 **Domain edge cases:** [list 2-4 edge cases that a correct solution must handle]
 ```
 
-Wait for user acknowledgment or correction before proceeding.
+**Wait for user acknowledgment or correction before proceeding.**
 
-## Phase 2: Test Audit
+### 1e: Build context package
 
-**RULE: Read ONLY test files. Do NOT open implementation files.**
+After user confirms hypothesis, assemble a **context package** string containing:
+- The full diff
+- List of changed files (test vs implementation)
+- PR description and commit messages
+- The confirmed business hypothesis
+- Relevant domain context found in 1c
 
-For each test file, read it fully and analyze:
+This package will be passed verbatim to both sub-agents.
 
-### 2a: Test classification
+## Phase 2: Parallel Sub-Agent Reviews
 
-Classify every test function as one of:
-- **Behavioral**: tests an observable outcome from the user/caller perspective
-- **Mechanical**: tests internal wiring (mock interactions, call counts)
-- **Tautological**: test that cannot fail (asserts what was just set up, mocks returning mocks)
+Spawn **both agents in a single message** so they run in parallel. Each gets fresh context — no carry-over from the main conversation.
 
-### 2b: False-pass bug (MANDATORY)
+### Agent A: Claude Code Reviewer
 
-Describe at least one **plausible bug in the implementation** that would pass all existing tests. This is the most important output of the review. Format:
+Use the `pr-review-toolkit:code-reviewer` agent type. Prompt template:
 
 ```
-**False-pass bug:** [describe the bug]
-**Why it passes:** [which tests fail to catch it and why]
+You are reviewing code changes. Here is the full context:
+
+## Changed Files
+{file list, partitioned into test/implementation}
+
+## PR Description & Commits
+{PR title, body, commit messages}
+
+## Business Hypothesis (confirmed by author)
+{hypothesis from Phase 1d}
+
+## Domain Context
+{relevant findings from 1c}
+
+## Diff
+{full diff content}
+
+Review this code for:
+1. **Correctness**: Does the implementation match the stated business invariant?
+2. **False-pass bugs**: Describe at least one plausible bug that would pass all existing tests
+3. **Test quality**: Classify tests as behavioral/mechanical/tautological. Identify missing coverage.
+4. **Assumptions**: List every assumption the code makes. What breaks if each is wrong?
+5. **Magic values**: Flag any literals/defaults without justification
+6. **Simplicity**: Could this be done with less code? Unnecessary indirection?
+7. **Silent failures**: What could break elsewhere with no test failing?
+
+Output findings in this format:
+
+### Critical
+N. **[title]** — file:line
+   Evidence: [what you observed]
+   Fix: [specific action]
+
+### Important
+N. **[title]** — file:line
+   Evidence: [what you observed]
+   Fix: [specific action]
+
+### Observation
+N. **[title]** — file:line
+   Note: [what you observed]
+
+### Mandatory
+- **False-pass bug:** [description]
+- **Test compression:** [N lines → ~M lines, how]
 ```
 
-If you cannot find one, you haven't looked hard enough. Common sources:
-- Tests only check the happy path
-- Tests check structure but not values
-- Tests share setup that masks a specific edge case
-- Off-by-one in boundary conditions
-- Default values never exercised with non-default input
+### Agent B: Codex Code Reviewer
 
-### 2c: Missing tests
+Use the `codex:codex-rescue` agent type. Prompt template:
 
-What behaviors from Phase 1 hypothesis have no test coverage?
+```
+Perform an independent code review of the following changes. Do NOT just validate — actively look for problems.
 
-### 2d: Test economics
+## Changed Files
+{file list}
 
-Evaluate and report:
-- **Deletion test**: if two tests would catch the same bug, one is redundant. Identify pairs.
-- **Parameterization opportunities**: tests that differ only in input/expected values should be parameterized
-- **Setup-to-assertion ratio**: if >60% of a test is setup, it's testing infrastructure not behavior
-- **Fixture duplication**: shared setup that could be a fixture or helper
-- **Concrete compression target**: "This N-line test file should be ~M lines" with explanation
+## PR Description & Commits
+{PR title, body, commit messages}
 
-## Phase 3: Implementation Review
+## Business Hypothesis
+{hypothesis from Phase 1d}
 
-**NOW read implementation files**, carrying Phase 1-2 skepticism.
+## Domain Context
+{relevant findings from 1c}
 
-### 3a: Problem alignment
+## Diff
+{full diff content}
 
-Does the implementation actually solve the Phase 1 hypothesis? Or does it solve a different (possibly easier) problem?
+Focus your review on:
+1. **Correctness bugs**: Logic errors, off-by-ones, missed edge cases
+2. **Assumption violations**: What does this code assume that could be wrong?
+3. **Integration risks**: What could break in callers, consumers, or downstream systems?
+4. **Error handling**: Silent swallows, inappropriate fallbacks, missing error paths
+5. **Race conditions or ordering issues** (if concurrent code)
+6. **API contract violations**: Does this change any observable behavior for callers?
 
-### 3b: Magic numbers and defaults
+For each finding, provide:
+- Severity: Critical / Important / Observation
+- File and line reference
+- What you observed (evidence)
+- Specific fix suggestion
 
-For every literal number, string constant, or default value:
-- What data or reasoning supports this value?
-- What happens if it's wrong by 2x? 10x?
-- Flag any that lack justification with: "What data supports [value]?"
+Output as a numbered list grouped by severity.
+```
 
-### 3c: Assumption inventory
+## Phase 3: Consolidation
 
-List every assumption the code makes (implicit or explicit). For each:
-- Is it documented?
-- Is it tested?
-- What breaks if it's wrong?
+After both agents return their findings:
 
-### 3d: Simplicity check
+1. **Deduplicate**: If both reviewers flag the same issue at the same file:line (or clearly the same logical issue), merge into one finding tagged `[Both]`
+2. **Elevate**: Findings flagged by both reviewers are higher confidence — if one called it Important and the other Critical, use Critical
+3. **Preserve unique findings**: Keep findings only one reviewer caught, tagged `[Claude]` or `[Codex]`
+4. **Classify**: Group all findings as Critical > Important > Observation
+5. **Include mandatory items**: False-pass bug and test compression from the Claude reviewer
 
-- Could this be done with less code?
-- Are there unnecessary layers of indirection?
-- Does complexity serve a purpose?
-
-### 3e: AI slop patterns
-
-Check for these specific patterns (subsumed from ai-slop-removal):
-
-| Pattern | Detection |
-|---------|-----------|
-| Dead code | Unused variables, parameters, imports |
-| Verbose intermediates | Unnecessary temp variables, explicit loops replaceable by comprehensions |
-| Comments restating code | "Initialize counter to zero", "Loop through items" |
-| Pattern deviation | Different naming/style than existing codebase |
-| Premature abstraction | Classes/helpers used only once |
-| Error handling hiding problems | Bare `except`, silent `return None/{}` |
-| Mock-heavy tests | Testing mock behavior instead of real behavior |
-
-## Phase 4: Integration & Silent Failures
-
-- What could break **elsewhere in the codebase** with no test failing?
-- What is the blast radius if the assumptions from 3c are wrong?
-- Are there feature interactions (other callers, config combinations) not covered by tests?
-- Could a future change silently undo what this PR accomplishes?
-
-## Output: Numbered Findings
-
-Present findings in this exact format:
+## Phase 4: Present Unified Findings
 
 ```
 ## Review Findings
 
 ### Critical
-1. **[title]** — [file:line]
-   Evidence: [what you observed]
-   Fix: [specific action, including compressed test code if relevant]
+1. **[title]** [Both] — file:line
+   Evidence: ...
+   Fix: ...
 
 ### Important
-2. **[title]** — [file:line]
-   Evidence: [what you observed]
-   Fix: [specific action]
+2. **[title]** [Claude] — file:line
+   Evidence: ...
+   Fix: ...
 
 ### Observation
-3. **[title]** — [file:line]
-   Note: [what you observed]
+3. **[title]** [Codex] — file:line
+   Note: ...
 
 ### Mandatory Findings
-- **False-pass bug:** [from Phase 2b]
-- **Test compression:** [N-line file → ~M lines, via parameterization/dedup]
+- **False-pass bug:** [from Claude reviewer]
+- **Test compression:** [from Claude reviewer]
 
 ---
 
@@ -192,16 +204,15 @@ After user selects findings to fix:
 ## Anti-Rationalization Rules
 
 ### Banned phrases (without concrete evidence)
-Using any of these means your review is shallow. Replace with specific observations:
 - "well-tested" → instead say "N tests covering X,Y but missing Z"
 - "well-calibrated" → instead say "value is N, supported by [data] / unsupported"
 - "comprehensive" → instead say "covers A,B,C; misses D,E"
 - "clean" → instead say "follows project pattern X consistently"
 - "reasonable" → instead say "value N works because [reason]; breaks if [condition]"
 
-### Red flags that you're doing it wrong
-- You opened implementation files before finishing Phase 2
-- You found zero issues (every PR has issues)
-- All findings are Minor/Observation (if nothing is Important, you aren't looking hard enough)
-- Your false-pass bug is contrived rather than plausible
-- Your Phase 1 hypothesis just restates the PR title
+### Red flags that the review is shallow
+- Zero issues found (every PR has issues)
+- All findings are Observation (if nothing is Important, reviewers aren't looking hard enough)
+- False-pass bug is contrived rather than plausible
+- Phase 1 hypothesis just restates the PR title
+- Sub-agents returned nearly identical findings (suggests the prompt was too leading)

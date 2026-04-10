@@ -310,44 +310,98 @@ claude-deploy() {
     echo "Changes are now live"
 }
 
-# push-gate: Approve a specific commit for pushing via Claude agents.
-# Creates a one-time token tied to a commit hash. The PreToolUse hook
-# checks HEAD matches this commit before allowing git push.
-# Usage: push-gate <commit-hash>  (short or full)
+# push-gate: Approve git pushes by Claude agents for a time window.
+# Creates a time-based token valid for N minutes (default: 3).
+# Multiple pushes are allowed within the window (handles stacked PRs).
+# Usage: push-gate [minutes]   (default: 3)
+#        push-gate status      (check if approval is active)
 push-gate() {
+    local repo_root repo_name TOKEN_FILE
+    local common_dir
+    common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -z "$common_dir" ]; then
+        echo "Not in a git repo"
+        return 1
+    fi
+    # Resolve relative path (main worktree returns ".git", linked worktrees return absolute path)
+    [[ "$common_dir" != /* ]] && common_dir="$(pwd)/$common_dir"
+    repo_name=$(basename "$(dirname "$common_dir")")
+    TOKEN_FILE="/tmp/.claude-push-$repo_name"
+
+    case "$1" in
+        status)
+            if [ ! -f "$TOKEN_FILE" ]; then
+                echo "[$repo_name] No active push approval"
+                return
+            fi
+            local expiry now remaining
+            expiry=$(cat "$TOKEN_FILE" 2>/dev/null)
+            now=$(date +%s)
+            remaining=$(( expiry - now ))
+            if [ "$remaining" -gt 0 ] 2>/dev/null; then
+                echo "[$repo_name] Push approved — expires in ${remaining}s (at $(date -r "$expiry" '+%H:%M:%S'))"
+            else
+                echo "[$repo_name] Push approval expired"
+                rm -f "$TOKEN_FILE"
+            fi
+            ;;
+        ''|[0-9]*)
+            local minutes="${1:-3}"
+            local expiry=$(( $(date +%s) + minutes * 60 ))
+            echo "$expiry" > "$TOKEN_FILE"
+            echo "[$repo_name] Push approved for ${minutes}m (until $(date -r "$expiry" '+%H:%M:%S'))"
+            ;;
+        *)
+            echo "Usage: push-gate [minutes]  (default: 3)"
+            echo "       push-gate status"
+            ;;
+    esac
+}
+alias pg=push-gate
+
+# ssh-gate: Allow Claude to SSH into a specific host for 12 hours.
+# Creates a lease file with the host and expiry timestamp.
+# Usage: ssh-gate <instance-id-or-host>
+ssh-gate() {
     if [ -z "$1" ]; then
-        echo "Usage: push-gate <commit-hash>"
+        echo "Usage: ssh-gate <instance-id-or-host>"
         return 1
     fi
-    local full=$(git rev-parse "$1" 2>/dev/null)
-    if [ -z "$full" ]; then
-        echo "Unknown commit: $1"
-        return 1
-    fi
-    echo "$full" > /tmp/.claude-push-token
-    echo "Push approved for $(git log --oneline -1 "$full")"
+    local lease_file="/tmp/.claude-ssh-leases"
+    local expiry=$(( $(date +%s) + 43200 ))  # 12 hours
+    # Remove any existing lease for this host, then add new one
+    [ -f "$lease_file" ] && grep -v "^$1 " "$lease_file" > "$lease_file.tmp" && mv "$lease_file.tmp" "$lease_file"
+    echo "$1 $expiry" >> "$lease_file"
+    echo "SSH lease granted for $1 (expires $(date -r $expiry '+%Y-%m-%d %H:%M'))"
 }
 
-# push-gate-batch: Approve multiple commits for stacked PR workflows.
-# Writes all commits to the token file. The hook pops matching entries.
-# Usage: push-gate-batch <hash1> <hash2> <hash3> ...
-push-gate-batch() {
-    if [ $# -eq 0 ]; then
-        echo "Usage: push-gate-batch <hash1> [hash2] [hash3] ..."
+# ssh-gate-list: Show active SSH leases.
+ssh-gate-list() {
+    local lease_file="/tmp/.claude-ssh-leases"
+    if [ ! -f "$lease_file" ]; then
+        echo "No active SSH leases"
+        return
+    fi
+    local now=$(date +%s)
+    echo "Active SSH leases:"
+    while IFS=' ' read -r host expiry; do
+        if [ "$expiry" -gt "$now" ] 2>/dev/null; then
+            local remaining=$(( (expiry - now) / 3600 ))
+            local mins=$(( ((expiry - now) % 3600) / 60 ))
+            echo "  $host  (${remaining}h ${mins}m remaining)"
+        fi
+    done < "$lease_file"
+}
+
+# ssh-gate-revoke: Revoke SSH lease for a specific host.
+ssh-gate-revoke() {
+    if [ -z "$1" ]; then
+        echo "Usage: ssh-gate-revoke <instance-id-or-host>"
         return 1
     fi
-    local token_file="/tmp/.claude-push-token"
-    > "$token_file"  # truncate
-    for ref in "$@"; do
-        local full=$(git rev-parse "$ref" 2>/dev/null)
-        if [ -z "$full" ]; then
-            echo "Unknown commit: $ref"
-            return 1
-        fi
-        echo "$full" >> "$token_file"
-        echo "  approved: $(git log --oneline -1 "$full")"
-    done
-    echo "Push gate opened for $# commits (batch mode)"
+    local lease_file="/tmp/.claude-ssh-leases"
+    [ -f "$lease_file" ] && grep -v "^$1 " "$lease_file" > "$lease_file.tmp" && mv "$lease_file.tmp" "$lease_file"
+    echo "SSH lease revoked for $1"
 }
 
 alias claude-safe='/opt/nflx/bin/claude'

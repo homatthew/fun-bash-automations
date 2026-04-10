@@ -41,11 +41,10 @@ check_git_force() {
 }
 
 # --- 2. Push Guard ---
-# Blocks ALL git push by default. Pushes require a one-time token
+# Blocks ALL git push by default. Pushes require a time-based token
 # created by the user running `push-gate` in their terminal.
-# The token is tied to a specific commit hash — if the agent makes
-# more commits after approval, the token becomes stale and push is blocked.
-# Token is consumed (deleted) after one successful push.
+# Token is valid for a configurable window (default: 3 minutes).
+# Multiple pushes within the window are allowed (handles stacked PRs).
 check_push_guard() {
   echo "$COMMAND" | grep -qE 'git\s+push' || return
 
@@ -55,31 +54,47 @@ check_push_guard() {
   echo "$COMMAND" | grep -qE 'git\s+push\s+.*\s(main|master)(\s|$)' &&
     deny "Blocked: pushing directly to main/master is not allowed."
 
-  # Check for push token (created by user running push-gate or push-gate-batch).
-  # Token file contains one commit hash per line. Matching line is consumed;
-  # file is deleted when empty. Supports both single and batch approvals.
-  local TOKEN_FILE="/tmp/.claude-push-token"
-  if [ -f "$TOKEN_FILE" ]; then
-    local CURRENT_HEAD
-    CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null)
-    if [ -n "$CURRENT_HEAD" ] && grep -qx "$CURRENT_HEAD" "$TOKEN_FILE" 2>/dev/null; then
-      # Consume this entry (remove matching line)
-      local REMAINING
-      REMAINING=$(grep -vx "$CURRENT_HEAD" "$TOKEN_FILE")
-      if [ -z "$REMAINING" ]; then
-        rm -f "$TOKEN_FILE"  # last entry consumed
-      else
-        echo "$REMAINING" > "$TOKEN_FILE"
-      fi
-      return
+  # Block push if branch tracks main/master (prevents accidental fast-forward of main)
+  local UPSTREAM
+  UPSTREAM=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)
+  if echo "$UPSTREAM" | grep -qE '(origin|upstream)/(main|master)$'; then
+    local BRANCH
+    BRANCH=$(git branch --show-current 2>/dev/null)
+    if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
+      deny "Blocked: branch '$BRANCH' tracks $UPSTREAM. Re-set upstream first: git branch --set-upstream-to=origin/$BRANCH"
     fi
-    # Token exists but HEAD doesn't match any entry
-    local FIRST_APPROVED
-    FIRST_APPROVED=$(head -1 "$TOKEN_FILE")
-    deny "Blocked: push token has no entry for HEAD ${CURRENT_HEAD:0:7} (first approved: ${FIRST_APPROVED:0:7}). Run push-gate again to approve current HEAD."
   fi
 
-  deny "Blocked: git push requires approval. Ask the user to run push-gate in their terminal, then retry."
+  # Check for time-based push token scoped to this repo.
+  # Token file is /tmp/.claude-push-<reponame>, contains an epoch expiry timestamp.
+  local COMMON_DIR REPO_NAME TOKEN_FILE
+  COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+  [ -n "$COMMON_DIR" ] && [[ "$COMMON_DIR" != /* ]] && COMMON_DIR="$(pwd)/$COMMON_DIR"
+  REPO_NAME=$(basename "$(dirname "$COMMON_DIR")")
+  TOKEN_FILE="/tmp/.claude-push-$REPO_NAME"
+  if [ -f "$TOKEN_FILE" ]; then
+    local EXPIRY NOW
+    EXPIRY=$(cat "$TOKEN_FILE" 2>/dev/null)
+    NOW=$(date +%s)
+    if [ -n "$EXPIRY" ] && [ "$EXPIRY" -gt "$NOW" ] 2>/dev/null; then
+      return  # Valid token — allow push
+    fi
+    rm -f "$TOKEN_FILE"
+    deny "Blocked: push approval expired. Ask the user to run push-gate."
+  fi
+
+  local REPO_ROOT
+  REPO_ROOT=$(dirname "$COMMON_DIR")
+  deny "Blocked: git push requires approval. Ask the user to run: cd $REPO_ROOT && push-gate"
+}
+
+# --- 2b. Branch Creation Tracking Guard ---
+# Prevent creating branches that auto-track origin/main or origin/master.
+check_branch_tracking() {
+  echo "$COMMAND" | grep -qE 'git\s+(checkout\s+-b|switch\s+-c)' || return
+  echo "$COMMAND" | grep -qE -- '--no-track' && return
+  echo "$COMMAND" | grep -qE '(origin|upstream)/(main|master)(\s|$)' &&
+    deny "Blocked: branch would auto-track main. Add --no-track: git checkout -b <branch> origin/main --no-track"
 }
 
 # --- 3. Git Config & Hook Bypass ---
@@ -150,10 +165,41 @@ check_remote_exec() {
     deny "Blocked: pipe-to-shell (curl|sh) is not allowed."
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)eval\s' &&
     deny "Blocked: eval is not allowed."
-  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)ssh\s' &&
-    deny "Blocked: ssh is not allowed."
-  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)(scp|rsync)\s.*:' &&
-    deny "Blocked: scp/rsync to remote hosts is not allowed."
+  # Check SSH lease file for approved hosts (12-hour leases via ssh-gate)
+  if echo "$COMMAND" | grep -qE '(^|[;&|]\s*)ssh\s'; then
+    local SSH_TARGET
+    SSH_TARGET=$(echo "$COMMAND" | grep -oE 'ssh[[:space:]]+("[^"]*"|[^[:space:];&|]+)' | head -1 | sed 's/^ssh[[:space:]]*//' | tr -d '"')
+    local LEASE_FILE="/tmp/.claude-ssh-leases"
+    if [ -f "$LEASE_FILE" ] && [ -n "$SSH_TARGET" ]; then
+      local NOW
+      NOW=$(date +%s)
+      while IFS=' ' read -r host expiry; do
+        if [ "$host" = "$SSH_TARGET" ] && [ "$expiry" -gt "$NOW" ] 2>/dev/null; then
+          return  # Valid lease found
+        fi
+      done < "$LEASE_FILE"
+    fi
+    deny "Blocked: ssh requires a lease. Ask the user to run: ssh-gate <host>"
+  fi
+  # scp/rsync: allow local-only, check SSH lease for remote hosts
+  if echo "$COMMAND" | grep -qE '(^|[;&|]\s*)(scp|rsync)\s'; then
+    # No [user@]host: pattern means local-only — allow
+    echo "$COMMAND" | grep -qE '([a-zA-Z0-9._-]+@)?[a-zA-Z0-9._-]+:' || return
+    # Remote host detected — extract and check lease
+    local REMOTE_HOST
+    REMOTE_HOST=$(echo "$COMMAND" | grep -oE '([a-zA-Z0-9._-]+@)?[a-zA-Z0-9._-]+:' | head -1 | sed 's/.*@//' | sed 's/://')
+    local LEASE_FILE="/tmp/.claude-ssh-leases"
+    if [ -f "$LEASE_FILE" ] && [ -n "$REMOTE_HOST" ]; then
+      local NOW
+      NOW=$(date +%s)
+      while IFS=' ' read -r host expiry; do
+        if [ "$host" = "$REMOTE_HOST" ] && [ "$expiry" -gt "$NOW" ] 2>/dev/null; then
+          return  # Valid lease found
+        fi
+      done < "$LEASE_FILE"
+    fi
+    deny "Blocked: scp/rsync to remote host '$REMOTE_HOST' requires an SSH lease. Ask the user to run: ssh-gate $REMOTE_HOST"
+  fi
 }
 
 # --- 9. Package Publishing ---
@@ -211,6 +257,7 @@ check_docker_destructive() {
 # --- Run all checks ---
 check_git_force
 check_push_guard
+check_branch_tracking
 check_git_config
 check_broad_staging
 check_git_rebase

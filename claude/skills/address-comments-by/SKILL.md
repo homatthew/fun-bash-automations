@@ -78,7 +78,7 @@ Run the project's tests to verify changes don't break anything.
 ### 8. Push fixes
 
 After all fixes are applied and tests pass, use `/commit-push-pr` to commit and push.
-The user will need to run `push-gate <commit-hash>` before the push goes through.
+The user will need to run `push-gate` before the push goes through.
 
 ## Notes
 
