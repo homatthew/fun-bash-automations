@@ -8,9 +8,9 @@ plugin behavior.
 - Shared command safety policy lives in `llm/command-guard-policy.md`.
 - Claude currently enforces part of that policy with native `PreToolUse` hook
   scripts under `claude/hooks/`.
-- Codex in this repo currently relies on shared `AGENTS.md` policy and native
-  approval/sandbox controls rather than a documented repo-local pre-command
-  hook adapter.
+- Codex in this repo uses experimental native hooks via `codex/hooks.json`.
+- The current Codex parity target is Bash `PreToolUse` guardrails using the
+  same guard script implementations that Claude uses.
 
 ## Portable MCP (configure in Codex)
 

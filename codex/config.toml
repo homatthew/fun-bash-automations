@@ -18,6 +18,9 @@ enabled = false
 [feedback]
 enabled = false
 
+[features]
+codex_hooks = true
+
 [tui]
 notifications = [ "agent-turn-complete", "approval-requested" ]
 
