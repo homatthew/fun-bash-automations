@@ -156,7 +156,9 @@ function kv() {
 
 export EASY_CASS_LAB_SSH_KEY=~/.ssh/cassandra_workship
 
-eval "$(fnm env --use-on-cd)"
+if command -v fnm >/dev/null 2>&1; then
+  eval "$(fnm env --use-on-cd)"
+fi
 
 #compdef temporal
 compdef _temporal temporal
