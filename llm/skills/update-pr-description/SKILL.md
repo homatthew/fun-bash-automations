@@ -137,6 +137,18 @@ EOF
 )"
 ```
 
+## Embedding images
+
+Upload images first, then paste the returned markdown reference into the description:
+
+```bash
+IMG=$(gh image screenshot.png --repo owner/repo)
+# IMG = ![screenshot](https://github.com/user-attachments/assets/<uuid>)
+```
+
+Useful for "How would I use the new code?" (UI before/after) or architecture diagrams.
+Pass `--repo` when running outside a git workspace.
+
 ## Tips
 
 - Read the existing PR description first with `gh pr view --json body`
