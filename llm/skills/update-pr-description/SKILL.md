@@ -142,12 +142,17 @@ EOF
 Upload images first, then paste the returned markdown reference into the description:
 
 ```bash
+# Infers repo + host from current git remote (works on github.com and GHES)
+IMG=$(gh image screenshot.png)
+
+# Explicit repo
 IMG=$(gh image screenshot.png --repo owner/repo)
-# IMG = ![screenshot](https://github.com/user-attachments/assets/<uuid>)
+# IMG = ![screenshot](https://<host>/user-attachments/assets/<uuid>)
 ```
 
 Useful for "How would I use the new code?" (UI before/after) or architecture diagrams.
-Pass `--repo` when running outside a git workspace.
+Works on both github.com and GHES (git.netflix.net). Pass `--repo` when not in a git workspace.
+Install: `cd ~/repos/gh-image && make install-local`.
 
 ## Tips
 
