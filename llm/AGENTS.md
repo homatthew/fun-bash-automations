@@ -15,6 +15,10 @@ workflows across Claude, Codex, and future harnesses.
 ## Shared Runtime Assumptions
 
 - Repositories live under `~/repos/*`.
+- When the user provides a repo name or identifying keywords, agents may look
+  across sibling repos under `~/repos/*` for relevant implementations or
+  context. Prefer targeted discovery from those user hints over broad scanning
+  of unrelated repos.
 - Beads is the persistent task tracker:
   - DB: `~/repos/dump/.beads/beads.db`
   - Resume after compaction with `bd ready`.
