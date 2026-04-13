@@ -38,6 +38,10 @@ harnesses.
   - `~/.codex/hooks/*.sh` -> copied from shared guard script implementations
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
+- External skills (managed by `fba-deploy project_shared`):
+  - `~/repos/cursor-google-workspace-skills/skills/google-*` -> both `~/.claude/skills/` and `~/.codex/skills/`
+  - Venv: `~/.claude/google-workspace-venv` (shared, scripts bootstrap into it)
+  - Creds: `~/.claude/google_credentials.json` (shared across harnesses)
 
 ## Guardrail Sync
 

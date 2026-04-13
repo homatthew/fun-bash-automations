@@ -99,6 +99,19 @@ project_shared() {
         name="$(basename "$skill_dir")"
         link_path "$skill_dir" "$home_dir/skills/$name"
     done
+
+    # External skills: Google Workspace (installed from cursor-google-workspace-skills repo)
+    local gws_repo="$HOME/repos/cursor-google-workspace-skills/skills"
+    if [[ -d "$gws_repo" ]]; then
+        for skill_dir in "$gws_repo"/google-*/; do
+            [[ -d "$skill_dir" ]] || continue
+            local name
+            name="$(basename "$skill_dir")"
+            if [[ ! -e "$home_dir/skills/$name" ]]; then
+                ln -s "$skill_dir" "$home_dir/skills/$name"
+            fi
+        done
+    fi
 }
 
 deploy_claude() {
