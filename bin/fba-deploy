@@ -165,7 +165,7 @@ deploy_codex() {
         copy_path "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
     fi
 
-    for hook in "$ROOT"/claude/hooks/bash-safety-guard.sh "$ROOT"/claude/hooks/dgw-write-guard.sh; do
+    for hook in "$ROOT"/claude/hooks/bash-safety-guard.sh "$ROOT"/claude/hooks/dgw-write-guard.sh "$ROOT"/claude/hooks/notify.sh; do
         [[ -f "$hook" ]] || continue
         copy_path "$hook" "$HOME/.codex/hooks/$(basename "$hook")"
         chmod +x "$HOME/.codex/hooks/$(basename "$hook")"
