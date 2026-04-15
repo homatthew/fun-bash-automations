@@ -23,6 +23,13 @@ codex_hooks = true
 
 [tui]
 notifications = [ "agent-turn-complete", "approval-requested" ]
+status_line = [
+  "model-with-reasoning",
+  "git-branch",
+  "project-root",
+  "context-usage",
+]
+terminal_title = ["spinner", "project-root", "git-branch"]
 
 [model_providers.openai-chat-completions]
 name = "Netflix Model Gateway"
