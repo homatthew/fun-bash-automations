@@ -95,7 +95,7 @@ esac
 
 if [ "$RUNTIME" = "codex" ]; then
   GROUP="codex-$REPO"
-  SENDER=""
+  SENDER="com.openai.codex"
 else
   GROUP="claude-$REPO"
   SENDER="com.anthropic.claudefordesktop"
@@ -110,6 +110,6 @@ fi
 ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10)
 [ -n "$SENDER" ] && ARGS+=(-sender "$SENDER")
 [ -n "$ACTIVATE" ] && ARGS+=(-activate "$ACTIVATE")
-terminal-notifier "${ARGS[@]}" 2>/dev/null &
+terminal-notifier "${ARGS[@]}" >/dev/null 2>&1 &
 
 cleanup_and_exit
