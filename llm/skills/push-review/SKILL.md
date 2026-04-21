@@ -240,6 +240,16 @@ Tell the user:
 
 ### 5c. Push after approval
 
+Self-validate first so agents don't trigger a hook block they could have
+predicted:
+
+```bash
+pg check [branch] | jq '{allowed, reason, current}'
+```
+
+Only proceed if `.allowed == true` and `.current.anchor_matches_head == true`.
+Otherwise regenerate the lease via `pg compose`.
+
 ```bash
 pg push \
   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite' \

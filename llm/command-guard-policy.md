@@ -56,6 +56,7 @@ workaround when a push is blocked:
 
 - `PG_SKIP_EDIT=1` (bypasses the editor review step)
 - `PG_ALLOW_DESCENDANT=1` (overrides lease-anchor drift)
+- `PG_SCOPE_OVERRIDE=1` (overrides the approved_scope path/commit/line caps)
 - Piping `yes`, `echo y`, or any non-interactive confirmation into the
   approval prompt
 - Manually editing `~/.push-gate/` lease state or `/tmp/pg-approve-*.json`
@@ -69,6 +70,21 @@ response is: stop, tell the user to run `pg compose` (or
 terminal, and wait. The `--assert-flow TEXT` argument on `pg push` is the
 semantic-scope assertion checked against the approved template — it is NOT a
 bypass.
+
+### Semantic self-check: `pg check`
+
+Before any `pg push`, agents should run `pg check [branch]` to validate the
+current HEAD against the active lease's `approved_scope`. Output is JSON:
+
+- `allowed` (bool) — would the push pass scope validation?
+- `reason` (string, present when `allowed: false`) — actionable block reason
+- `approved_scope` — full scope record (base_ref, paths, subjects, caps)
+- `current` — head, approved_anchor, `anchor_matches_head`, commits,
+  added_lines, changed_files, subjects
+
+If `allowed: false` or `anchor_matches_head: false`, stop and ask the user to
+regenerate the lease with `pg compose`. Never push on a stale or
+scope-violating lease, and never bypass the failure with an override env.
 
 ### Git config and bypasses
 

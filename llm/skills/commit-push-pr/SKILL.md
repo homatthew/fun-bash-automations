@@ -61,7 +61,17 @@ Tell the user (substitute the actual working directory and branch):
 > ```
 > Then run the generated `/tmp/pg-approve-...sh` script after reviewing or editing the draft.
 
-Once the user confirms the lease was approved:
+Once the user confirms the lease was approved, **self-validate** before pushing:
+
+```bash
+pg check | jq '{allowed, reason, current}'
+```
+
+If `.allowed` is `false` or `.current.anchor_matches_head` is `false`, stop and
+ask the user to re-run `pg compose` to refresh the lease. Never skip this
+check or act on a stale lease.
+
+Then push:
 
 ```bash
 pg push \
