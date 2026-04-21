@@ -753,6 +753,26 @@ set -euo pipefail
 DRAFT_FILE="$draft_file"
 HELPER="$script_path"
 
+# Edit-before-approve: open \$EDITOR on the draft JSON so you can tweak
+# .user_intent / .agent_assertion_template before approving. Skip with
+# PG_SKIP_EDIT=1 (useful when running the script non-interactively).
+if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
+  editor="\${EDITOR:-vi}"
+  echo "Opening \$editor on \$DRAFT_FILE — edit .user_intent / .agent_assertion_template, save + quit to continue. :cq to abort."
+  cp "\$DRAFT_FILE" "\$DRAFT_FILE.bak"
+  if ! "\$editor" "\$DRAFT_FILE"; then
+    echo "Editor exited non-zero — aborting."
+    mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
+    exit 1
+  fi
+  if ! jq empty "\$DRAFT_FILE" >/dev/null 2>&1; then
+    echo "Draft is no longer valid JSON — restoring previous version, aborting."
+    mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
+    exit 1
+  fi
+  rm -f "\$DRAFT_FILE.bak"
+fi
+
 "\$HELPER" preview-draft --draft "\$DRAFT_FILE"
 echo
 printf 'Proceed? [y/N] '
@@ -811,6 +831,74 @@ pg_cmd_approve() {
     "$draft" >"$lease_path"
 
   echo "Lease approved: $lease_path"
+  pg_notify_approved "$draft" "$lease_path" || true
+}
+
+# Notify the initiating Claude/Codex session that the lease was approved.
+# Fires three channels (each fail-silent):
+#   1. Sentinel file at /tmp/pg-approved/<repo>__<branch> (polled by agents).
+#   2. Threaded Slack reply on the existing notify-slack thread for this branch.
+#   3. macOS terminal-notifier desktop notification.
+pg_notify_approved() {
+  local draft="$1" lease_path="$2"
+  local repo_name branch_name pr_number key sentinel_dir sentinel_file
+  repo_name=$(jq -r '.repo_name // empty' "$draft" 2>/dev/null)
+  branch_name=$(jq -r '.branch_name // empty' "$draft" 2>/dev/null)
+  pr_number=$(jq -r '.pr_number // empty' "$draft" 2>/dev/null)
+  [[ -n "$repo_name" && -n "$branch_name" ]] || return 0
+
+  key="${repo_name}__${branch_name}"
+  key=$(printf '%s' "$key" | tr '/ ' '__')
+
+  # 1. Sentinel file. Agents can poll this ("test -f /tmp/pg-approved/<key>")
+  #    to know approval happened out-of-band.
+  sentinel_dir="${PG_APPROVAL_SENTINEL_DIR:-/tmp/pg-approved}"
+  mkdir -p "$sentinel_dir" 2>/dev/null || true
+  sentinel_file="$sentinel_dir/$key"
+  {
+    printf 'approved_at=%s\n' "$(pg_now_utc)"
+    printf 'lease=%s\n' "$lease_path"
+    [[ -n "$pr_number" ]] && printf 'pr_number=%s\n' "$pr_number"
+  } > "$sentinel_file" 2>/dev/null || true
+
+  # 2. Slack threaded reply (same convention as notify-slack.sh).
+  #    OFF by default — opt in with PG_NOTIFY_SLACK=1 when you actually want
+  #    the approval to surface in the branch's Slack thread.
+  local thread_dir thread_file thread_ts token chan payload msg
+  thread_dir="${NOTIFY_THREAD_DIR:-/tmp/claude-slack-threads}"
+  thread_file="$thread_dir/$key"
+  if [[ "${PG_NOTIFY_SLACK:-0}" == "1" ]] \
+     && [[ -r "$thread_file" ]] \
+     && command -v security >/dev/null 2>&1; then
+    thread_ts=$(cat "$thread_file" 2>/dev/null || true)
+    token=$(security find-generic-password -a "${USER:-$(id -un)}" -s claude-slack-bot-token -w 2>/dev/null || true)
+    chan=$(security find-generic-password -a "${USER:-$(id -un)}" -s claude-slack-channel -w 2>/dev/null || true)
+    if [[ -n "$thread_ts" && -n "$token" && -n "$chan" ]]; then
+      msg="🔐 *lease approved* for \`$branch_name\`"
+      [[ -n "$pr_number" ]] && msg="$msg · PR #$pr_number"
+      msg="$msg — agent may now push"
+      payload=$(jq -n \
+        --arg channel "$chan" \
+        --arg text "$msg" \
+        --arg thread_ts "$thread_ts" \
+        '{channel: $channel, text: $text, thread_ts: $thread_ts, unfurl_links: false, unfurl_media: false}')
+      curl -sS https://slack.com/api/chat.postMessage \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json; charset=utf-8' \
+        --data "$payload" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # 3. macOS desktop notification.
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v terminal-notifier >/dev/null 2>&1; then
+    terminal-notifier \
+      -title "push-gate" \
+      -subtitle "lease approved" \
+      -message "$branch_name${pr_number:+ · PR #$pr_number} — agent may now push" \
+      -sound Pop \
+      -group "pg-approval-$key" \
+      -timeout 10 >/dev/null 2>&1 &
+  fi
 }
 
 pg_load_current_lease_json() {
