@@ -946,31 +946,75 @@ pg_cmd_draft_approve() {
       status: "active"
     }' >"$draft_file"
 
+  local yaml_file="${draft_file%.json}.yaml"
   cat >"$script_file" <<EOF
 #!/bin/bash
 set -euo pipefail
 
 DRAFT_FILE="$draft_file"
+YAML_FILE="$yaml_file"
 HELPER="$script_path"
 
-# Edit-before-approve: open \$EDITOR on the draft JSON so you can tweak
-# .user_intent / .agent_assertion_template before approving. Skip with
-# PG_SKIP_EDIT=1 (useful when running the script non-interactively).
+# Edit-before-approve: convert the draft JSON to YAML, open \$EDITOR on the
+# YAML (easier to edit: comments, multi-line strings, no strict quoting),
+# then round-trip back to JSON and validate. Skip with PG_SKIP_EDIT=1.
+# Requires yq (mikefarah); falls back to raw JSON if yq is missing.
 if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
   editor="\${EDITOR:-vi}"
-  echo "Opening \$editor on \$DRAFT_FILE — edit .user_intent, .agent_assertion_template, and .approved_scope (paths / subjects / max_commits / max_added_lines). Save + quit to continue. :cq to abort."
-  cp "\$DRAFT_FILE" "\$DRAFT_FILE.bak"
-  if ! "\$editor" "\$DRAFT_FILE"; then
-    echo "Editor exited non-zero — aborting."
-    mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
-    exit 1
+  if command -v yq >/dev/null 2>&1; then
+    # JSON → YAML with a helpful header comment.
+    {
+      echo "# pg approval draft — edit user_intent, agent_assertion_template,"
+      echo "# and approved_scope (paths / subjects / max_commits / max_added_lines)."
+      echo "# Save + quit to continue, :cq or empty file to abort."
+      echo "#"
+      yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml
+    } > "\$YAML_FILE"
+
+    cp "\$YAML_FILE" "\$YAML_FILE.bak"
+    echo "Opening \$editor on \$YAML_FILE (YAML view of draft)."
+    if ! "\$editor" "\$YAML_FILE"; then
+      echo "Editor exited non-zero — aborting."
+      mv "\$YAML_FILE.bak" "\$YAML_FILE"
+      exit 1
+    fi
+    if [ ! -s "\$YAML_FILE" ]; then
+      echo "YAML empty — aborting."
+      mv "\$YAML_FILE.bak" "\$YAML_FILE"
+      exit 1
+    fi
+
+    # Parse YAML → JSON into a tmp, validate, then replace draft.
+    if ! yq eval '.' "\$YAML_FILE" --output-format=json > "\$DRAFT_FILE.new" 2>/dev/null; then
+      echo "YAML failed to parse — restoring previous version, aborting."
+      mv "\$YAML_FILE.bak" "\$YAML_FILE"
+      rm -f "\$DRAFT_FILE.new"
+      exit 1
+    fi
+    if ! jq empty "\$DRAFT_FILE.new" >/dev/null 2>&1; then
+      echo "Parsed JSON is not valid — aborting."
+      mv "\$YAML_FILE.bak" "\$YAML_FILE"
+      rm -f "\$DRAFT_FILE.new"
+      exit 1
+    fi
+    mv "\$DRAFT_FILE.new" "\$DRAFT_FILE"
+    rm -f "\$YAML_FILE.bak"
+  else
+    # yq not installed — fall back to direct JSON edit.
+    echo "yq not found; opening \$editor on JSON directly. Install yq for YAML editing."
+    cp "\$DRAFT_FILE" "\$DRAFT_FILE.bak"
+    if ! "\$editor" "\$DRAFT_FILE"; then
+      echo "Editor exited non-zero — aborting."
+      mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
+      exit 1
+    fi
+    if ! jq empty "\$DRAFT_FILE" >/dev/null 2>&1; then
+      echo "Draft is no longer valid JSON — restoring previous version, aborting."
+      mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
+      exit 1
+    fi
+    rm -f "\$DRAFT_FILE.bak"
   fi
-  if ! jq empty "\$DRAFT_FILE" >/dev/null 2>&1; then
-    echo "Draft is no longer valid JSON — restoring previous version, aborting."
-    mv "\$DRAFT_FILE.bak" "\$DRAFT_FILE"
-    exit 1
-  fi
-  rm -f "\$DRAFT_FILE.bak"
 fi
 
 "\$HELPER" preview-draft --draft "\$DRAFT_FILE"
