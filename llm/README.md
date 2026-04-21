@@ -7,6 +7,7 @@ harnesses.
 
 - `AGENTS.md` shared instruction policy
 - `skills/*/SKILL.md` shared skills
+- `hooks/*.sh` shared hooks (projected to both harnesses)
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
 - `../codex/config.toml` portable Codex config template
@@ -32,12 +33,17 @@ harnesses.
   - `~/.claude/CLAUDE.md` -> `claude/CLAUDE.md`
   - `~/.claude/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.claude/skills/*` -> `llm/skills/*`
+  - `~/.claude/hooks/*.sh` -> `llm/hooks/*.sh` + `claude/hooks/*.sh`
 - Codex:
   - `~/.codex/auth.json` -> copied from `codex/auth.json`
   - `~/.codex/hooks.json` -> copied from `codex/hooks.json`
-  - `~/.codex/hooks/*.sh` -> copied from shared guard script implementations
+  - `~/.codex/hooks/*.sh` -> `llm/hooks/*.sh`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
+
+Adding a new shared hook: drop a `.sh` into `llm/hooks/`, run `fba-deploy`,
+then wire it into each harness's config (`claude/settings.json`,
+`codex/hooks.json`).
 - External skills (managed by `fba-deploy project_shared`):
   - `~/repos/cursor-google-workspace-skills/skills/google-*` -> both `~/.claude/skills/` and `~/.codex/skills/`
   - Venv: `~/.claude/google-workspace-venv` (shared, scripts bootstrap into it)

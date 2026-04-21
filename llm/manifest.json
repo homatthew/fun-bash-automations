@@ -4,6 +4,7 @@
     "repo_agent_doc": "AGENTS.md",
     "shared_agent_doc": "llm/AGENTS.md",
     "shared_skills_dir": "llm/skills",
+    "shared_hooks_dir": "llm/hooks",
     "codex_config_template": "codex/config.toml",
     "codex_hooks_template": "codex/hooks.json",
     "shared_command_guard_policy": "llm/command-guard-policy.md"
@@ -21,6 +22,11 @@
       "skills_dir": {
         "target": "~/.claude/skills",
         "source": "llm/skills"
+      },
+      "hooks_dir": {
+        "target": "~/.claude/hooks",
+        "shared_source": "llm/hooks",
+        "harness_source": "claude/hooks"
       }
     },
     "codex": {
@@ -33,6 +39,10 @@
         "preserve_entries": [
           ".system"
         ]
+      },
+      "hooks_dir": {
+        "target": "~/.codex/hooks",
+        "shared_source": "llm/hooks"
       }
     }
   }

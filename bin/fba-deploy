@@ -85,6 +85,16 @@ copy_path() {
     cp "$source_path" "$dest_path"
 }
 
+project_shared_hooks() {
+    local target_hooks_dir="$1"
+    mkdir -p "$target_hooks_dir"
+    for hook in "$ROOT"/llm/hooks/*.sh; do
+        [[ -f "$hook" ]] || continue
+        copy_path "$hook" "$target_hooks_dir/$(basename "$hook")"
+        chmod +x "$target_hooks_dir/$(basename "$hook")"
+    done
+}
+
 project_shared() {
     local home_dir="$1"
     mkdir -p "$home_dir/skills"
@@ -137,6 +147,7 @@ deploy_claude() {
         link_path "$agent" "$HOME/.claude/agents/$(basename "$agent")"
     done
 
+    project_shared_hooks "$HOME/.claude/hooks"
     for hook in "$ROOT"/claude/hooks/*.sh; do
         [[ -f "$hook" ]] || continue
         copy_path "$hook" "$HOME/.claude/hooks/$(basename "$hook")"
@@ -165,11 +176,7 @@ deploy_codex() {
         copy_path "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
     fi
 
-    for hook in "$ROOT"/claude/hooks/bash-safety-guard.sh "$ROOT"/claude/hooks/dgw-write-guard.sh "$ROOT"/claude/hooks/notify.sh "$ROOT"/claude/hooks/push-gate.sh; do
-        [[ -f "$hook" ]] || continue
-        copy_path "$hook" "$HOME/.codex/hooks/$(basename "$hook")"
-        chmod +x "$HOME/.codex/hooks/$(basename "$hook")"
-    done
+    project_shared_hooks "$HOME/.codex/hooks"
 }
 
 case "$MODE" in
