@@ -2,8 +2,19 @@
   "hooks": {
     "SessionStart": [
       {
-        "type": "command",
-        "command": "echo 'CAVEMAN MODE ACTIVE. Rules: Drop articles/filler/pleasantries/hedging. Fragments OK. Short synonyms. Pattern: [thing] [action] [reason]. [next step]. Not: Sure! I would be happy to help you with that. Yes: Bug in auth middleware. Fix: Code/commits/security: write normal. User says stop caveman or normal mode to deactivate.'"
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/beads-prime.sh",
+            "statusMessage": "Priming beads context",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "echo 'CAVEMAN MODE ACTIVE. Rules: Drop articles/filler/pleasantries/hedging. Fragments OK. Short synonyms. Pattern: [thing] [action] [reason]. [next step]. Not: Sure! I would be happy to help you with that. Yes: Bug in auth middleware. Fix: Code/commits/security: write normal. User says stop caveman or normal mode to deactivate.'"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -13,23 +24,27 @@
           {
             "type": "command",
             "command": "~/.codex/hooks/bash-safety-guard.sh",
-            "statusMessage": "Checking Bash command"
+            "statusMessage": "Checking Bash command",
+            "timeout": 10
           },
           {
             "type": "command",
             "command": "~/.codex/hooks/dgw-write-guard.sh",
-            "statusMessage": "Checking DGW KV write policy"
+            "statusMessage": "Checking DGW KV write policy",
+            "timeout": 10
           }
         ]
       }
     ],
-    "Stop": [
+    "PermissionRequest": [
       {
-        "matcher": "",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "~/.codex/hooks/notify-slack.sh"
+            "command": "~/.codex/hooks/permission-allow.sh",
+            "statusMessage": "Auto-allow for read-only Bash",
+            "timeout": 5
           }
         ]
       }
@@ -40,7 +55,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.codex/hooks/slack-push-event.sh"
+            "command": "~/.codex/hooks/post-tool-audit.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/notify.sh",
+            "statusMessage": "Sending notification",
+            "timeout": 10
           }
         ]
       }

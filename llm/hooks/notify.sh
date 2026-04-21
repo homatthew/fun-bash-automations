@@ -66,9 +66,25 @@ if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
   [ "$FRONT" = "com.mitchellh.ghostty" ] && cleanup_and_exit
 fi
 
-# Derive repo name — prefer git toplevel (reliable), fall back to cwd
-REPO=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null)
-[ -z "$REPO" ] && REPO=$(basename "$CWD")
+# Resolve the main repo path even when CWD is a worktree. Worktrees report
+# their own path via --show-toplevel but share the main repo's .git common-dir,
+# so dirname(common-dir) gets us back to the main repo root.
+resolve_main_repo() {
+  local common_dir main_git_dir
+  common_dir=$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null) || return 0
+  case "$common_dir" in
+    /*) main_git_dir="$common_dir" ;;
+    *) main_git_dir="$CWD/$common_dir" ;;
+  esac
+  (cd "$(dirname "$main_git_dir")" 2>/dev/null && pwd)
+}
+
+MAIN_REPO_PATH="$(resolve_main_repo)"
+if [ -n "$MAIN_REPO_PATH" ]; then
+  REPO="$(basename "$MAIN_REPO_PATH")"
+else
+  REPO="$(basename "$CWD")"
+fi
 
 case "$EVENT" in
   Stop)
@@ -86,30 +102,47 @@ esac
 
 MESSAGE="$(normalize_message "$MESSAGE")"
 
-# Click-to-activate terminal
+# Click behavior: for VSCode, open the main repo via vscode:// so the click
+# lands in the right workspace. For other terminals, activate the app.
+OPEN_URL=""
+ACTIVATE=""
 case "${TERM_PROGRAM:-}" in
+  vscode)
+    if [ -n "$MAIN_REPO_PATH" ]; then
+      OPEN_URL="vscode://file$MAIN_REPO_PATH"
+    else
+      ACTIVATE="com.microsoft.VSCode"
+    fi
+    ;;
   ghostty) ACTIVATE="com.mitchellh.ghostty" ;;
-  vscode)  ACTIVATE="com.microsoft.VSCode" ;;
-  *)       ACTIVATE="" ;;
 esac
 
 if [ "$RUNTIME" = "codex" ]; then
   GROUP="codex-$REPO"
-  SENDER="com.openai.codex"
+  SENDER_BUNDLE="com.openai.codex"
 else
   GROUP="claude-$REPO"
-  SENDER="com.anthropic.claudefordesktop"
+  # com.anthropic.claudefordesktop -sender hangs terminal-notifier on this
+  # machine (Claude.app notification endpoint is broken). Use the placeholder
+  # Claude Notify.app bundle (~/Applications/Claude Notify.app) which carries
+  # Claude's icon but a clean bundle-id.
+  SENDER_BUNDLE="com.matthewho.claudenotify"
 fi
+SENDER="$SENDER_BUNDLE"
 
 if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
-  printf 'macos title=%s subtitle=%s message=%s group=%s sender=%s activate=%s\n' \
-    "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER:-<none>}" "${ACTIVATE:-<none>}" >&2
+  printf 'macos title=%s subtitle=%s message=%s group=%s sender=%s activate=%s open=%s\n' \
+    "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER:-<none>}" "${ACTIVATE:-<none>}" "${OPEN_URL:-<none>}" >&2
   cleanup_and_exit
 fi
 
 ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10)
 [ -n "$SENDER" ] && ARGS+=(-sender "$SENDER")
-[ -n "$ACTIVATE" ] && ARGS+=(-activate "$ACTIVATE")
+if [ -n "$OPEN_URL" ]; then
+  ARGS+=(-open "$OPEN_URL")
+elif [ -n "$ACTIVATE" ]; then
+  ARGS+=(-activate "$ACTIVATE")
+fi
 terminal-notifier "${ARGS[@]}" >/dev/null 2>&1 &
 
 cleanup_and_exit

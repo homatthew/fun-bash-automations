@@ -153,6 +153,12 @@ deploy_claude() {
         copy_path "$hook" "$HOME/.claude/hooks/$(basename "$hook")"
         chmod +x "$HOME/.claude/hooks/$(basename "$hook")"
     done
+
+    # Placeholder app so terminal-notifier -sender resolves to a working bundle
+    # with Claude's icon. See bin/install-claude-notify-app for rationale.
+    if [[ -x "$ROOT/bin/install-claude-notify-app" ]]; then
+        "$ROOT/bin/install-claude-notify-app" || true
+    fi
 }
 
 deploy_codex() {
