@@ -7,6 +7,11 @@ description: Create and maintain stacked PRs (dependent PR chains with increment
 
 Stacked PRs are a chain of dependent pull requests where each PR builds on the previous one. Reviewers see only the incremental diff for each PR, not the entire accumulated change.
 
+When a repo has both `origin` and `upstream` remotes:
+- PR lookup/binding defaults to the upstream repo.
+- Pushes stay on the branch's tracked remote when present.
+- New untracked branches prefer `upstream` only when the current viewer can push there; otherwise they use `origin`.
+
 ## When to Use
 
 - Feature requires multiple dependent changes (e.g., library + consumer)
@@ -44,26 +49,28 @@ git checkout -b mho/feature-ui
 
 ## Step 2: Request push-gate approval
 
-Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
+Include the `cd` so the durable lease draft is generated in the right repo/worktree.
 
 Tell the user:
 
 > All branches ready. Run in your terminal:
 > ```
 > cd <working-directory>
-> push-gate 5
+> pg draft-approve \
+>   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
+>   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
 > ```
-> (5-minute window for multiple pushes.) Then I'll push all branches and create the PRs.
+> Then run the generated `/tmp/pg-approve-...sh` script after reviewing it. Repeat per branch in stack order.
 
 ## Step 3: Push all branches and create PRs
 
-Once the user confirms they've run `push-gate`:
+Once the user confirms the branch lease was approved:
 
 ```bash
-# Push each branch (one push-gate token consumed per push)
-git push -u origin mho/feature-base
-git push -u origin mho/feature-api
-git push -u origin mho/feature-ui
+# Push each branch with a fresh caveman self-assertion
+pg push --assert-flow $'new pr flow\nbranch mho/feature-base\nbase infra\nno rewrite' --set-upstream
+pg push --assert-flow $'new pr flow\nbranch mho/feature-api\napi layer\nno rewrite' --set-upstream
+pg push --assert-flow $'new pr flow\nbranch mho/feature-ui\nui layer\nno rewrite' --set-upstream
 
 # Create PRs with correct base targets
 gh pr create --base main --head mho/feature-base \
@@ -96,8 +103,12 @@ When you update a parent branch, rebase children to pick up changes:
 # After updating mho/feature-base
 git checkout mho/feature-api
 git rebase mho/feature-base
-# HEAD changed — user needs to run push-gate before pushing
-git push --force-with-lease origin mho/feature-api
+# HEAD changed — user needs a replacement lease before pushing
+pg draft-approve \
+  --intent $'allow pushes for mho/feature-api\nsame branch\nsame pr\nnew lease after rewrite' \
+  --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto parent\nrewrite branch'
+# user runs generated script
+pg push --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto parent\nrewrite branch' --force-with-lease
 ```
 
 Always use `--force-with-lease` (never `--force`) — it fails safely if the remote has diverged.
@@ -113,7 +124,11 @@ gh pr edit <child-PR-number> --base main
 # Rebase child onto main to clean up merge base
 git checkout mho/feature-api
 git rebase main
-git push --force-with-lease origin mho/feature-api
+pg draft-approve \
+  --intent $'allow pushes for mho/feature-api\nsame branch\nsame pr\nnew lease after rewrite' \
+  --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto main\nrewrite branch'
+# user runs generated script
+pg push --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto main\nrewrite branch' --force-with-lease
 ```
 
 ## Verifying Incremental Diffs
@@ -129,10 +144,10 @@ If the diff includes parent changes, the `--base` is wrong — fix with `gh pr e
 
 ## Rules for Autonomous Agents
 
-- Do all work locally first. Push only after user runs `push-gate`.
+- Do all work locally first. Push only after the user approves a durable branch lease.
 - Always create PRs with `--base <parent-branch>`, not `--base main` (except the first)
 - Use `git rebase <parent>` to sync, never merge
-- Use `--force-with-lease` to push rebased branches
+- Use `--force-with-lease` to push rebased branches, but always create a replacement lease first
 - Include dependency annotations in PR descriptions
 - Verify `gh pr diff` shows only incremental changes
 - After parent merges: `gh pr edit --base main` + rebase onto main

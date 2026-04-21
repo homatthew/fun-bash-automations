@@ -8,6 +8,9 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/push-gate.sh"
 
 deny() {
   jq -n --arg reason "$1" '{
@@ -43,51 +46,17 @@ check_git_force() {
 }
 
 # --- 2. Push Guard ---
-# Blocks ALL git push by default. Pushes require a time-based token
-# created by the user running `push-gate` in their terminal.
-# Token is valid for a configurable window (default: 3 minutes).
-# Multiple pushes within the window are allowed (handles stacked PRs).
+# Blocks ALL git push by default. Pushes require a durable branch lease
+# plus a fresh pending self-assertion created by `pg push`.
 check_push_guard() {
-  echo "$COMMAND" | grep -qE 'git\s+push' || return
-
-  # Absolute blocks — no bypass
-  echo "$COMMAND" | grep -qE 'git\s+push\s+upstream(\s|$)' &&
-    deny "Blocked: pushing to upstream is never allowed."
-  echo "$COMMAND" | grep -qE 'git\s+push\s+.*\s(main|master)(\s|$)' &&
-    deny "Blocked: pushing directly to main/master is not allowed."
-
-  # Block push if branch tracks main/master (prevents accidental fast-forward of main)
-  local UPSTREAM
-  UPSTREAM=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)
-  if echo "$UPSTREAM" | grep -qE '(origin|upstream)/(main|master)$'; then
-    local BRANCH
-    BRANCH=$(git branch --show-current 2>/dev/null)
-    if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-      deny "Blocked: branch '$BRANCH' tracks $UPSTREAM. Re-set upstream first: git branch --set-upstream-to=origin/$BRANCH"
-    fi
+  local result allowed reason
+  result=$(pg_validate_push_guard "$COMMAND")
+  allowed=$(echo "$result" | jq -r '.allowed')
+  if [ "$allowed" = "true" ]; then
+    return
   fi
-
-  # Check for time-based push token scoped to this repo.
-  # Token file is /tmp/.claude-push-<reponame>, contains an epoch expiry timestamp.
-  local COMMON_DIR REPO_NAME TOKEN_FILE
-  COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
-  [ -n "$COMMON_DIR" ] && [[ "$COMMON_DIR" != /* ]] && COMMON_DIR="$(pwd)/$COMMON_DIR"
-  REPO_NAME=$(basename "$(dirname "$COMMON_DIR")")
-  TOKEN_FILE="/tmp/.claude-push-$REPO_NAME"
-  if [ -f "$TOKEN_FILE" ]; then
-    local EXPIRY NOW
-    EXPIRY=$(cat "$TOKEN_FILE" 2>/dev/null)
-    NOW=$(date +%s)
-    if [ -n "$EXPIRY" ] && [ "$EXPIRY" -gt "$NOW" ] 2>/dev/null; then
-      return  # Valid token — allow push
-    fi
-    rm -f "$TOKEN_FILE"
-    deny "Blocked: push approval expired. Ask the user to run push-gate."
-  fi
-
-  local REPO_ROOT
-  REPO_ROOT=$(dirname "$COMMON_DIR")
-  deny "Blocked: git push requires approval. Ask the user to run: cd $REPO_ROOT && push-gate"
+  reason=$(echo "$result" | jq -r '.reason')
+  deny "$reason"
 }
 
 # --- 2b. Branch Creation Tracking Guard ---
