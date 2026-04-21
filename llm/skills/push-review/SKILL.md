@@ -1,11 +1,16 @@
 ---
 name: push-review
-description: "Analyze branch topology, map commits to PRs, and selectively push branches one-by-one with push-gate approval. Use when finishing work and preparing to push — especially with stacked branches or multiple PRs."
+description: "Analyze branch topology, map commits to PRs, and selectively push branches one-by-one with durable push-gate leases. Use when finishing work and preparing to push — especially with stacked branches or multiple PRs."
 ---
 
 # Push Review
 
-> **When to use:** After finishing implementation, when you want to review the state of the world before pushing. Analyzes commit DAG, maps branches to PRs, and guides sequential pushing with push-gate between each.
+> **When to use:** After finishing implementation, when you want to review the state of the world before pushing. Analyzes commit DAG, maps branches to PRs, and guides sequential branch pushes with durable `push-gate` leases plus fresh `pg push` assertions.
+
+Remote topology defaults:
+- PR lookup/binding prefers the `upstream` repo when an `upstream` remote exists.
+- Push remote stays on the branch's tracked remote when present.
+- Untracked branches prefer `upstream` only when the current viewer can push there; otherwise they fall back to `origin`.
 
 ## Step 0: Stale Detection
 
@@ -214,20 +219,25 @@ git diff --stat <remote-tracking>..<branch>
 
 ### 5b. Request push-gate approval
 
-Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
+Include the `cd` so the draft is generated from the correct repo/worktree.
 
 Tell the user:
 > **Branch 1 of N: `<branch>`**
 > Pushing <N> commits. Run in your terminal:
 > ```
 > cd <working-directory>
-> push-gate
+> pg draft-approve \
+>   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
+>   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
 > ```
+> Then run the generated `/tmp/pg-approve-...sh` script after reviewing the draft.
 
 ### 5c. Push after approval
 
 ```bash
-git push -u origin <branch>
+pg push \
+  --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite' \
+  --set-upstream
 ```
 
 ### 5d. Create PR if needed (using commit-push-pr template)
@@ -241,7 +251,7 @@ If a PR exists, report the updated state.
 Branch 1/3 done: mho/feature-base -> PR #42 updated (3 new commits)
 ```
 
-Then repeat 5a-5e for the next branch. Each branch gets its own push-gate cycle.
+Then repeat 5a-5e for the next branch. Each branch gets its own durable lease plus fresh `pg push` assertion.
 
 ## Step 6: Final Summary
 
@@ -257,12 +267,12 @@ After all branches are processed:
 
 ## Single-Branch Mode
 
-If there's only one branch with unpushed work, skip the table ceremony — just show the commit summary and go straight to push-gate. This skill should feel lightweight for simple cases.
+If there's only one branch with unpushed work, skip the table ceremony — just show the commit summary, generate one lease draft, and go straight to `pg push`. This skill should feel lightweight for simple cases.
 
 ## Rules
 
 - Always process in dependency order: parents before children
-- One push-gate per branch — never batch (user reviews each push)
+- One durable lease per branch intent. Still show each branch separately; do not silently reuse one branch's lease for another branch.
 - If a push fails or is denied, stop and report. Don't continue to children.
 - Use `/commit-push-pr` conventions for PR creation (Netflix template, draft mode)
 - If the user says "skip" for a branch, skip it and its children (children depend on parent being pushed)

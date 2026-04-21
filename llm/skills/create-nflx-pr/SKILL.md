@@ -5,7 +5,7 @@ description: "DEPRECATED — use /commit-push-pr instead. Kept as a redirect."
 
 # Create a PR
 
-> **This skill is deprecated.** Use `/commit-push-pr` instead — it handles commit, push (with push-gate), and PR creation in one flow.
+> **This skill is deprecated.** Use `/commit-push-pr` instead — it handles commit, durable push-gate leasing, `pg push`, and PR creation in one flow.
 >
 > If you are here, invoke `/commit-push-pr` and stop reading this file.
 

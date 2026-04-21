@@ -37,22 +37,31 @@ Create a concise commit message based on staged changes. Follow repo conventions
 
 ## Step 4: Push
 
-**Before pushing, ask the user to run `push-gate` to open a time-based approval window.** The push guard hook blocks all pushes until the user approves. Include the `cd` so the token is scoped to the right repo (important when working in a worktree).
+**Before pushing, generate a durable `push-gate` draft and ask the user to run the generated approval script.** The push guard hook blocks pushes until the branch has a matching durable lease, and the actual push must go through `pg push --assert-flow ...`.
+
+`pg draft-approve` auto-detects two topology defaults:
+- If an `upstream` remote exists, PR lookup/binding defaults to the upstream repo.
+- Push remote stays sticky for tracked branches; otherwise it prefers `upstream` only when the current viewer has write access there, and falls back to `origin`.
 
 Tell the user (substitute the actual working directory and branch):
 > Ready to push `$BRANCH`. Run in your terminal:
 > ```
 > cd <working-directory>
-> push-gate
+> pg draft-approve \
+>   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
+>   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
 > ```
+> Then run the generated `/tmp/pg-approve-...sh` script after reviewing or editing the draft.
 
-Once the user confirms they've run it:
+Once the user confirms the lease was approved:
 
 ```bash
-git push -u origin "$BRANCH"
+pg push \
+  --assert-flow $'update pr #<pr>\nbranch '"$BRANCH"$'\n<main areas>\nno rewrite' \
+  --set-upstream
 ```
 
-If the push is blocked with an expired token message, ask the user to run `push-gate` again.
+If the push is blocked, use `pg doctor` or generate a replacement lease. For rebases or amended commits, create a new lease before using `pg push --force-with-lease`.
 
 ## Step 5: Create PR (new PRs only)
 

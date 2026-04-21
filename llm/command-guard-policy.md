@@ -34,9 +34,14 @@ Codex, and future harnesses.
 ### Push approval
 
 - Require explicit user approval before any push
-- Block pushes to `upstream`
-- Block direct pushes to `main` or `master`
-- Use `push-gate` when the harness supports the Claude-compatible lease model
+- Block direct pushes to `origin/main`, `origin/master`, `upstream/main`, and
+  `upstream/master`
+- Allow feature-branch pushes to `upstream/*` only when the branch has a
+  matching durable lease
+- Use `push-gate` / `pg` durable branch leases when the harness supports the
+  shared lease model
+- Require a fresh self-assertion via `pg push --assert-flow ...` for each agent
+  push, even when the durable lease is still valid
 
 ### Git config and bypasses
 

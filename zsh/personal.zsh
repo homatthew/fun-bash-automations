@@ -245,7 +245,11 @@ echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 export GOPATH=$HOME/golang
 export GOROOT=/usr/local/opt/go/libexec
+export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 export PATH=$HOME/.local/bin:$HOME/repos/fun-bash-automations/bin:$PATH
+if [ -d "$BUN_INSTALL/bin" ]; then
+  export PATH="$BUN_INSTALL/bin:$PATH"
+fi
 export PATH=$PATH:$GOPATH/bin
 export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/
@@ -320,52 +324,16 @@ agent-refresh() {
 alias llm-refresh=agent-refresh
 alias llm-deploy=fba-deploy
 
-# push-gate: Approve git pushes by Claude agents for a time window.
-# Creates a time-based token valid for N minutes (default: 3).
-# Multiple pushes are allowed within the window (handles stacked PRs).
-# Usage: push-gate [minutes]   (default: 3)
-#        push-gate status      (check if approval is active)
+# push-gate: Manage durable push leases for agent pushes.
+# Generates approval drafts, stamps leases, and wraps agent pushes with
+# required self-assertions.
 push-gate() {
-    local repo_root repo_name TOKEN_FILE
-    local common_dir
-    common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [ -z "$common_dir" ]; then
-        echo "Not in a git repo"
+    local helper="$HOME/repos/fun-bash-automations/claude/hooks/push-gate.sh"
+    if [ ! -x "$helper" ]; then
+        echo "push-gate helper missing: $helper"
         return 1
     fi
-    # Resolve relative path (main worktree returns ".git", linked worktrees return absolute path)
-    [[ "$common_dir" != /* ]] && common_dir="$(pwd)/$common_dir"
-    repo_name=$(basename "$(dirname "$common_dir")")
-    TOKEN_FILE="/tmp/.claude-push-$repo_name"
-
-    case "$1" in
-        status)
-            if [ ! -f "$TOKEN_FILE" ]; then
-                echo "[$repo_name] No active push approval"
-                return
-            fi
-            local expiry now remaining
-            expiry=$(cat "$TOKEN_FILE" 2>/dev/null)
-            now=$(date +%s)
-            remaining=$(( expiry - now ))
-            if [ "$remaining" -gt 0 ] 2>/dev/null; then
-                echo "[$repo_name] Push approved — expires in ${remaining}s (at $(date -r "$expiry" '+%H:%M:%S'))"
-            else
-                echo "[$repo_name] Push approval expired"
-                rm -f "$TOKEN_FILE"
-            fi
-            ;;
-        ''|[0-9]*)
-            local minutes="${1:-3}"
-            local expiry=$(( $(date +%s) + minutes * 60 ))
-            echo "$expiry" > "$TOKEN_FILE"
-            echo "[$repo_name] Push approved for ${minutes}m (until $(date -r "$expiry" '+%H:%M:%S'))"
-            ;;
-        *)
-            echo "Usage: push-gate [minutes]  (default: 3)"
-            echo "       push-gate status"
-            ;;
-    esac
+    bash "$helper" "$@"
 }
 alias pg=push-gate
 
