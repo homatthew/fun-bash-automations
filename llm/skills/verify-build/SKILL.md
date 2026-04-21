@@ -7,11 +7,20 @@ description: Verify the build passes and fix any issues
 
 Run the project's build/test pipeline and fix any issues.
 
+## Prefer Specialized Testing Skills First
+
+If the repo or task matches a specialized testing skill, use that instead of treating this as a fully generic build problem.
+
+- DGW Control: use `test-dgw-control`
+- DGW KV: use `test-dgw-kv`
+
+Use this skill when no specialized workflow applies or when the task is genuinely just "make the build pass."
+
 ## Identify the Build System
 
 ### Netflix Projects (use newt via dropship MCP)
 - **Python**: Use `get_nflx_context` to find the correct newt/tox commands
-- **Java**: Use `./gradlew build` or `./gradlew test`
+- **Java**: Check for a specialized repo workflow first. If none exists, use `./gradlew build` or `./gradlew test`
 
 ### Standard Projects
 - `tox.ini` → run `tox`
@@ -23,6 +32,7 @@ Run the project's build/test pipeline and fix any issues.
 ## Process
 
 1. **Run the build/tests**
+   - For Gradle repos, inspect whether a specialized skill should be used before defaulting to generic `build` or `test`
 
 2. **If failures occur:**
    - Read the error messages carefully

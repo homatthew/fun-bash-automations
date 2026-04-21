@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# slack-notify — post a message to Slack via the webhook stashed in macOS Keychain
+#
+# Secret source:   security find-generic-password -a $USER -s claude-slack-webhook -w
+# Usage:
+#   slack-notify "quick one-line message"
+#   echo "piped text" | slack-notify
+#   slack-notify --keychain-item my-other-webhook "..."
+# Override:
+#   SLACK_WEBHOOK_URL=<url> slack-notify "..."     (skip keychain)
+#   SLACK_NOTIFY_DRY_RUN=1 slack-notify "..."      (print payload, no POST)
+
+set -euo pipefail
+
+KEYCHAIN_ITEM="claude-slack-webhook"
+MESSAGE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --keychain-item)
+            KEYCHAIN_ITEM="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)
+            MESSAGE="$*"; break ;;
+    esac
+done
+
+if [[ -z "$MESSAGE" ]] && [[ ! -t 0 ]]; then
+    MESSAGE="$(cat)"
+fi
+
+if [[ -z "$MESSAGE" ]]; then
+    echo "slack-notify: message is empty" >&2
+    exit 2
+fi
+
+WEBHOOK="${SLACK_WEBHOOK_URL:-}"
+if [[ -z "$WEBHOOK" ]]; then
+    WEBHOOK=$(security find-generic-password -a "${USER:-$(id -un)}" -s "$KEYCHAIN_ITEM" -w 2>/dev/null || true)
+fi
+
+if [[ -z "$WEBHOOK" ]]; then
+    echo "slack-notify: no webhook; set SLACK_WEBHOOK_URL or add keychain item '$KEYCHAIN_ITEM'" >&2
+    echo "  security add-generic-password -U -a \"\$USER\" -s $KEYCHAIN_ITEM -w 'https://hooks.slack.com/...'" >&2
+    exit 3
+fi
+
+PAYLOAD=$(jq -n --arg text "$MESSAGE" '{text: $text}')
+
+if [[ "${SLACK_NOTIFY_DRY_RUN:-0}" == "1" ]]; then
+    printf 'payload=%s\n' "$PAYLOAD"
+    exit 0
+fi
+
+curl -sSf -X POST "$WEBHOOK" \
+    -H 'Content-Type: application/json' \
+    -d "$PAYLOAD" >/dev/null

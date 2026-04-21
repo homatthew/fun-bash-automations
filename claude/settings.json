@@ -114,7 +114,7 @@
       }
     ]
   },
-  "model": "sonnet[1m]",
+  "model": "claude-opus-4-7[1m]",
   "permissions": {
     "allow": [],
     "defaultMode": "plan"

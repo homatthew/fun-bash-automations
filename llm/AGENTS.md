@@ -7,10 +7,34 @@ workflows across Claude, Codex, and future harnesses.
 
 - Keep history linear in `fun-bash-automations` on branch `mh-netflix`.
 - Do not push unless explicitly asked.
+- Explicit finish-workflow invocations such as `/go`, `/commit-push-pr`,
+  `/push-review`, and `/stacked-pr` count as an explicit ask for the
+  corresponding delivery actions.
 - Treat that as a hard workflow rule even if a shell path or harness would
   technically allow `git push`.
 - Use `push-gate` before any push operation that requires approval.
 - Keep shared behavior harness-agnostic in this file and in `llm/skills`.
+
+## Default Execution Standard
+
+- For multi-step work, make or repair a short plan before substantial edits.
+- Break work into small steps with explicit verification, then execute one step
+  at a time.
+- Prefer the strongest realistic verification surface available:
+  - end-to-end CLI or API flow
+  - browser or computer-use flow
+  - focused automated tests
+  - build, typecheck, or lint
+- Do not claim code works unless the relevant verification actually ran.
+- After code works, run a simplification pass:
+  - remove dead code
+  - reduce unnecessary complexity
+  - remove redundant tests and comments
+- Re-run the affected verification after simplifying.
+- For long-running work, keep the plan resumable with per-step verification and
+  clear progress state.
+- Do not present a task as done until you can state what was executed, what was
+  verified, and what remains blocked.
 
 ## Shared Runtime Assumptions
 
