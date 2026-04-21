@@ -42,7 +42,7 @@
       {
         "hooks": [
           {
-            "command": "~/.claude/hooks/notify-slack.sh",
+            "command": "~/.claude/hooks/notify.sh",
             "type": "command"
           }
         ],
@@ -80,17 +80,6 @@
         "matcher": "Bash"
       }
     ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/slack-push-event.sh",
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      }
-    ],
     "SessionStart": [
       {
         "hooks": [
@@ -106,7 +95,7 @@
       {
         "hooks": [
           {
-            "command": "~/.claude/hooks/notify-slack.sh",
+            "command": "~/.claude/hooks/notify.sh",
             "type": "command"
           }
         ],
