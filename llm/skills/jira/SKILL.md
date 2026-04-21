@@ -31,10 +31,10 @@ Uses [Atlassian CLI (acli)](https://developer.atlassian.com/cli/) - the official
 brew install atlassian/acli/acli
 
 # Authenticate via browser OAuth (recommended)
-acli jira auth login --web --site netflix.atlassian.net
+acli jira auth login --web
 
 # Or authenticate via API token (pipe token via stdin)
-echo "YOUR_API_TOKEN" | acli jira auth login --token --user your-email@netflix.com --site netflix.atlassian.net
+echo "YOUR_API_TOKEN" | acli jira auth login --token --email your-email@netflix.com --site netflix.atlassian.net
 ```
 
 ## Quick Reference

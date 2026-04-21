@@ -328,7 +328,7 @@ alias llm-deploy=fba-deploy
 # Generates approval drafts, stamps leases, and wraps agent pushes with
 # required self-assertions.
 push-gate() {
-    local helper="$HOME/repos/fun-bash-automations/claude/hooks/push-gate.sh"
+    local helper="$HOME/repos/fun-bash-automations/llm/hooks/push-gate.sh"
     if [ ! -x "$helper" ]; then
         echo "push-gate helper missing: $helper"
         return 1

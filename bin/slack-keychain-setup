@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# slack-keychain-setup — interactively stash Slack creds/IDs into macOS Keychain.
+#
+# Prompts for each item, reads silently for secrets, never writes them to disk
+# or logs, only calls `security add-generic-password`. Empty input skips.
+# Rerun any time — `-U` updates in place.
+
+set -euo pipefail
+
+[[ "$(uname -s)" == "Darwin" ]] || { echo "macOS only." >&2; exit 1; }
+
+ACCOUNT="${USER:-$(id -un)}"
+
+# name | prompt | secret (1 = silent read)
+ITEMS=(
+  "claude-slack-bot-token|Bot User OAuth Token (xoxb-...)|1"
+  "claude-slack-user-token|User OAuth Token (xoxp-..., optional)|1"
+  "claude-slack-webhook|Incoming Webhook URL (https://hooks.slack.com/..., optional)|1"
+  "claude-slack-channel|Channel ID (C..., e.g. C0AFGU74PTN)|0"
+  "claude-slack-user-id|Your Slack member ID (U..., for @mentions, optional)|0"
+)
+
+save() {
+  local svc="$1" val="$2"
+  security add-generic-password -U -a "$ACCOUNT" -s "$svc" -w "$val"
+  unset val
+}
+
+existing() {
+  security find-generic-password -a "$ACCOUNT" -s "$1" -w 2>/dev/null | head -c 6 || true
+}
+
+printf 'Stashing Slack creds into macOS Keychain as account=%s\n' "$ACCOUNT"
+printf 'Leave blank to skip any item. Existing values shown as first 6 chars.\n\n'
+
+for row in "${ITEMS[@]}"; do
+  IFS='|' read -r svc prompt secret <<<"$row"
+
+  cur="$(existing "$svc")"
+  if [[ -n "$cur" ]]; then
+    printf '  [%s] current: %s… — press Enter to keep, or type new value\n' "$svc" "$cur"
+  else
+    printf '  [%s] not set\n' "$svc"
+  fi
+  printf '  %s: ' "$prompt"
+
+  if [[ "$secret" == "1" ]]; then
+    IFS= read -rs val
+    printf '\n'
+  else
+    IFS= read -r val
+  fi
+
+  if [[ -z "$val" ]]; then
+    printf '    skipped\n\n'
+    continue
+  fi
+
+  len=${#val}
+  if [[ "$secret" == "1" ]]; then
+    prefix="$(printf '%s' "$val" | cut -c1-6)"
+    printf '    received %d chars, starts with "%s…"\n' "$len" "$prefix"
+  else
+    printf '    received %d chars: %s\n' "$len" "$val"
+  fi
+  save "$svc" "$val"
+  unset val len prefix
+  printf '    saved\n\n'
+done
+
+printf 'Done. Verify with:\n'
+printf '  security find-generic-password -a "$USER" -s claude-slack-bot-token -w | head -c 8\n'

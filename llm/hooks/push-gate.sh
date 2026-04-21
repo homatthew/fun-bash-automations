@@ -774,6 +774,11 @@ EOF
 }
 
 pg_cmd_approve() {
+  # Require interactive terminal — prevent agents from self-approving by calling this directly
+  if [[ ! -t 0 ]]; then
+    pg_fail "Blocked: pg approve requires an interactive terminal. Run the approval script printed by pg draft-approve instead."
+    return 1
+  fi
   local draft="" lease_path repo_root approved_anchor existing_created_at existing_created_by
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1000,6 +1005,79 @@ pg_cmd_push() {
   return "$result"
 }
 
+pg_cmd_compose() {
+  local reset="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reset)
+        reset="true"
+        shift
+        ;;
+      *)
+        pg_fail "Unknown compose option: $1"
+        return 1
+        ;;
+    esac
+  done
+
+  local branch repo_name tmpfile helper_path pr_json pr_number intent_body assert_body
+  repo_name=$(pg_repo_name)
+  branch=$(pg_branch_name) || { pg_fail "Not on a branch."; return 1; }
+  tmpfile="/tmp/pg-compose-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch").sh"
+  helper_path=$(pg_helper_path)
+
+  if [[ "$reset" == "true" ]]; then
+    rm -f "$tmpfile"
+  fi
+
+  if [[ ! -f "$tmpfile" ]]; then
+    pr_json=$(pg_find_pr_json "$branch" "$(pg_default_pr_repo 2>/dev/null || true)" 2>/dev/null || echo "{}")
+    pr_number=$(echo "$pr_json" | jq -r '.number // empty')
+
+    if [[ -n "$pr_number" ]]; then
+      intent_body="allow pushes for $branch
+same branch
+same pr #$pr_number
+new commit"
+      assert_body="update pr #$pr_number
+branch $branch
+describe change here
+no rewrite"
+    else
+      intent_body="allow pushes for $branch
+same branch
+bind pr after first push
+new commit"
+      assert_body="push to $branch
+branch $branch
+describe change here
+no rewrite"
+    fi
+
+    cat >"$tmpfile" <<SH
+#!/bin/bash
+# Edit the --intent and --assert-flow strings below. Save + quit to run draft-approve.
+# Empty-save to cancel. File persists — re-run with: pg compose (or: bash $tmpfile)
+# Regenerate template with: pg compose --reset
+
+"$helper_path" draft-approve \\
+  --intent '$intent_body' \\
+  --assert-flow '$assert_body'
+SH
+    chmod +x "$tmpfile"
+  fi
+
+  "${EDITOR:-vi}" "$tmpfile"
+
+  if [[ ! -s "$tmpfile" ]]; then
+    echo "Canceled (empty file)"
+    rm -f "$tmpfile"
+    return 1
+  fi
+
+  bash "$tmpfile"
+}
+
 pg_main() {
   local command="${1:-draft-approve}"
   if [[ $# -gt 0 ]]; then
@@ -1014,6 +1092,9 @@ pg_main() {
   case "$command" in
     draft-approve)
       pg_cmd_draft_approve "$@"
+      ;;
+    compose)
+      pg_cmd_compose "$@"
       ;;
     approve)
       pg_cmd_approve "$@"
@@ -1062,6 +1143,7 @@ pg_main() {
       cat <<'EOF'
 Usage:
   pg                     Generate approval draft for current branch
+  pg compose [--reset]   Open $EDITOR with a draft-approve template, run on save
   pg draft-approve       Generate approval draft
   pg draft-approve --pr-repo HOST/OWNER/REPO
   pg approve --draft F   Approve durable lease from draft file
