@@ -29,7 +29,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.codex/hooks/notify.sh"
+            "command": "~/.codex/hooks/notify-slack.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/slack-push-event.sh"
           }
         ]
       }
