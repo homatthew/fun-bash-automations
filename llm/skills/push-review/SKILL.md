@@ -219,6 +219,12 @@ git diff --stat <remote-tracking>..<branch>
 
 ### 5b. Request push-gate approval
 
+> **Do NOT bypass push-gate.** Never suggest `PG_SKIP_EDIT=1`,
+> `PG_ALLOW_DESCENDANT=1`, or piping `yes` into the approval prompt. The
+> editor review is the policy. If blocked with no interactive terminal here,
+> stop and wait for the user. See
+> [`llm/command-guard-policy.md` → Push-gate bypass prohibition](../../command-guard-policy.md).
+
 Include the `cd` so the draft is generated from the correct repo/worktree.
 
 Tell the user:

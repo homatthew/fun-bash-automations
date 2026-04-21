@@ -43,6 +43,33 @@ Codex, and future harnesses.
 - Require a fresh self-assertion via `pg push --assert-flow ...` for each agent
   push, even when the durable lease is still valid
 
+### Push-gate bypass prohibition
+
+The `push-gate` approval flow is load-bearing: `pg` generates a draft, the
+user edits the draft in `$EDITOR` (scope, caps, paths, subjects), saves to
+activate the lease, then `pg push --assert-flow ...` performs the push. The
+edit-before-approve step is the policy; skipping it turns `pg` into a rubber
+stamp.
+
+Agents MUST NOT suggest, run, or document any of the following as a
+workaround when a push is blocked:
+
+- `PG_SKIP_EDIT=1` (bypasses the editor review step)
+- `PG_ALLOW_DESCENDANT=1` (overrides lease-anchor drift)
+- Piping `yes`, `echo y`, or any non-interactive confirmation into the
+  approval prompt
+- Manually editing `~/.push-gate/` lease state or `/tmp/pg-approve-*.json`
+  outside the intended editor flow
+- Calling `git push` after the hook blocks, expecting the bypass envs above
+  to unblock it
+
+When push-gate blocks and no interactive terminal is available, the correct
+response is: stop, tell the user to run `pg compose` (or
+`bash /tmp/pg-approve-<repo>-<branch>.sh` without env overrides) in their own
+terminal, and wait. The `--assert-flow TEXT` argument on `pg push` is the
+semantic-scope assertion checked against the approved template — it is NOT a
+bypass.
+
 ### Git config and bypasses
 
 - Block `git config` mutations from agents

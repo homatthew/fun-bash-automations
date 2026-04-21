@@ -39,6 +39,14 @@ Create a concise commit message based on staged changes. Follow repo conventions
 
 **Before pushing, generate a durable `push-gate` draft and ask the user to run the generated approval script.** The push guard hook blocks pushes until the branch has a matching durable lease, and the actual push must go through `pg push --assert-flow ...`.
 
+> **Do NOT bypass push-gate.** Never suggest `PG_SKIP_EDIT=1`,
+> `PG_ALLOW_DESCENDANT=1`, `yes y | bash /tmp/pg-approve-*.sh`, or any other
+> mechanism that skips the editor review step. The edit-before-approve flow
+> is the policy, not a convenience. If the push is blocked and no
+> interactive terminal is available here, stop and ask the user to run
+> `pg compose` in their own terminal. See
+> [`llm/command-guard-policy.md` → Push-gate bypass prohibition](../../command-guard-policy.md).
+
 `pg draft-approve` auto-detects two topology defaults:
 - If an `upstream` remote exists, PR lookup/binding defaults to the upstream repo.
 - Push remote stays sticky for tracked branches; otherwise it prefers `upstream` only when the current viewer has write access there, and falls back to `origin`.
