@@ -1208,6 +1208,56 @@ pg_cmd_list() {
   done
 }
 
+pg_cmd_check() {
+  local branch="${1:-}" branch_ref lease_path lease_json scope base_ref
+  local changed count added subjects validation
+  branch_ref=$(pg_branch_ref "$branch")
+  lease_path=$(pg_lease_path_for_ref "$branch_ref")
+  if [[ ! -f "$lease_path" ]]; then
+    jq -n --arg br "$(pg_branch_display "$branch_ref")" \
+      '{allowed:false, reason:("No lease for " + $br + ". Run `pg` to generate one.")}'
+    return 0
+  fi
+  lease_json=$(cat "$lease_path")
+  validation=$(pg_validate_scope "$lease_json")
+
+  scope=$(echo "$lease_json" | jq -c '.approved_scope // null')
+  base_ref=$(echo "$scope" | jq -r '.base_ref // empty')
+
+  if [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    changed=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null \
+      | jq -Rsc 'split("\n") | map(select(length > 0))')
+    count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+    added=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '^[0-9]+')
+    [[ -z "$added" ]] && added=0
+    subjects=$(git log --format='%s' "$base_ref"..HEAD 2>/dev/null \
+      | jq -Rsc 'split("\n") | map(select(length > 0))')
+  else
+    changed='[]'; count=0; added=0; subjects='[]'
+  fi
+
+  echo "$validation" | jq \
+    --argjson scope "${scope:-null}" \
+    --argjson changed "${changed:-[]}" \
+    --argjson subjects "${subjects:-[]}" \
+    --arg count "$count" \
+    --arg added "$added" \
+    --arg anchor "$(echo "$lease_json" | jq -r '.approved_anchor // empty')" \
+    --arg head "$(git rev-parse HEAD 2>/dev/null || echo '')" \
+    '. + {
+      approved_scope: $scope,
+      current: {
+        head: $head,
+        approved_anchor: $anchor,
+        anchor_matches_head: ($head == $anchor),
+        commits: ($count | tonumber),
+        added_lines: ($added | tonumber),
+        changed_files: $changed,
+        subjects: $subjects
+      }
+    }'
+}
+
 pg_cmd_revoke() {
   local branch="${1:-}" branch_ref lease_path pending_path
   branch_ref=$(pg_branch_ref "$branch")
@@ -1479,6 +1529,9 @@ pg_main() {
     list)
       pg_cmd_list "$@"
       ;;
+    check)
+      pg_cmd_check "$@"
+      ;;
     revoke)
       pg_cmd_revoke "$@"
       ;;
@@ -1516,6 +1569,9 @@ Usage:
   pg push --assert-flow TEXT [--remote origin] [--force-with-lease] [--set-upstream]
   pg push --branch TARGET [--source-ref HEAD|local-branch] --assert-flow TEXT
   pg status | show [branch] | list | revoke [branch] | doctor | bind-pr --auto [--repo HOST/OWNER/REPO]
+  pg check [branch]      Machine-readable JSON: current HEAD vs approved_scope
+                         Output: {allowed, reason?, approved_scope, current:{head,
+                         commits, added_lines, changed_files, subjects, approved_anchor}}
 EOF
       ;;
     *)

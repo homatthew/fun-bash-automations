@@ -14,8 +14,8 @@ workflows across Claude, Codex, and future harnesses.
   technically allow `git push`.
 - Use `push-gate` before any push operation that requires approval.
 - **Never bypass push-gate.** Do not suggest, run, or document
-  `PG_SKIP_EDIT=1`, `PG_ALLOW_DESCENDANT=1`, or any pattern that pipes
-  automated confirmations into the approval prompt. The editor review step
+  `PG_SKIP_EDIT=1`, `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`, or any
+  pattern that pipes automated confirmations into the approval prompt. The editor review step
   is the policy. When push-gate blocks and no interactive terminal is
   available, stop and ask the user to run `pg compose` in their own terminal.
   Details: `llm/command-guard-policy.md` → Push-gate bypass prohibition.
