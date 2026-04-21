@@ -317,7 +317,15 @@ pg_render_lease_summary() {
     (.user_intent // ""),
     "",
     "Agent says push is:",
-    (.agent_assertion_template // "")
+    (.agent_assertion_template // ""),
+    "",
+    (if (.approved_scope // null) == null then "Approved scope: (none — single-push anchor-exact lease)" else
+      "Approved scope:\n  base_ref:        " + (.approved_scope.base_ref // "") +
+      "\n  paths:           " + ((.approved_scope.paths // []) | join(", ")) +
+      "\n  subjects:        " + ((.approved_scope.subjects // []) | join(", ")) +
+      "\n  max_commits:     " + ((.approved_scope.max_commits // 0) | tostring) +
+      "\n  max_added_lines: " + ((.approved_scope.max_added_lines // 0) | tostring)
+    end)
   ' "$file"
 }
 
@@ -455,6 +463,129 @@ pg_validate_pr_binding() {
   fi
 }
 
+# Auto-detect a "scope" fingerprint from the current branch state relative to
+# the base ref. Produces a JSON object the user can edit at approval time.
+#   paths:             changed file paths as globs (literal path = glob)
+#   subjects:          keyword hints from commit subjects (lowercased, tokenized)
+#   max_commits:       current commit count + buffer
+#   max_added_lines:   current added-line count * 1.5 + 200
+# Emits "null" if no base ref is available.
+pg_detect_scope() {
+  local base_ref paths subjects count added buffer_commits buffer_lines
+  base_ref=$(pg_default_base_ref_snapshot)
+  if [[ -z "$base_ref" ]] || ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    echo "null"
+    return 0
+  fi
+  paths=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null | jq -Rsc 'split("\n") | map(select(length > 0))')
+  subjects=$(git log --format='%s' "$base_ref"..HEAD 2>/dev/null \
+    | tr 'A-Z' 'a-z' \
+    | tr -c 'a-z0-9' '\n' \
+    | awk 'length($0) >= 3' \
+    | grep -vE '^(the|and|for|fix|add|use|new|ref|feat|chore|docs|test|into|from|with|this|that|when|where|why|how|what|also|not|but|all|any|can|did|does|has|have|had|was|were|been|being|make|made|set|get|run|put)$' \
+    | sort -u \
+    | jq -Rsc 'split("\n") | map(select(length > 0))')
+  count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+  added=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '^[0-9]+' || echo 0)
+  [[ -z "$added" ]] && added=0
+  buffer_commits=$(( count + 3 ))
+  buffer_lines=$(( added * 3 / 2 + 200 ))
+  jq -n \
+    --arg base "$base_ref" \
+    --argjson paths "${paths:-[]}" \
+    --argjson subjects "${subjects:-[]}" \
+    --argjson max_commits "$buffer_commits" \
+    --argjson max_added_lines "$buffer_lines" \
+    '{base_ref: $base, paths: $paths, subjects: $subjects, max_commits: $max_commits, max_added_lines: $max_added_lines}'
+}
+
+# Validate that the current HEAD diff against lease's base_ref stays within
+# the approved scope. Emits {allowed, reason}.
+pg_validate_scope() {
+  local lease_json="$1"
+  local scope base_ref paths subjects max_commits max_added
+  local changed_files count added
+
+  scope=$(echo "$lease_json" | jq -c '.approved_scope // null')
+  if [[ "$scope" == "null" ]]; then
+    jq -n '{allowed:true}'
+    return 0
+  fi
+
+  base_ref=$(echo "$scope" | jq -r '.base_ref // empty')
+  if [[ -z "$base_ref" ]] || ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    jq -n '{allowed:true, note: "scope base_ref unavailable, skipping scope check"}'
+    return 0
+  fi
+
+  # Paths allowlist
+  changed_files=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null)
+  local allow_paths_json allow_paths_count
+  allow_paths_json=$(echo "$scope" | jq -c '.paths // []')
+  allow_paths_count=$(echo "$allow_paths_json" | jq 'length')
+  if [[ "$allow_paths_count" -gt 0 ]]; then
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      local ok="false" pat
+      while IFS= read -r pat; do
+        [[ -z "$pat" ]] && continue
+        # shellcheck disable=SC2053
+        if [[ "$f" == $pat ]] || [[ "$f" == "$pat" ]]; then
+          ok="true"
+          break
+        fi
+      done < <(echo "$allow_paths_json" | jq -r '.[]')
+      if [[ "$ok" != "true" ]]; then
+        jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside approved_scope.paths. Re-run `pg` to re-approve, or set PG_SCOPE_OVERRIDE=1 for a one-time bypass.")}'
+        return 0
+      fi
+    done <<<"$changed_files"
+  fi
+
+  # Commit cap
+  count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+  max_commits=$(echo "$scope" | jq -r '.max_commits // 0')
+  if [[ "$max_commits" -gt 0 && "$count" -gt "$max_commits" ]]; then
+    jq -n --arg count "$count" --arg cap "$max_commits" '{allowed:false, reason:("Blocked: \($count) commits since base exceeds approved_scope.max_commits (\($cap)). Re-run `pg`.")}'
+    return 0
+  fi
+
+  # Added-line cap
+  added=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '^[0-9]+')
+  [[ -z "$added" ]] && added=0
+  max_added=$(echo "$scope" | jq -r '.max_added_lines // 0')
+  if [[ "$max_added" -gt 0 && "$added" -gt "$max_added" ]]; then
+    jq -n --arg a "$added" --arg cap "$max_added" '{allowed:false, reason:("Blocked: \($a) added lines since base exceeds approved_scope.max_added_lines (\($cap)). Re-run `pg`.")}'
+    return 0
+  fi
+
+  # Subject keyword match (every new commit must hit ≥1 approved keyword)
+  local subj_count subj_list
+  subj_list=$(echo "$scope" | jq -r '.subjects // [] | .[]')
+  subj_count=$(echo "$scope" | jq -r '.subjects // [] | length')
+  if [[ "$subj_count" -gt 0 ]]; then
+    local subjects_lc
+    subjects_lc=$(git log --format='%s' "$base_ref"..HEAD 2>/dev/null | tr 'A-Z' 'a-z')
+    while IFS= read -r s; do
+      [[ -z "$s" ]] && continue
+      local hit="false" kw
+      while IFS= read -r kw; do
+        [[ -z "$kw" ]] && continue
+        if [[ "$s" == *"$kw"* ]]; then
+          hit="true"
+          break
+        fi
+      done <<<"$subj_list"
+      if [[ "$hit" != "true" ]]; then
+        jq -n --arg s "$s" '{allowed:false, reason:("Blocked: commit subject \"\($s)\" does not match any keyword in approved_scope.subjects. Re-run `pg` if this is intended scope expansion.")}'
+        return 0
+      fi
+    done <<<"$subjects_lc"
+  fi
+
+  jq -n '{allowed:true}'
+}
+
 pg_validate_push_guard() {
   local command="$1"
   local parsed is_push remote source_ref target_branch force_with_lease current_branch lease_branch branch_ref current_head
@@ -521,9 +652,33 @@ pg_validate_push_guard() {
     jq -n --arg reason "Blocked: branch history was rewritten after lease anchor $approved_anchor. Create a new lease before pushing." '{allowed:false, reason:$reason}'
     return 0
   fi
+  # Scope-aware anchor check:
+  #   - If lease has approved_scope (semantic approval), accept any descendant
+  #     as long as pg_validate_scope passes below.
+  #   - If lease has NO approved_scope (back-compat / one-shot), require HEAD
+  #     to match approved_anchor exactly — the user approved THESE commits.
+  #   - PG_ALLOW_DESCENDANT=1 bypasses the anchor-exact rule for one push.
+  local has_scope
+  has_scope=$(echo "$lease_json" | jq -r '.approved_scope // empty | if . == null or . == {} then "" else "1" end')
+  if [[ -z "$has_scope" && "${PG_ALLOW_DESCENDANT:-0}" != "1" && "$current_head" != "$approved_anchor" ]]; then
+    jq -n --arg reason "Blocked: new commits landed after lease was approved (lease anchor $approved_anchor, HEAD $current_head). Run \`pg\` to re-approve with a semantic scope, or override once with PG_ALLOW_DESCENDANT=1 pg push ..." '{allowed:false, reason:$reason}'
+    return 0
+  fi
   if [[ "$force_with_lease" == "true" && "$current_head" != "$approved_anchor" ]]; then
     jq -n --arg reason "Blocked: --force-with-lease requires a lease approved at the rewritten HEAD. Create a new lease before pushing." '{allowed:false, reason:$reason}'
     return 0
+  fi
+
+  # Semantic scope check — applies only when lease has approved_scope.
+  if [[ -n "$has_scope" && "${PG_SCOPE_OVERRIDE:-0}" != "1" ]]; then
+    local scope_result scope_allowed scope_reason
+    scope_result=$(pg_validate_scope "$lease_json")
+    scope_allowed=$(echo "$scope_result" | jq -r '.allowed')
+    if [[ "$scope_allowed" != "true" ]]; then
+      scope_reason=$(echo "$scope_result" | jq -r '.reason')
+      jq -n --arg reason "$scope_reason" '{allowed:false, reason:$reason}'
+      return 0
+    fi
   fi
 
   local pr_reason=""
@@ -640,7 +795,8 @@ pg_cmd_preview_draft() {
 
 pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
-  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path
+  local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
+  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path scope_json
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --intent)
@@ -666,6 +822,26 @@ pg_cmd_draft_approve() {
       --pr-repo)
         pr_repo="$2"
         shift 2
+        ;;
+      --approved-paths)
+        approved_paths="$2"
+        shift 2
+        ;;
+      --approved-subjects)
+        approved_subjects="$2"
+        shift 2
+        ;;
+      --max-commits)
+        max_commits="$2"
+        shift 2
+        ;;
+      --max-added-lines)
+        max_added_lines="$2"
+        shift 2
+        ;;
+      --no-scope)
+        no_scope="true"
+        shift
         ;;
       *)
         pg_fail "Unknown draft-approve option: $1"
@@ -703,12 +879,34 @@ pg_cmd_draft_approve() {
   [[ -n "$intent" ]] || intent=$(pg_default_user_intent "$branch_name" "$pr_number")
   [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number")
 
+  # Build approved_scope. Auto-detect then let explicit flags override.
+  # --no-scope disables semantic approval (falls back to single-push anchor-exact).
+  if [[ "$no_scope" == "true" ]]; then
+    scope_json="null"
+  else
+    scope_json=$(pg_detect_scope)
+    if [[ "$scope_json" != "null" ]]; then
+      if [[ -n "$approved_paths" ]]; then
+        scope_json=$(echo "$scope_json" | jq --arg raw "$approved_paths" '.paths = ($raw | split("\n") | map(select(length > 0)))')
+      fi
+      if [[ -n "$approved_subjects" ]]; then
+        scope_json=$(echo "$scope_json" | jq --arg raw "$approved_subjects" '.subjects = ($raw | split("\n") | map(select(length > 0) | ascii_downcase))')
+      fi
+      if [[ -n "$max_commits" ]]; then
+        scope_json=$(echo "$scope_json" | jq --argjson n "$max_commits" '.max_commits = $n')
+      fi
+      if [[ -n "$max_added_lines" ]]; then
+        scope_json=$(echo "$scope_json" | jq --argjson n "$max_added_lines" '.max_added_lines = $n')
+      fi
+    fi
+  fi
+
   draft_file="/tmp/pg-approve-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch_name").json"
   script_file="/tmp/pg-approve-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch_name").sh"
   script_path=$(pg_helper_path)
 
   jq -n \
-    --arg schema_version "1" \
+    --arg schema_version "2" \
     --arg repo_name "$repo_name" \
     --arg repo_root "$repo_root" \
     --arg common_dir "$common_dir" \
@@ -723,6 +921,7 @@ pg_cmd_draft_approve() {
     --arg base_ref_snapshot "$base_ref" \
     --arg user_intent "$intent" \
     --arg agent_assertion_template "$assert_flow" \
+    --argjson approved_scope "$scope_json" \
     --arg created_by "${USER:-unknown}" \
     --arg created_at "$(pg_now_utc)" \
     '{
@@ -741,6 +940,7 @@ pg_cmd_draft_approve() {
       base_ref_snapshot: (if $base_ref_snapshot == "" then null else $base_ref_snapshot end),
       user_intent: $user_intent,
       agent_assertion_template: $agent_assertion_template,
+      approved_scope: $approved_scope,
       created_by: $created_by,
       created_at: $created_at,
       status: "active"
@@ -758,7 +958,7 @@ HELPER="$script_path"
 # PG_SKIP_EDIT=1 (useful when running the script non-interactively).
 if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
   editor="\${EDITOR:-vi}"
-  echo "Opening \$editor on \$DRAFT_FILE — edit .user_intent / .agent_assertion_template, save + quit to continue. :cq to abort."
+  echo "Opening \$editor on \$DRAFT_FILE — edit .user_intent, .agent_assertion_template, and .approved_scope (paths / subjects / max_commits / max_added_lines). Save + quit to continue. :cq to abort."
   cp "\$DRAFT_FILE" "\$DRAFT_FILE.bak"
   if ! "\$editor" "\$DRAFT_FILE"; then
     echo "Editor exited non-zero — aborting."
@@ -791,6 +991,13 @@ EOF
 
   echo "Approval script: $script_file"
   echo "Draft file: $draft_file"
+
+  # Auto-run the approval script unless explicitly suppressed. This gives the
+  # user a single `pg` command that opens vim on the draft (intent + assert +
+  # scope) then prompts y/N.
+  if [[ "${PG_AUTO_RUN_APPROVAL:-1}" == "1" ]] && [[ -t 0 || -t 1 ]]; then
+    bash "$script_file"
+  fi
 }
 
 pg_cmd_approve() {
@@ -1061,6 +1268,24 @@ pg_cmd_push() {
   remote="${remote:-$(echo "$lease_json" | jq -r '.remote')}"
   pending_path=$(pg_pending_path_for_ref "$branch_ref")
 
+  # Enforce semantic scope directly here so pg push is strict regardless of
+  # which harness-level hook ran. PG_SCOPE_OVERRIDE=1 bypasses (one-shot).
+  local has_scope current_head approved_anchor
+  has_scope=$(echo "$lease_json" | jq -r '.approved_scope // empty | if . == null or . == {} then "" else "1" end')
+  current_head=$(git rev-parse HEAD 2>/dev/null || true)
+  approved_anchor=$(echo "$lease_json" | jq -r '.approved_anchor')
+  if [[ -n "$has_scope" && "${PG_SCOPE_OVERRIDE:-0}" != "1" ]]; then
+    local scope_result scope_allowed scope_reason
+    scope_result=$(pg_validate_scope "$lease_json")
+    scope_allowed=$(echo "$scope_result" | jq -r '.allowed')
+    if [[ "$scope_allowed" != "true" ]]; then
+      scope_reason=$(echo "$scope_result" | jq -r '.reason')
+      pg_fail "$scope_reason"
+    fi
+  elif [[ -z "$has_scope" && "${PG_ALLOW_DESCENDANT:-0}" != "1" && "$current_head" != "$approved_anchor" ]]; then
+    pg_fail "Blocked: new commits landed after lease was approved (lease anchor $approved_anchor, HEAD $current_head). Run \`pg\` to re-approve with a semantic scope."
+  fi
+
   pg_write_pending_assertion "$remote" "$branch_ref" "$assert_flow" "$lease_json"
   cleanup_pending() {
     rm -f "$pending_path"
@@ -1163,10 +1388,18 @@ SH
     return 1
   fi
 
-  bash "$tmpfile"
+  # Compose runs draft-approve, which now auto-runs the approval script
+  # (vim on JSON → preview → y/N → approve). No further chaining needed.
+  if ! bash "$tmpfile"; then
+    echo "draft-approve failed — leaving $tmpfile for re-edit."
+    return 1
+  fi
 }
 
 pg_main() {
+  # Bare `pg` → draft-approve with auto-run of the approval script. That
+  # opens vim on the draft JSON (intent + assert + scope), preview, y/N,
+  # approve. One vim session, no copy-paste.
   local command="${1:-draft-approve}"
   if [[ $# -gt 0 ]]; then
     shift
