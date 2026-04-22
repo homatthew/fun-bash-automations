@@ -99,36 +99,73 @@ current branch state) and approve again.
 
 ## Step 6 — Checking for existing approvals
 
-Before asking the user to approve, check whether a lease already
-exists. **The durable lease file is the source of truth, not the
-sentinel.** Check both in order:
+**Start with the cross-repo index, not the sentinel.** Check in this
+order:
 
-1. **Lease file (authoritative)** — lives in the repo's `.git/push-gate/`:
+1. **Central lease DB (cross-repo)** — SQLite at `~/.push-gate/leases.db`.
+   Cheap and covers every repo without guessing paths:
 
    ```bash
-   lease=$(git rev-parse --git-common-dir)/push-gate/leases/refs/heads/<branch>.json
+   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh leases
+   # or filter:
+   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh leases --repo <repo_root>
+   # or JSON for programmatic use:
+   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh leases --json
+   ```
+
+   Shows `repo | branch | status | pr | updated` for every lease.
+   If a row exists with `status=active` for your (repo, branch), proceed
+   to step 2.
+
+2. **Durable lease file (authoritative)** — always under the repo's
+   `.git/push-gate/leases/refs/heads/<branch>.json`:
+
+   ```bash
+   lease=$(git -C <repo_root> rev-parse --git-common-dir)/push-gate/leases/refs/heads/<branch>.json
    test -f "$lease" && jq '{status, approved_anchor, pr_number, updated_at, approved_scope}' "$lease"
    ```
 
-   If `status == "active"` and the file exists, a lease is live. Validate
-   it with:
+   Validate with `pg check`:
 
    ```bash
-   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh check <branch>
+   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh -C <repo_root> check <branch>
    ```
 
-   If `allowed: true`, you can proceed with `pg push …`. If
-   `allowed: false`, read the `reason` — it tells you what to do (scope
-   drift, anchor mismatch, missing pending-assertion, etc.).
+   If `allowed: true`, proceed with `pg -C <repo_root> push …`. If
+   `allowed: false`, read `reason` — scope drift, anchor mismatch,
+   missing pending-assertion, etc.
 
-2. **Sentinel file (hint only)** — `/tmp/pg-approved/<repo>__<branch>`
-   exists only for approvals created after the notify-approved change
+3. **Sentinel file (hint only)** — `/tmp/pg-approved/<repo>__<branch>`
+   only exists for approvals created after the notify-approved change
    landed. **Missing sentinel does NOT mean missing lease** — older
-   leases won't have one. Do not stop on this alone.
+   leases never had one. Do not stop on this signal alone.
 
 Do **not** rely on `pg` being on PATH to check lease state. The hook
 script is always at `~/repos/fun-bash-automations/llm/hooks/push-gate.sh`
 and can be invoked directly via `bash`.
+
+## Step 7 — Asking the user to approve (one-line command)
+
+When approval is genuinely needed, give the user a single paste-and-run
+command using `-C` — no `cd &&` chain, no copy-paste dance. Pick the
+shortest viable form in this priority:
+
+1. **`pgr <shortname>`** — if a `pgr` alias is available (defined in
+   `zsh/personal.zsh`), this is the lightest. User types
+   `pgr skm` (for service-capacity-modeling), fzf resolves, pg runs.
+   You don't need to know if pgr is loaded in their shell — just suggest
+   it and fall back gracefully.
+
+2. **`pg -C <absolute-path>`** — universal. Works from anywhere, no
+   shell state required:
+
+   ```
+   pg -C /Users/matthewho/repos/service-capacity-modeling/.claude/worktrees/new-gpu-instances
+   ```
+
+   Always use the absolute path; tilde may not expand in all contexts.
+
+Never instruct the user to `cd` first. That adds a step for no gain.
 
 ## Common mistakes to avoid
 

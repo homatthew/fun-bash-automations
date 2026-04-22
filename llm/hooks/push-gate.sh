@@ -17,6 +17,142 @@ pg_helper_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
+# ------------------------------------------------------------------------
+# Central lease index (SQLite)
+# ------------------------------------------------------------------------
+# Each repo's .git/push-gate/leases/... JSON remains the source of truth.
+# This DB mirrors them across the user's machine so sessions in one repo
+# can discover / verify leases in another without guessing paths.
+
+pg_db_path() {
+  printf '%s\n' "${PG_DB:-$HOME/.push-gate/leases.db}"
+}
+
+pg_db_init() {
+  local db
+  db=$(pg_db_path)
+  mkdir -p "$(dirname "$db")" 2>/dev/null || return 1
+  sqlite3 "$db" <<'SQL' 2>/dev/null
+CREATE TABLE IF NOT EXISTS leases (
+  repo_root TEXT NOT NULL,
+  branch_ref TEXT NOT NULL,
+  repo_name TEXT NOT NULL,
+  branch_name TEXT NOT NULL,
+  remote TEXT,
+  pr_number INTEGER,
+  pr_url TEXT,
+  approved_anchor TEXT NOT NULL,
+  base_ref TEXT,
+  status TEXT NOT NULL,
+  user_intent TEXT,
+  agent_assertion_template TEXT,
+  approved_scope_json TEXT,
+  lease_file_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_root, branch_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_leases_status ON leases(status);
+CREATE INDEX IF NOT EXISTS idx_leases_repo_name ON leases(repo_name);
+SQL
+}
+
+# Write or refresh a lease row from a lease JSON file.
+# Fails silently — DB is an index, not authoritative.
+pg_db_upsert_lease() {
+  local lease_path="$1"
+  [[ -f "$lease_path" ]] || return 0
+  pg_db_init || return 0
+  local db
+  db=$(pg_db_path)
+
+  # Extract into shell vars via jq (each value null-safe).
+  local repo_root branch_ref repo_name branch_name remote pr_number pr_url
+  local anchor base_ref status intent assert scope created_at updated_at
+  repo_root=$(jq -r '.repo_root // ""' "$lease_path")
+  branch_ref=$(jq -r '.branch_ref // ""' "$lease_path")
+  repo_name=$(jq -r '.repo_name // ""' "$lease_path")
+  branch_name=$(jq -r '.branch_name // ""' "$lease_path")
+  remote=$(jq -r '.remote // ""' "$lease_path")
+  pr_number=$(jq -r '.pr_number // ""' "$lease_path")
+  pr_url=$(jq -r '.pr_url // ""' "$lease_path")
+  anchor=$(jq -r '.approved_anchor // ""' "$lease_path")
+  base_ref=$(jq -r '.base_ref_snapshot // ""' "$lease_path")
+  status=$(jq -r '.status // "active"' "$lease_path")
+  intent=$(jq -r '.user_intent // ""' "$lease_path")
+  assert=$(jq -r '.agent_assertion_template // ""' "$lease_path")
+  scope=$(jq -c '.approved_scope // null' "$lease_path")
+  created_at=$(jq -r '.created_at // ""' "$lease_path")
+  updated_at=$(jq -r '.updated_at // .created_at // ""' "$lease_path")
+
+  [[ -n "$repo_root" && -n "$branch_ref" ]] || return 0
+
+  sqlite3 "$db" <<SQL 2>/dev/null
+INSERT INTO leases (
+  repo_root, branch_ref, repo_name, branch_name, remote,
+  pr_number, pr_url, approved_anchor, base_ref, status,
+  user_intent, agent_assertion_template, approved_scope_json,
+  lease_file_path, created_at, updated_at
+) VALUES (
+  $(pg_sql_quote "$repo_root"), $(pg_sql_quote "$branch_ref"),
+  $(pg_sql_quote "$repo_name"), $(pg_sql_quote "$branch_name"),
+  $(pg_sql_quote "$remote"),
+  $(pg_sql_int_or_null "$pr_number"),
+  $(pg_sql_quote "$pr_url"),
+  $(pg_sql_quote "$anchor"), $(pg_sql_quote "$base_ref"),
+  $(pg_sql_quote "$status"),
+  $(pg_sql_quote "$intent"), $(pg_sql_quote "$assert"),
+  $(pg_sql_quote "$scope"),
+  $(pg_sql_quote "$lease_path"),
+  $(pg_sql_quote "$created_at"), $(pg_sql_quote "$updated_at")
+)
+ON CONFLICT(repo_root, branch_ref) DO UPDATE SET
+  repo_name = excluded.repo_name,
+  branch_name = excluded.branch_name,
+  remote = excluded.remote,
+  pr_number = excluded.pr_number,
+  pr_url = excluded.pr_url,
+  approved_anchor = excluded.approved_anchor,
+  base_ref = excluded.base_ref,
+  status = excluded.status,
+  user_intent = excluded.user_intent,
+  agent_assertion_template = excluded.agent_assertion_template,
+  approved_scope_json = excluded.approved_scope_json,
+  lease_file_path = excluded.lease_file_path,
+  updated_at = excluded.updated_at;
+SQL
+}
+
+pg_db_set_status() {
+  local repo_root="$1" branch_ref="$2" new_status="$3"
+  pg_db_init || return 0
+  local db now
+  db=$(pg_db_path)
+  now=$(pg_now_utc)
+  sqlite3 "$db" <<SQL 2>/dev/null
+UPDATE leases SET status = $(pg_sql_quote "$new_status"),
+                  updated_at = $(pg_sql_quote "$now")
+WHERE repo_root = $(pg_sql_quote "$repo_root")
+  AND branch_ref = $(pg_sql_quote "$branch_ref");
+SQL
+}
+
+# Shell-quote a string for SQL: escape single quotes and wrap in quotes.
+pg_sql_quote() {
+  local s="$1"
+  s="${s//\'/\'\'}"
+  printf "'%s'" "$s"
+}
+
+pg_sql_int_or_null() {
+  local s="$1"
+  if [[ "$s" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$s"
+  else
+    printf 'NULL'
+  fi
+}
+
 pg_helper_path() {
   echo "$(pg_helper_dir)/$(basename "${BASH_SOURCE[0]}")"
 }
@@ -1082,6 +1218,7 @@ pg_cmd_approve() {
     "$draft" >"$lease_path"
 
   echo "Lease approved: $lease_path"
+  pg_db_upsert_lease "$lease_path" || true
   pg_notify_approved "$draft" "$lease_path" || true
 }
 
@@ -1265,6 +1402,82 @@ pg_cmd_revoke() {
   pending_path=$(pg_pending_path_for_ref "$branch_ref")
   rm -f "$lease_path" "$pending_path"
   echo "Revoked lease for $(pg_branch_display "$branch_ref")"
+}
+
+pg_cmd_leases_reindex() {
+  # Scan ~/repos/*/.git/push-gate/leases/... and import every lease file
+  # into the DB. Idempotent — upsert by (repo_root, branch_ref).
+  pg_db_init || { echo "failed to init DB"; return 1; }
+  local found=0
+  local root
+  for root in "$HOME"/repos/*/; do
+    root="${root%/}"
+    [[ -d "$root/.git" || -f "$root/.git" ]] || continue
+    local common
+    common=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || continue
+    case "$common" in /*) ;; *) common="$root/$common" ;; esac
+    local leases_dir="$common/push-gate/leases"
+    [[ -d "$leases_dir" ]] || continue
+    while IFS= read -r f; do
+      pg_db_upsert_lease "$f" && found=$((found + 1))
+    done < <(find "$leases_dir" -name '*.json' -type f 2>/dev/null)
+  done
+  echo "Reindexed $found lease(s) into $(pg_db_path)"
+}
+
+pg_cmd_leases() {
+  if [[ "${1:-}" == "reindex" ]]; then
+    shift
+    pg_cmd_leases_reindex "$@"
+    return $?
+  fi
+  local show_all="false" repo_filter="" format="table"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all) show_all="true"; shift ;;
+      --repo) repo_filter="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *)     pg_fail "Unknown leases option: $1"; return 1 ;;
+    esac
+  done
+
+  pg_db_init || {
+    echo "(no lease DB at $(pg_db_path))"
+    return 0
+  }
+  local db where select_cols
+  db=$(pg_db_path)
+
+  if [[ "$show_all" == "true" ]]; then
+    where="1=1"
+  else
+    where="status = 'active'"
+  fi
+  if [[ -n "$repo_filter" ]]; then
+    where="$where AND repo_root = $(pg_sql_quote "$repo_filter")"
+  fi
+
+  if [[ "$format" == "json" ]]; then
+    sqlite3 "$db" -json "SELECT repo_name, branch_name, status, pr_number, approved_anchor, updated_at, repo_root FROM leases WHERE $where ORDER BY updated_at DESC;" 2>/dev/null \
+      | jq .
+    return 0
+  fi
+
+  # Human-readable table via sqlite3 column mode.
+  local rows
+  rows=$(sqlite3 "$db" -column -header \
+    "SELECT substr(repo_name, 1, 28) AS repo,
+            substr(branch_name, 1, 32) AS branch,
+            status,
+            COALESCE('#' || pr_number, '-') AS pr,
+            substr(updated_at, 1, 19) AS updated
+     FROM leases WHERE $where
+     ORDER BY updated_at DESC;" 2>/dev/null)
+  if [[ -z "$rows" ]]; then
+    echo "No leases found."
+    return 0
+  fi
+  echo "$rows"
 }
 
 pg_cmd_doctor() {
@@ -1491,6 +1704,14 @@ SH
 }
 
 pg_main() {
+  # -C <path> (git-style): run from another repo without cd. Must come
+  # before the subcommand. Can be passed multiple times (last wins).
+  while [[ "${1:-}" == "-C" ]]; do
+    [[ -n "${2:-}" ]] || { pg_fail "-C requires a path"; return 1; }
+    cd "$2" || { pg_fail "-C: cannot cd to $2"; return 1; }
+    shift 2
+  done
+
   # Bare `pg` → draft-approve with auto-run of the approval script. That
   # opens vim on the draft JSON (intent + assert + scope), preview, y/N,
   # approve. One vim session, no copy-paste.
@@ -1529,6 +1750,9 @@ pg_main() {
     list)
       pg_cmd_list "$@"
       ;;
+    leases)
+      pg_cmd_leases "$@"
+      ;;
     check)
       pg_cmd_check "$@"
       ;;
@@ -1560,6 +1784,7 @@ pg_main() {
     ""|help|--help|-h)
       cat <<'EOF'
 Usage:
+  pg [-C <path>] <subcommand>    -C runs as if pg were invoked in <path>
   pg                     Generate approval draft for current branch
   pg compose [--reset]   Open $EDITOR with a draft-approve template, run on save
   pg draft-approve       Generate approval draft
@@ -1572,6 +1797,9 @@ Usage:
   pg check [branch]      Machine-readable JSON: current HEAD vs approved_scope
                          Output: {allowed, reason?, approved_scope, current:{head,
                          commits, added_lines, changed_files, subjects, approved_anchor}}
+  pg leases [--all] [--repo <path>] [--json]
+                         Cross-repo lease index (SQLite at ~/.push-gate/leases.db)
+  pg leases reindex      Scan ~/repos/*/.git/push-gate/leases and populate DB
 EOF
       ;;
     *)
