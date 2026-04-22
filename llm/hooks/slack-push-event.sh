@@ -84,11 +84,19 @@ pr_lookup_merged() {
   )
 }
 
+# VS Code deep-link to the main repo path (not worktree). Clicking in Slack
+# opens the canonical tree in VS Code.
+VSCODE_LINK=""
+if [ -n "$MAIN_REPO_PATH" ]; then
+  VSCODE_LINK="<vscode://file$MAIN_REPO_PATH|VS Code>"
+fi
+
 case "$EVENT_KIND" in
   push)
     PR_LINK="$(pr_lookup || true)"
     MSG="🚀 *pushed* \`$BRANCH\`"
-    [ -n "$PR_LINK" ] && MSG="$MSG · $PR_LINK"
+    [ -n "$PR_LINK" ]    && MSG="$MSG · $PR_LINK"
+    [ -n "$VSCODE_LINK" ] && MSG="$MSG · $VSCODE_LINK"
     ;;
   pr_create)
     sleep 1
@@ -96,11 +104,13 @@ case "$EVENT_KIND" in
     [ -n "$PR_LINK" ] || cleanup_and_exit
     MSG="📬 *opened PR* $PR_LINK"
     case "$CMD" in *"--draft"*) MSG="$MSG _(draft)_" ;; esac
+    [ -n "$VSCODE_LINK" ] && MSG="$MSG · $VSCODE_LINK"
     ;;
   pr_merge)
     PR_LINK="$(pr_lookup_merged || true)"
     [ -n "$PR_LINK" ] || cleanup_and_exit
     MSG="✅ *merged PR* $PR_LINK"
+    [ -n "$VSCODE_LINK" ] && MSG="$MSG · $VSCODE_LINK"
     ;;
 esac
 
