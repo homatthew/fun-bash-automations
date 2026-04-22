@@ -203,25 +203,38 @@ if command -v fzf &> /dev/null; then
 fi
 
 # ==============================================================================
-# Zsh Autosuggestions (fish-like suggestions)
+# Zsh Autosuggestions / Syntax Highlighting
 # ==============================================================================
-# Install: brew install zsh-autosuggestions
-if [ -f /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
-    source /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-elif [ -f ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
-    source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
-fi
+# Install: brew install zsh-autosuggestions zsh-syntax-highlighting
+# Path differs by OS / CPU:
+#   macOS Apple Silicon: /opt/homebrew/share
+#   macOS Intel:         /usr/local/share
+#   Linux Homebrew:      /home/linuxbrew/.linuxbrew/share
+#   Debian/Ubuntu apt:   /usr/share
+_source_first() {
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] && source "$f" && return 0
+    done
+    return 1
+}
+
+_source_first \
+    /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    /home/linuxbrew/.linuxbrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
 bindkey '^ ' autosuggest-accept  # Ctrl+Space to accept suggestion
 
-# ==============================================================================
-# Zsh Syntax Highlighting (must be last plugin sourced)
-# ==============================================================================
-# Install: brew install zsh-syntax-highlighting
-if [ -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
-    source /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-elif [ -f ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
-    source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
-fi
+# Syntax highlighting must be last plugin sourced.
+_source_first \
+    /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+    /usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+    /home/linuxbrew/.linuxbrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+    /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+    ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+unset -f _source_first
 
 # ==============================================================================
 # Custom Prompt
@@ -244,14 +257,25 @@ echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
 # ==============================================================================
 export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
 export GOPATH=$HOME/golang
-export GOROOT=/usr/local/opt/go/libexec
+# GOROOT differs per OS / install method. Prefer `go env GOROOT` when Go is
+# on PATH; fall back to common install locations. Safe to leave unset if Go
+# is managed by a version manager (gvm, asdf, etc.).
+if command -v go >/dev/null 2>&1; then
+    export GOROOT="$(go env GOROOT 2>/dev/null)"
+elif [ -d /opt/homebrew/opt/go/libexec ]; then
+    export GOROOT=/opt/homebrew/opt/go/libexec   # macOS Apple Silicon
+elif [ -d /usr/local/opt/go/libexec ]; then
+    export GOROOT=/usr/local/opt/go/libexec      # macOS Intel
+elif [ -d /usr/lib/go ]; then
+    export GOROOT=/usr/lib/go                    # Debian/Ubuntu
+fi
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 export PATH=$HOME/.local/bin:$HOME/repos/fun-bash-automations/bin:$PATH
 if [ -d "$BUN_INSTALL/bin" ]; then
   export PATH="$BUN_INSTALL/bin:$PATH"
 fi
 export PATH=$PATH:$GOPATH/bin
-export PATH=$PATH:$GOROOT/bin
+[ -n "${GOROOT:-}" ] && export PATH=$PATH:$GOROOT/bin
 export PATH=$PATH:/usr/local/bin/
 export PATH=$PATH:/Users/matthewho/.temporal
 
@@ -868,5 +892,8 @@ export NVM_DIR="$HOME/.nvm"
 export SDKMAN_DIR="$HOME/.sdkman"
 [[ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]] && source "$HOME/.sdkman/bin/sdkman-init.sh"
 
-# weasyprint
-export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_FALLBACK_LIBRARY_PATH
+# weasyprint (macOS only — DYLD_* is the macOS dynamic linker). On Linux,
+# ld.so uses LD_LIBRARY_PATH and package-managed libs don't need this.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_FALLBACK_LIBRARY_PATH
+fi

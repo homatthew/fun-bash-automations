@@ -1,6 +1,7 @@
 #!/bin/bash
 # Setup script for zsh configuration
-# Run this once to set up symlinks and install dependencies
+# Run this once to set up symlinks and install dependencies.
+# Cross-platform: macOS (Homebrew) + Linux (Homebrew or apt/dnf).
 
 set -e
 
@@ -9,16 +10,46 @@ echo "Setting up zsh environment..."
 echo "=============================================="
 
 # ==============================================================================
-# Helper functions for symlink protection
+# OS detection + portable brew prefix
 # ==============================================================================
-# Unlock a symlink (remove immutable flag) - silently succeeds if file doesn't exist
+OS="$(uname -s)"
+IS_MAC=false
+IS_LINUX=false
+case "$OS" in
+	Darwin) IS_MAC=true ;;
+	Linux)  IS_LINUX=true ;;
+esac
+
+# Resolve Homebrew prefix (differs per platform / CPU). Falls back to
+# likely candidates if `brew --prefix` isn't available.
+if command -v brew &> /dev/null; then
+	BREW_PREFIX="$(brew --prefix)"
+elif [ -d /opt/homebrew ]; then
+	BREW_PREFIX=/opt/homebrew
+elif [ -d /home/linuxbrew/.linuxbrew ]; then
+	BREW_PREFIX=/home/linuxbrew/.linuxbrew
+elif [ -d /usr/local/Homebrew ]; then
+	BREW_PREFIX=/usr/local
+else
+	BREW_PREFIX=""
+fi
+
+# ==============================================================================
+# Helper functions for symlink protection (macOS only)
+# ==============================================================================
+# macOS has `chflags uchg` which makes a symlink immutable at the VFS layer.
+# Linux has no direct equivalent for symlinks (chattr +i doesn't apply), so
+# lock/unlock become no-ops there. Agents already treat lock as best-effort.
 unlock_symlink() {
-	[ -L "$1" ] && chflags -h nouchg "$1" 2>/dev/null || true
+	if $IS_MAC && [ -L "$1" ]; then
+		chflags -h nouchg "$1" 2>/dev/null || true
+	fi
 }
 
-# Lock a symlink (set immutable flag) - prevents accidental deletion/replacement
 lock_symlink() {
-	[ -L "$1" ] && chflags -h uchg "$1"
+	if $IS_MAC && [ -L "$1" ]; then
+		chflags -h uchg "$1"
+	fi
 }
 
 # Track locked symlinks for summary
@@ -78,7 +109,7 @@ if command -v brew &> /dev/null; then
 	fi
 
 	# zsh-autosuggestions - fish-like suggestions
-	if [ ! -f /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+	if [ ! -f "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]; then
 		echo "Installing zsh-autosuggestions..."
 		brew install zsh-autosuggestions
 		echo "✓ zsh-autosuggestions installed"
@@ -87,7 +118,7 @@ if command -v brew &> /dev/null; then
 	fi
 
 	# zsh-syntax-highlighting
-	if [ ! -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+	if [ ! -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]; then
 		echo "Installing zsh-syntax-highlighting..."
 		brew install zsh-syntax-highlighting
 		echo "✓ zsh-syntax-highlighting installed"
@@ -95,13 +126,31 @@ if command -v brew &> /dev/null; then
 		echo "✓ zsh-syntax-highlighting already installed"
 	fi
 
-	# terminal-notifier - for Claude Code completion notifications
-	if ! command -v terminal-notifier &> /dev/null; then
-		echo "Installing terminal-notifier..."
-		brew install terminal-notifier
-		echo "✓ terminal-notifier installed"
-	else
-		echo "✓ terminal-notifier already installed"
+	# Desktop notifications
+	#   macOS → terminal-notifier (via brew)
+	#   Linux → notify-send (libnotify, via apt on Debian/Ubuntu)
+	if $IS_MAC; then
+		if ! command -v terminal-notifier &> /dev/null; then
+			echo "Installing terminal-notifier..."
+			brew install terminal-notifier
+			echo "✓ terminal-notifier installed"
+		else
+			echo "✓ terminal-notifier already installed"
+		fi
+	elif $IS_LINUX; then
+		if ! command -v notify-send &> /dev/null; then
+			if command -v apt-get &> /dev/null; then
+				echo "Installing libnotify-bin (provides notify-send)..."
+				sudo apt-get install -y libnotify-bin
+			elif command -v dnf &> /dev/null; then
+				echo "Installing libnotify (provides notify-send)..."
+				sudo dnf install -y libnotify
+			else
+				echo "⚠ notify-send not found — install libnotify / libnotify-bin via your package manager."
+			fi
+		else
+			echo "✓ notify-send already installed"
+		fi
 	fi
 
 	# jq - JSON processor, used pervasively by hooks and push-gate
@@ -265,9 +314,13 @@ echo "  Option+←/→ - Word navigation"
 echo "  z <dir>    - Jump to frequently used directory"
 echo ""
 echo "Protected symlinks (immutable, cannot be accidentally overwritten):"
-printf '  %s\n' "${LOCKED_SYMLINKS[@]}"
-echo ""
-echo "  To temporarily unlock: chflags -h nouchg <path>"
-echo "  Re-run this script to re-lock after changes"
+if $IS_MAC; then
+	printf '  %s\n' "${LOCKED_SYMLINKS[@]}"
+	echo ""
+	echo "  To temporarily unlock: chflags -h nouchg <path>"
+	echo "  Re-run this script to re-lock after changes"
+else
+	echo "  (symlink locking only applies on macOS)"
+fi
 echo ""
 echo "Run 'source ~/.zshrc' to reload configuration."
