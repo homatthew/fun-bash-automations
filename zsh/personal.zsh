@@ -337,6 +337,37 @@ push-gate() {
 }
 alias pg=push-gate
 
+# pgr - run pg against another repo without cd.
+# Picks from active leases (~/.push-gate/leases.db) + ~/repos/*, uses fzf
+# with the optional shortname as initial query. Example:
+#   pgr skm       → fuzzy match for service-capacity-modeling
+#   pgr           → pick any repo
+pgr() {
+    local query="${1:-}"
+    local db="${HOME}/.push-gate/leases.db"
+    local pick
+
+    command -v fzf >/dev/null 2>&1 || { echo "pgr: fzf required"; return 1; }
+
+    pick=$( {
+        # Active-lease repos first (most likely target)
+        if [[ -f "$db" ]] && command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 "$db" \
+                "SELECT repo_root FROM leases WHERE status='active' ORDER BY updated_at DESC;" \
+                2>/dev/null
+        fi
+        # Then everything under ~/repos (one level deep, git repos only)
+        for d in "$HOME"/repos/*/; do
+            [[ -d "$d/.git" || -f "$d/.git" ]] && printf '%s\n' "${d%/}"
+        done
+    } | awk '!seen[$0]++' \
+      | fzf --query "$query" --select-1 --exit-0 \
+            --header "Pick a repo (pg -C will run there)")
+
+    [[ -n "$pick" ]] || return 1
+    push-gate -C "$pick" "${@:2}"
+}
+
 # ssh-gate: Allow Claude to SSH into a specific host for 12 hours.
 # Creates a lease file with the host and expiry timestamp.
 # Usage: ssh-gate <instance-id-or-host>
