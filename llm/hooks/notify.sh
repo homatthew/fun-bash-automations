@@ -16,6 +16,18 @@ cleanup_and_exit() {
   exit 0
 }
 
+url_encode_path() {
+  local s="$1" out="" c i
+  for ((i=0; i<${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~/:-]) out+="$c" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 normalize_message() {
   printf '%s' "$1" \
     | tr '\n' ' ' \
@@ -102,20 +114,18 @@ esac
 
 MESSAGE="$(normalize_message "$MESSAGE")"
 
-# Click behavior: for VSCode, open the main repo via vscode:// so the click
-# lands in the right workspace. For other terminals, activate the app.
+# Click behavior: always open the canonical repo in VS Code when we have
+# one; fall back to activating the current terminal if not.
 OPEN_URL=""
 ACTIVATE=""
-case "${TERM_PROGRAM:-}" in
-  vscode)
-    if [ -n "$MAIN_REPO_PATH" ]; then
-      OPEN_URL="vscode://file$MAIN_REPO_PATH"
-    else
-      ACTIVATE="com.microsoft.VSCode"
-    fi
-    ;;
-  ghostty) ACTIVATE="com.mitchellh.ghostty" ;;
-esac
+if [ -n "${MAIN_REPO_PATH:-}" ]; then
+  OPEN_URL="vscode://file$(url_encode_path "$MAIN_REPO_PATH")"
+else
+  case "${TERM_PROGRAM:-}" in
+    ghostty) ACTIVATE="com.mitchellh.ghostty" ;;
+    vscode)  ACTIVATE="com.microsoft.VSCode" ;;
+  esac
+fi
 
 if [ "$RUNTIME" = "codex" ]; then
   GROUP="codex-$REPO"
@@ -136,7 +146,7 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   cleanup_and_exit
 fi
 
-ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10)
+ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10 -ignoreDnD)
 [ -n "$SENDER" ] && ARGS+=(-sender "$SENDER")
 if [ -n "$OPEN_URL" ]; then
   ARGS+=(-open "$OPEN_URL")

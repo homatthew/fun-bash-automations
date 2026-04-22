@@ -132,27 +132,52 @@ frontmost_bundle_id() {
   osascript -e 'tell application "System Events" to get bundle identifier of first process whose frontmost is true' 2>/dev/null
 }
 
+# URL-encode path segment: keep / : - _ . ~ and alnum, percent-encode the rest.
+# Needed because terminal-notifier -open goes through NSURL which is strict.
+url_encode_path() {
+  local s="$1" out="" c i
+  for ((i=0; i<${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~/:-]) out+="$c" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 send_macos_notification() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5"
   [ "$(uname -s)" = "Darwin" ] || return 0
   if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
     [ "$(frontmost_bundle_id || true)" = "com.mitchellh.ghostty" ] && return 0
   fi
-  local activate=""
-  case "${TERM_PROGRAM:-}" in
-    ghostty) activate="com.mitchellh.ghostty" ;;
-    vscode)  activate="com.microsoft.VSCode" ;;
-  esac
+  # Clicking the notification opens VS Code at the canonical repo path
+  # (main repo, not worktree). Falls back to -activate for the current
+  # terminal if no repo path is resolvable.
+  local open_url="" activate=""
+  if [ -n "${MAIN_REPO_PATH:-}" ]; then
+    open_url="vscode://file$(url_encode_path "$MAIN_REPO_PATH")"
+  else
+    case "${TERM_PROGRAM:-}" in
+      ghostty) activate="com.mitchellh.ghostty" ;;
+      vscode)  activate="com.microsoft.VSCode" ;;
+    esac
+  fi
   local one_line
   one_line=$(printf '%s' "$message" | tr '\n' ' ' | cut -c1-200)
   if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
-    printf 'macos title=%s subtitle=%s message=%s group=%s activate=%s\n' \
-      "$title" "$subtitle" "$one_line" "$group" "${activate:-<none>}" >&2
+    printf 'macos title=%s subtitle=%s message=%s group=%s open=%s activate=%s\n' \
+      "$title" "$subtitle" "$one_line" "$group" "${open_url:-<none>}" "${activate:-<none>}" >&2
     return 0
   fi
   command -v terminal-notifier >/dev/null 2>&1 || return 0
-  local args=(-title "$title" -subtitle "$subtitle" -message "$one_line" -sound Pop -group "$group" -sender "$sender" -timeout 10)
-  [ -n "$activate" ] && args+=(-activate "$activate")
+  local args=(-title "$title" -subtitle "$subtitle" -message "$one_line" -sound Pop -group "$group" -sender "$sender" -timeout 10 -ignoreDnD)
+  if [ -n "$open_url" ]; then
+    args+=(-open "$open_url")
+  elif [ -n "$activate" ]; then
+    args+=(-activate "$activate")
+  fi
   terminal-notifier "${args[@]}" >/dev/null 2>&1 &
 }
 
