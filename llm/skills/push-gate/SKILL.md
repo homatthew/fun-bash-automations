@@ -99,14 +99,36 @@ current branch state) and approve again.
 
 ## Step 6 — Checking for existing approvals
 
-Before asking the user to approve, check whether a fresh approval is
-already pending:
+Before asking the user to approve, check whether a lease already
+exists. **The durable lease file is the source of truth, not the
+sentinel.** Check both in order:
 
-- `test -f /tmp/pg-approved/<repo>__<branch>` — sentinel written by a
-  successful `pg approve`. If present and recent, the lease is live and
-  scope-valid — you can try `pg push` directly.
-- `cat /tmp/pg-approved/<repo>__<branch>` shows `approved_at` and
-  `pr_number`.
+1. **Lease file (authoritative)** — lives in the repo's `.git/push-gate/`:
+
+   ```bash
+   lease=$(git rev-parse --git-common-dir)/push-gate/leases/refs/heads/<branch>.json
+   test -f "$lease" && jq '{status, approved_anchor, pr_number, updated_at, approved_scope}' "$lease"
+   ```
+
+   If `status == "active"` and the file exists, a lease is live. Validate
+   it with:
+
+   ```bash
+   bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh check <branch>
+   ```
+
+   If `allowed: true`, you can proceed with `pg push …`. If
+   `allowed: false`, read the `reason` — it tells you what to do (scope
+   drift, anchor mismatch, missing pending-assertion, etc.).
+
+2. **Sentinel file (hint only)** — `/tmp/pg-approved/<repo>__<branch>`
+   exists only for approvals created after the notify-approved change
+   landed. **Missing sentinel does NOT mean missing lease** — older
+   leases won't have one. Do not stop on this alone.
+
+Do **not** rely on `pg` being on PATH to check lease state. The hook
+script is always at `~/repos/fun-bash-automations/llm/hooks/push-gate.sh`
+and can be invoked directly via `bash`.
 
 ## Common mistakes to avoid
 
