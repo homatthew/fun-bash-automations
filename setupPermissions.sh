@@ -103,6 +103,42 @@ if command -v brew &> /dev/null; then
 	else
 		echo "✓ terminal-notifier already installed"
 	fi
+
+	# jq - JSON processor, used pervasively by hooks and push-gate
+	if ! command -v jq &> /dev/null; then
+		echo "Installing jq..."
+		brew install jq
+		echo "✓ jq installed"
+	else
+		echo "✓ jq already installed"
+	fi
+
+	# yq (mikefarah) - YAML processor; push-gate approval flow edits drafts in YAML
+	if ! command -v yq &> /dev/null; then
+		echo "Installing yq..."
+		brew install yq
+		echo "✓ yq installed"
+	else
+		echo "✓ yq already installed"
+	fi
+
+	# gh - GitHub CLI, used by push-gate for PR lookup and push-review skill
+	if ! command -v gh &> /dev/null; then
+		echo "Installing gh..."
+		brew install gh
+		echo "✓ gh installed"
+	else
+		echo "✓ gh already installed"
+	fi
+
+	# sqlite3 ships with macOS; push-gate uses it for the central lease DB
+	# at ~/.push-gate/leases.db. Verify it's reachable and warn if not.
+	if ! command -v sqlite3 &> /dev/null; then
+		echo "⚠ sqlite3 not found on PATH — push-gate cross-repo lease DB will be disabled."
+		echo "  macOS usually ships sqlite3 at /usr/bin/sqlite3; check your PATH."
+	else
+		echo "✓ sqlite3 available ($(command -v sqlite3))"
+	fi
 else
 	echo "⚠ Homebrew not found. Skipping package installation."
 	echo "  Install Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""

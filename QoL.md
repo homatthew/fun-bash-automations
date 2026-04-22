@@ -96,6 +96,20 @@ Press `Ctrl+G` then the second key:
 | `to_mp3 <file>` | Convert any audio file to MP3 |
 | `webm_to_mp3` | Convert all .webm files in directory |
 
+### Push-gate (durable push approval)
+| Command | Description |
+|---------|-------------|
+| `pg` | Generate + approve a push lease in current repo (vim on YAML draft) |
+| `pg -C <path>` | Run pg in another repo without `cd` |
+| `pgr [shortname]` | fzf picker over active-lease repos + `~/repos/*`, then `pg -C` there |
+| `pg leases` | Table of active leases across all repos (SQLite index) |
+| `pg leases --all --json` | Full lease index as JSON |
+| `pg leases reindex` | Scan `~/repos/*/.git/push-gate/leases/*` into the DB |
+| `pg push --assert-flow TEXT` | Guarded push (requires active lease, scope-validated) |
+| `pg check [branch]` | Machine-readable: does current HEAD fit the approved scope? |
+
+Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`. All installed by `setupPermissions.sh`.
+
 ---
 
 ## Vim Features
