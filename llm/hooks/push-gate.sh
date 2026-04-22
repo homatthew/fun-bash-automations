@@ -1277,15 +1277,34 @@ pg_notify_approved() {
     fi
   fi
 
-  # 3. macOS desktop notification.
+  # 3. macOS desktop notification. Click opens the canonical repo in VS Code.
   if [[ "$(uname -s)" == "Darwin" ]] && command -v terminal-notifier >/dev/null 2>&1; then
-    terminal-notifier \
-      -title "push-gate" \
-      -subtitle "lease approved" \
-      -message "$branch_name${pr_number:+ · PR #$pr_number} — agent may now push" \
-      -sound Pop \
-      -group "pg-approval-$key" \
-      -timeout 10 >/dev/null 2>&1 &
+    local repo_root open_url encoded
+    repo_root=$(jq -r '.repo_root // empty' "$draft" 2>/dev/null)
+    if [[ -n "$repo_root" ]]; then
+      # inline minimal URL-encoder for the path segment
+      encoded=""
+      local c i
+      for ((i=0; i<${#repo_root}; i++)); do
+        c="${repo_root:i:1}"
+        case "$c" in
+          [a-zA-Z0-9._~/:-]) encoded+="$c" ;;
+          *) printf -v c '%%%02X' "'$c"; encoded+="$c" ;;
+        esac
+      done
+      open_url="vscode://file$encoded"
+    fi
+    local args=(
+      -title "push-gate"
+      -subtitle "lease approved"
+      -message "$branch_name${pr_number:+ · PR #$pr_number} — agent may now push"
+      -sound Pop
+      -group "pg-approval-$key"
+      -timeout 10
+      -ignoreDnD
+    )
+    [[ -n "${open_url:-}" ]] && args+=(-open "$open_url")
+    terminal-notifier "${args[@]}" >/dev/null 2>&1 &
   fi
 }
 
