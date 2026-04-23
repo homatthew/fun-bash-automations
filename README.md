@@ -32,7 +32,7 @@ Setup:
 	10. Rectangle / magnet
 	11. Karabiner-elements
 	12. OmniDiskSweeper
-  13. MOS (Smooth Scrolling)
+  13. MOS (Smooth Scrolling) — `brew install --cask mos`
 
 ```
 defaults write .GlobalPreferences com.apple.mouse.scaling -1
