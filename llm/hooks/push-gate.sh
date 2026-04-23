@@ -768,7 +768,7 @@ pg_validate_push_guard() {
 
   lease_json=$(pg_load_lease_for_ref "$branch_ref" 2>/dev/null || true)
   if [[ -z "$lease_json" ]]; then
-    jq -n --arg reason "Blocked: git push requires a durable lease for $lease_branch. Ask the user to run: cd $(pg_repo_root) && pg draft-approve --branch $lease_branch" '{allowed:false, reason:$reason}'
+    jq -n --arg reason "Blocked: git push requires a durable lease for $lease_branch. Ask the user to run: pg -C $(pg_repo_root) draft-approve --branch $lease_branch" '{allowed:false, reason:$reason}'
     return 0
   fi
 
