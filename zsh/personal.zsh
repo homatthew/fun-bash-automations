@@ -361,6 +361,38 @@ push-gate() {
 }
 alias pg=push-gate
 
+# cwt - Create a worktree and launch codex in it.
+# Path:   ~/worktrees/codex/mho-<name>
+# Branch: mho/<name>
+# Usage:  cwt <name> [extra codex args...]
+# Re-entering an existing worktree: cwt <name> skips the worktree-add.
+cwt() {
+    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
+
+    if [[ -z "$1" ]]; then
+        echo "Usage: cwt <name> [codex args...]"
+        echo "Creates: branch mho/<name> at ~/worktrees/codex/mho-<name>, launches codex"
+        return 1
+    fi
+
+    local name="$1"
+    local branch="mho/$name"
+    local path=~/worktrees/codex/mho-$name
+
+    mkdir -p ~/worktrees/codex
+    if [[ -d "$path" ]]; then
+        echo "Entering existing worktree: $path"
+    else
+        git worktree add -b "$branch" "$path" HEAD || return $?
+        echo "Worktree created:"
+        echo "  Path:   $path"
+        echo "  Branch: $branch"
+    fi
+
+    cd "$path" || return $?
+    codex "${@:2}"
+}
+
 # pgr - run pg against another repo without cd.
 # Picks from active leases (~/.push-gate/leases.db) + ~/repos/*, uses fzf
 # with the optional shortname as initial query. Example:
