@@ -396,18 +396,62 @@ pg_find_pr_json() {
 # Best-effort one-line summary of what's on this branch since the base.
 # Used to pre-fill the "describe change here" placeholder so the user
 # rarely has to type it from scratch.
+#
+# If `codex` is on PATH (Netflix gateway auth handled by user's config),
+# ask gpt-5-nano with minimal reasoning effort — takes ~2s and reads all
+# commit subjects. Falls back to the first-subject heuristic on any
+# failure. Opt out with PG_USE_LLM=0.
 pg_default_change_summary() {
-  local base_ref count first_subject
+  local base_ref count first_subject commits tmp summary
   base_ref=$(pg_default_base_ref_snapshot)
   [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || {
     printf 'describe change here\n'
     return 0
   }
   count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
-  first_subject=$(git log "$base_ref"..HEAD --reverse --format='%s' 2>/dev/null | head -1)
+  commits=$(git log "$base_ref"..HEAD --reverse --format='%s' 2>/dev/null)
+  first_subject=$(printf '%s\n' "$commits" | head -1)
+
   if [[ -z "$first_subject" ]]; then
     printf 'no new commits\n'
-  elif [[ "$count" -le 1 ]]; then
+    return 0
+  fi
+
+  if [[ "${PG_USE_LLM:-1}" == "1" ]] \
+     && command -v codex >/dev/null 2>&1 \
+     && [[ -n "$commits" ]]; then
+    tmp=$(mktemp -t pg-summary) || tmp=""
+    if [[ -n "$tmp" ]]; then
+      # Hard cap so a hung codex doesn't block approval. GNU timeout may be
+      # `gtimeout` (brew coreutils) or `timeout` (Linux). Skip wrapping if
+      # neither is present.
+      local timeout_cmd=()
+      if command -v gtimeout >/dev/null 2>&1; then
+        timeout_cmd=(gtimeout 10)
+      elif command -v timeout >/dev/null 2>&1; then
+        timeout_cmd=(timeout 10)
+      fi
+      # Note: reasoning_effort="minimal" is incompatible with web_search
+      # which codex pulls in by default; use "low" (still ~5s total).
+      summary=$(
+        "${timeout_cmd[@]}" codex exec \
+          -m gpt-5-nano \
+          -c model_reasoning_effort='"low"' \
+          --output-last-message "$tmp" \
+          "Summarize these commit subjects as ONE imperative sentence under 15 words. Output only the sentence, no markdown, no preamble:
+
+$commits" </dev/null >/dev/null 2>&1 \
+          && awk 'NF{print; exit}' "$tmp"
+      )
+      rm -f "$tmp"
+      if [[ -n "$summary" ]]; then
+        printf '%s\n' "$summary"
+        return 0
+      fi
+    fi
+  fi
+
+  if [[ "$count" -le 1 ]]; then
     printf '%s\n' "$first_subject"
   else
     printf '%s (+%d more)\n' "$first_subject" "$((count - 1))"
