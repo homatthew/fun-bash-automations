@@ -393,22 +393,45 @@ pg_find_pr_json() {
   echo "$raw" | jq -c '.[0] // {}'
 }
 
+# Best-effort one-line summary of what's on this branch since the base.
+# Used to pre-fill the "describe change here" placeholder so the user
+# rarely has to type it from scratch.
+pg_default_change_summary() {
+  local base_ref count first_subject
+  base_ref=$(pg_default_base_ref_snapshot)
+  [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || {
+    printf 'describe change here\n'
+    return 0
+  }
+  count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+  first_subject=$(git log "$base_ref"..HEAD --reverse --format='%s' 2>/dev/null | head -1)
+  if [[ -z "$first_subject" ]]; then
+    printf 'no new commits\n'
+  elif [[ "$count" -le 1 ]]; then
+    printf '%s\n' "$first_subject"
+  else
+    printf '%s (+%d more)\n' "$first_subject" "$((count - 1))"
+  fi
+}
+
 pg_default_user_intent() {
   local branch="$1"
   local pr_number="$2"
+  local summary
+  summary=$(pg_default_change_summary)
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 allow pushes for $branch
 same branch
 same pr #$pr_number
-new lease after rewrite
+$summary
 EOF
   else
     cat <<EOF
 allow pushes for $branch
 same branch
 bind pr after first push
-new lease after rewrite
+$summary
 EOF
   fi
 }
@@ -416,18 +439,20 @@ EOF
 pg_default_assert_flow() {
   local branch="$1"
   local pr_number="$2"
+  local summary
+  summary=$(pg_default_change_summary)
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 update pr #$pr_number
 branch $branch
-describe change here
+$summary
 no rewrite
 EOF
   else
     cat <<EOF
 new pr flow
 branch $branch
-describe change here
+$summary
 no rewrite
 EOF
   fi
@@ -1097,6 +1122,30 @@ pg_cmd_draft_approve() {
       status: "active"
     }' >"$draft_file"
 
+  # Build a context block the user sees as YAML comments: commit log,
+  # changed files with per-file stats, and overall diff stat. This
+  # frames what they're actually approving without making them type it.
+  local context_block=""
+  if [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    local commit_log file_stats shortstat
+    commit_log=$(git log "$base_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20)
+    file_stats=$(git diff --stat "$base_ref"..HEAD 2>/dev/null \
+      | sed '$d' | sed 's/^/#   /' | head -15)
+    shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+    context_block="# ───────── what you're approving ─────────
+# base: $base_ref
+#
+# commits:
+${commit_log:-#   (none)}
+#
+# files (and line-change stats):
+${file_stats:-#   (none)}
+#
+# total: ${shortstat:-(no diff)}
+# ─────────────────────────────────────────
+#"
+  fi
+
   local yaml_file="${draft_file%.json}.yaml"
   cat >"$script_file" <<EOF
 #!/bin/bash
@@ -1106,6 +1155,13 @@ DRAFT_FILE="$draft_file"
 YAML_FILE="$yaml_file"
 HELPER="$script_path"
 
+# Context block computed at draft-approve time and baked into this
+# script. Shown as comments at the top of the YAML so the user sees
+# exactly what they're approving without having to look it up.
+read -r -d '' CONTEXT_BLOCK <<'CTXEOF' || true
+$context_block
+CTXEOF
+
 # Edit-before-approve: convert the draft JSON to YAML, open \$EDITOR on the
 # YAML (easier to edit: comments, multi-line strings, no strict quoting),
 # then round-trip back to JSON and validate. Skip with PG_SKIP_EDIT=1.
@@ -1113,12 +1169,13 @@ HELPER="$script_path"
 if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
   editor="\${EDITOR:-vi}"
   if command -v yq >/dev/null 2>&1; then
-    # JSON → YAML with a helpful header comment.
+    # JSON → YAML with a helpful header + change-context comment.
     {
       echo "# pg approval draft — edit user_intent, agent_assertion_template,"
       echo "# and approved_scope (paths / subjects / max_commits / max_added_lines)."
       echo "# Save + quit to continue, :cq or empty file to abort."
       echo "#"
+      [ -n "\$CONTEXT_BLOCK" ] && printf '%s\n' "\$CONTEXT_BLOCK"
       yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml
     } > "\$YAML_FILE"
 
