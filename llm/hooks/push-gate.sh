@@ -200,8 +200,23 @@ pg_branch_slug() {
   echo "$1" | tr '/: ' '___'
 }
 
+# Resolve the MAIN repo path even when we're inside a worktree. Worktrees
+# report their own toplevel via rev-parse, but share the main repo's common
+# .git directory — dirname of that is the main repo root.
+pg_main_repo_path() {
+  local common main_git
+  common=$(pg_git_common_dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) main_git="$common" ;;
+    *)  main_git="$(pg_repo_root)/$common" ;;
+  esac
+  (cd "$(dirname "$main_git")" 2>/dev/null && pwd)
+}
+
 pg_repo_name() {
-  basename "$(pg_repo_root)"
+  local main
+  main=$(pg_main_repo_path 2>/dev/null) || main="$(pg_repo_root)"
+  basename "$main"
 }
 
 pg_has_remote() {
