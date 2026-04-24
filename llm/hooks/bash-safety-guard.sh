@@ -9,8 +9,9 @@
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/push-gate.sh"
+# Do NOT source push-gate.sh here — a syntax error in that file would take
+# down the Bash tool entirely. Call it as a subprocess below (guard-check)
+# so its failures are isolated and reported through deny() cleanly.
 
 deny() {
   jq -n --arg reason "$1" '{
@@ -21,6 +22,171 @@ deny() {
     }
   }'
   exit 0
+}
+
+# --- Helpers ---
+has_wrong_netflix_gh_host() {
+  echo "$COMMAND" | grep -qE "(^|[;&|[:space:]])(export[[:space:]]+)?GH_HOST=['\"]?github\\.netflix\\.net['\"]?([[:space:];&|]|$)"
+}
+
+gist_upload_filenames() {
+  python3 - "$COMMAND" <<'PY'
+import json
+import os
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    tokens = shlex.split(command, posix=True)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+def collect_gist_create_files(args):
+    files = []
+    idx = 0
+    value_flags = {"-d", "--desc", "-f", "--filename"}
+    while idx < len(args):
+        token = args[idx]
+        if token == "--":
+            files.extend(args[idx + 1 :])
+            break
+        if token in value_flags:
+            if token in {"-f", "--filename"} and idx + 1 < len(args):
+                files.append(args[idx + 1])
+            idx += 2
+            continue
+        if token.startswith("--desc="):
+            idx += 1
+            continue
+        if token.startswith("--filename="):
+            files.append(token.split("=", 1)[1])
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        if token != "-":
+            files.append(token)
+        idx += 1
+    return files
+
+
+def collect_gist_api_files(args):
+    endpoint = None
+    input_path = None
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if endpoint is None and not token.startswith("-"):
+            endpoint = token
+            idx += 1
+            continue
+        if token == "--input" and idx + 1 < len(args):
+            input_path = args[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--input="):
+            input_path = token.split("=", 1)[1]
+            idx += 1
+            continue
+        idx += 1
+
+    if not endpoint or not re.match(r"^/?gists(?:/[^\s]+)?$", endpoint):
+        return []
+
+    if not input_path:
+        return []
+
+    if input_path.startswith("@"):
+        input_path = input_path[1:]
+
+    try:
+        with open(input_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return []
+
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return []
+
+    return list(files.keys())
+
+
+filenames = []
+for segment in segments:
+    stripped = strip_env_assignments(segment)
+    if len(stripped) >= 3 and stripped[0] == "gh" and stripped[1] == "gist" and stripped[2] == "create":
+        filenames.extend(collect_gist_create_files(stripped[3:]))
+        continue
+    if len(stripped) >= 2 and stripped[0] == "gh" and stripped[1] == "api":
+        filenames.extend(collect_gist_api_files(stripped[2:]))
+
+for name in filenames:
+    if name:
+        print(os.path.basename(name))
+PY
+}
+
+has_netflix_gist_hostname() {
+  echo "$COMMAND" | grep -qE "(^|[[:space:]])GH_HOST=['\"]?git\\.netflix\\.net['\"]?([[:space:]]|$)|--hostname(=|[[:space:]]+)['\"]?git\\.netflix\\.net['\"]?([[:space:]]|$)"
+}
+
+is_gh_api_gist_create() {
+  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*gh\s+api([[:space:]]|$)' || return 1
+  echo "$COMMAND" | grep -qE "(^|[[:space:]\"'])/?gists([[:space:]\"']|$)" || return 1
+
+  echo "$COMMAND" | grep -qE -- '--method[[:space:]]+POST|--method=POST|-X[[:space:]]+POST|-XPOST' && return 0
+  echo "$COMMAND" | grep -qE -- '--input([=[:space:]]|$)' && return 0
+
+  return 1
+}
+
+check_gist_filename_sequence() {
+  local filenames sorted_filenames line expected_index expected_prefix
+  filenames=$(gist_upload_filenames)
+  [ -n "$filenames" ] || return
+
+  sorted_filenames=$(printf '%s\n' "$filenames" | LC_ALL=C sort)
+  expected_index=1
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    expected_prefix=$(printf '%02d_' "$expected_index")
+    case "$line" in
+      "$expected_prefix"*)
+        expected_index=$((expected_index + 1))
+        ;;
+      *)
+        deny "Blocked: gist uploads must use contiguous ordered filenames like 01_..., 02_..., 03_.... Rename uploaded files or gist payload keys. First offending file: $line"
+        ;;
+    esac
+  done <<EOF
+$sorted_filenames
+EOF
 }
 
 # --- 1. Git Force/Destructive ---
@@ -47,16 +213,25 @@ check_git_force() {
 
 # --- 2. Push Guard ---
 # Blocks ALL git push by default. Pushes require a durable branch lease
-# plus a fresh pending self-assertion created by `pg push`.
+# plus a fresh pending self-assertion created by `pg push`. Invokes
+# push-gate.sh as a subprocess so a bug there can't take down this hook.
 check_push_guard() {
-  local result allowed reason
-  result=$(pg_validate_push_guard "$COMMAND")
-  allowed=$(echo "$result" | jq -r '.allowed')
+  local result allowed reason rc
+  result=$(bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$result" ]; then
+    # push-gate itself failed — allow the command through (fail-open) so
+    # a broken push-gate doesn't block all shell usage. The user still
+    # gets a warning on stderr for visibility.
+    echo "bash-safety-guard: push-gate subprocess failed (rc=$rc); allowing command through" >&2
+    return
+  fi
+  allowed=$(echo "$result" | jq -r '.allowed' 2>/dev/null)
   if [ "$allowed" = "true" ]; then
     return
   fi
-  reason=$(echo "$result" | jq -r '.reason')
-  deny "$reason"
+  reason=$(echo "$result" | jq -r '.reason' 2>/dev/null)
+  deny "${reason:-push blocked by push-gate}"
 }
 
 # --- 2b. Branch Creation Tracking Guard ---
@@ -197,6 +372,25 @@ check_gh_destructive() {
     deny "Blocked: gh issue close requires human judgment."
 }
 
+# --- 10b. GitHub Host Safety ---
+check_gh_host_safety() {
+  has_wrong_netflix_gh_host || return
+  deny "Blocked: GH_HOST=github.netflix.net is wrong for Netflix GHE. Use GH_HOST=git.netflix.net."
+}
+
+# --- 10c. GitHub Gist Host Safety ---
+check_gh_gist_host_safety() {
+  is_gh_api_gist_create || return
+  has_netflix_gist_hostname && return
+
+  deny "Blocked: gh api gist creation must target Netflix GHE explicitly. Use GH_HOST=git.netflix.net or --hostname git.netflix.net."
+}
+
+# --- 10d. GitHub Gist Filename Safety ---
+check_gh_gist_filename_safety() {
+  check_gist_filename_sequence
+}
+
 # --- 11. Process Killing ---
 check_process_kill() {
   # Allow port-targeted kills: lsof -ti :PORT | xargs kill or kill $(lsof -ti :PORT)
@@ -237,6 +431,9 @@ check_elevated_privileges
 check_remote_exec
 check_package_publish
 check_gh_destructive
+check_gh_host_safety
+check_gh_gist_host_safety
+check_gh_gist_filename_safety
 check_process_kill
 check_docker_destructive
 
