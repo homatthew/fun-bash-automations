@@ -159,6 +159,12 @@ deploy_claude() {
     if [[ -x "$ROOT/bin/install-claude-notify-app" ]]; then
         "$ROOT/bin/install-claude-notify-app" || true
     fi
+
+    # Forked VS Code extension that lets hook-fired banners focus the
+    # exact originating terminal. See bin/install-osc-notifier.
+    if [[ -x "$ROOT/bin/install-osc-notifier" ]]; then
+        "$ROOT/bin/install-osc-notifier" || true
+    fi
 }
 
 deploy_codex() {
