@@ -237,24 +237,32 @@ case "$EVENT" in
     [ -z "$RAW" ] && RAW="$(extract_transcript_last || true)"
     [ -z "$RAW" ] && RAW="Task complete"
     SUMMARY="$(extract_summary "$RAW" 800)"
-    # Subtitle: "<branch> · <one-line activity title>". Branch up front
-    # disambiguates when you have multiple branches/worktrees active.
-    # Title is LLM-generated via codex when available (~2s), falls back
-    # to first-line-of-summary heuristic.
+    # Single codex call produces BOTH a short title and a plain-text
+    # body for the banner. LLM strips markdown properly (code fences,
+    # backticks, asterisks, nested bullets) in ways sed can't match.
+    # Output shape:
+    #   title: <imperative phrase under 8 words>
+    #   body:  <plain-text summary, <=180 chars, no markdown>
     llm_title=""
+    llm_body=""
     if command -v codex >/dev/null 2>&1; then
-      _tmp=$(mktemp -t notify-title 2>/dev/null) || _tmp=""
+      _tmp=$(mktemp -t notify-brief 2>/dev/null) || _tmp=""
       if [ -n "$_tmp" ]; then
-        # NOTIFY_SUPPRESS=1 prevents the child codex's own Stop hook
-        # from firing back into this script (infinite recursion).
         NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
           -m gpt-5-nano \
           -c model_reasoning_effort='"low"' \
           --output-last-message "$_tmp" \
-          "Summarize what the agent actually DID in this turn as ONE imperative phrase under 8 words. Describe the WORK, not metadata. Skip things like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y feature', 'refactor Z'. No period, no trailing punctuation. Output only the phrase:
+          "Given the assistant-turn output below, produce EXACTLY two lines for a macOS notification:
 
+title: <one imperative phrase under 8 words describing the WORK the agent did. NOT metadata like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y', 'refactor Z'>
+body: <plain-text summary under 180 chars. STRIP ALL markdown: remove backticks, triple-backtick fences, asterisks (bold/italic), underscores, link brackets, heading hashes, code blocks. Output readable prose only.>
+
+Output ONLY those two lines in that exact format. No preamble, no trailing text.
+
+---
 $SUMMARY" </dev/null >/dev/null 2>&1
-        llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        llm_title=$(awk -F': *' '/^title:/{sub(/^title: */,""); print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        llm_body=$(awk -F': *' '/^body:/{sub(/^body: */,""); print; exit}' "$_tmp" 2>/dev/null | cut -c1-200)
         rm -f "$_tmp"
       fi
     fi
@@ -264,6 +272,11 @@ $SUMMARY" </dev/null >/dev/null 2>&1
         | awk 'NF{print; exit}' \
         | cut -c1-60)
       [ -z "$llm_title" ] && llm_title="done"
+    fi
+    # Use LLM-cleaned body when available; it strips markdown more
+    # reliably than our sed pass.
+    if [ -n "$llm_body" ]; then
+      SUMMARY="$llm_body"
     fi
     if [ -n "${BRANCH:-}" ]; then
       SUBTITLE="${BRANCH} · ${llm_title}"
