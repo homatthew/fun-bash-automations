@@ -217,38 +217,42 @@ git log --oneline <remote-tracking>..<branch>
 git diff --stat <remote-tracking>..<branch>
 ```
 
-### 5b. Request push-gate approval
+### 5b. Prepare + request approval (per branch)
 
 > **Do NOT bypass push-gate.** Never suggest `PG_SKIP_EDIT=1`,
-> `PG_ALLOW_DESCENDANT=1`, or piping `yes` into the approval prompt. The
-> editor review is the policy. If blocked with no interactive terminal here,
-> stop and wait for the user. See
+> `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`, `PG_ALLOW_INFERENCE=1`,
+> or piping `yes` into the approval prompt. See
 > [`llm/command-guard-policy.md` → Push-gate bypass prohibition](../../command-guard-policy.md).
 
-Include the `cd` so the draft is generated from the correct repo/worktree.
+For each branch in the stack:
 
-Tell the user:
-> **Branch 1 of N: `<branch>`**
-> Pushing <N> commits. Run in your terminal:
-> ```
-> cd <working-directory>
-> pg draft-approve \
->   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
->   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
-> ```
-> Then run the generated `/tmp/pg-approve-...sh` script after reviewing the draft.
+1. Run `pg prepare` from the branch's worktree/repo. See the
+   `push-gate-prepare` skill for field guidance.
+
+   ```bash
+   pg -C <absolute-repo-path> prepare \
+     --what     'one-line what' \
+     --why      'one-line why' \
+     --approach 'one-line approach' \
+     --risks    'caveats or "none apparent"'
+   ```
+
+2. Tell the user (substitute the absolute path):
+
+   > **Branch N of M: `<branch>`** — prepared.
+   > Run: `pg -C <absolute-repo-path>`
 
 ### 5c. Push after approval
 
-Self-validate first so agents don't trigger a hook block they could have
-predicted:
+Self-validate first:
 
 ```bash
-pg check [branch] | jq '{allowed, reason, current}'
+pg -C <repo> check [branch] | jq '{allowed, reason, current}'
 ```
 
 Only proceed if `.allowed == true` and `.current.anchor_matches_head == true`.
-Otherwise regenerate the lease via `pg compose`.
+Otherwise re-run `pg prepare` with the updated rationale and ask the user
+to re-run `pg`.
 
 ```bash
 pg push \

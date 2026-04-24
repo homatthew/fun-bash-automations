@@ -14,11 +14,20 @@ workflows across Claude, Codex, and future harnesses.
   technically allow `git push`.
 - Use `push-gate` before any push operation that requires approval.
 - **Never bypass push-gate.** Do not suggest, run, or document
-  `PG_SKIP_EDIT=1`, `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`, or any
-  pattern that pipes automated confirmations into the approval prompt. The editor review step
-  is the policy. When push-gate blocks and no interactive terminal is
-  available, stop and ask the user to run `pg compose` in their own terminal.
-  Details: `llm/command-guard-policy.md` → Push-gate bypass prohibition.
+  `PG_SKIP_EDIT=1`, `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`,
+  `PG_ALLOW_INFERENCE=1` (that escape hatch is for humans with no
+  agent, not for agents skipping prepare), or any pattern that pipes
+  automated confirmations into the approval prompt. The editor review
+  step is the policy.
+- **Canonical three-step flow:**
+    1. Agent: `pg prepare --what ... --why ... --approach ...` at end of
+       implementation (see the `push-gate-prepare` skill).
+    2. Human: `pg` (or `pg -C <path>`) in their interactive terminal.
+    3. Agent: `pg push --assert-flow "..."`.
+  When push-gate blocks and no interactive terminal is available, stop
+  and ask the user to run `pg` (not `pg compose` — that command is
+  removed). Details: `llm/command-guard-policy.md` → Push-gate bypass
+  prohibition.
 - Keep shared behavior harness-agnostic in this file and in `llm/skills`.
 
 ## Default Execution Standard

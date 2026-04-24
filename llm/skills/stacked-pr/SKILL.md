@@ -47,20 +47,25 @@ git checkout -b mho/feature-ui
 # ... make changes, commit ...
 ```
 
-## Step 2: Request push-gate approval
+## Step 2: Prepare + request push-gate approval (per branch)
 
-Include the `cd` so the durable lease draft is generated in the right repo/worktree.
+For each branch in the stack, run `pg prepare` from that branch's
+worktree/repo, then tell the user to approve. See the `push-gate-prepare`
+skill for field guidance.
 
-Tell the user:
+```bash
+pg -C <absolute-repo-path> prepare \
+  --what     'one-line what this branch changes' \
+  --why      'one-line motivating reason' \
+  --approach 'one-line strategy'
+```
 
-> All branches ready. Run in your terminal:
-> ```
-> cd <working-directory>
-> pg draft-approve \
->   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
->   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
-> ```
-> Then run the generated `/tmp/pg-approve-...sh` script after reviewing it. Repeat per branch in stack order.
+Then tell the user:
+
+> **Branch `<branch>` ready.** Run in your terminal:
+>     pg -C <absolute-repo-path>
+
+Repeat per branch in stack order.
 
 ## Step 3: Push all branches and create PRs
 
@@ -103,11 +108,12 @@ When you update a parent branch, rebase children to pick up changes:
 # After updating mho/feature-base
 git checkout mho/feature-api
 git rebase mho/feature-base
-# HEAD changed — user needs a replacement lease before pushing
-pg draft-approve \
-  --intent $'allow pushes for mho/feature-api\nsame branch\nsame pr\nnew lease after rewrite' \
-  --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto parent\nrewrite branch'
-# user runs generated script
+# HEAD changed — prepare a fresh brief and ask user to re-approve
+pg prepare \
+  --what     'rebase mho/feature-api onto updated mho/feature-base' \
+  --why      'pick up parent changes; preserve incremental diff' \
+  --approach 'git rebase; re-push with --force-with-lease'
+# Tell user: pg -C <repo>
 pg push --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto parent\nrewrite branch' --force-with-lease
 ```
 
@@ -124,10 +130,11 @@ gh pr edit <child-PR-number> --base main
 # Rebase child onto main to clean up merge base
 git checkout mho/feature-api
 git rebase main
-pg draft-approve \
-  --intent $'allow pushes for mho/feature-api\nsame branch\nsame pr\nnew lease after rewrite' \
-  --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto main\nrewrite branch'
-# user runs generated script
+pg prepare \
+  --what     'rebase mho/feature-api onto main after parent merge' \
+  --why      're-target child now that parent PR landed' \
+  --approach 'git rebase onto main; re-push with --force-with-lease'
+# Tell user: pg -C <repo>
 pg push --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto main\nrewrite branch' --force-with-lease
 ```
 
