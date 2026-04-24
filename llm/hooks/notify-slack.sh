@@ -147,6 +147,24 @@ notify_editor_scheme() {
 
 # URL-encode path segment: keep / : - _ . ~ and alnum, percent-encode the rest.
 # Needed because terminal-notifier -open goes through NSURL which is strict.
+# Strip markdown markers so notification banners don't show literal
+# backticks, asterisks, and link syntax. macOS notifications are plain
+# text; we keep the Slack-flavored version separately for the Slack side.
+strip_markdown_for_banner() {
+  printf '%s' "$1" \
+    | sed -E '
+        s/```[^`]*```//g;
+        s/`([^`]+)`/\1/g;
+        s/\*\*([^*]+)\*\*/\1/g;
+        s/__([^_]+)__/\1/g;
+        s/\[([^]]+)\]\([^)]+\)/\1/g;
+        s/^#{1,6}[[:space:]]+//;
+        s/^[[:space:]]*[-*+•][[:space:]]+/• /;
+      ' \
+    | tr -s '\n' ' ' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 url_encode_path() {
   local s="$1" out="" c i
   for ((i=0; i<${#s}; i++)); do
@@ -178,7 +196,7 @@ send_macos_notification() {
     esac
   fi
   local one_line
-  one_line=$(printf '%s' "$message" | tr '\n' ' ' | cut -c1-200)
+  one_line=$(strip_markdown_for_banner "$message" | cut -c1-200)
   if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
     printf 'macos title=%s subtitle=%s message=%s group=%s open=%s activate=%s\n' \
       "$title" "$subtitle" "$one_line" "$group" "${open_url:-<none>}" "${activate:-<none>}" >&2
@@ -233,7 +251,7 @@ case "$EVENT" in
           -m gpt-5-nano \
           -c model_reasoning_effort='"low"' \
           --output-last-message "$_tmp" \
-          "Summarize this assistant-turn output into ONE imperative phrase under 8 words. No period, no trailing punctuation. Output only the phrase:
+          "Summarize what the agent actually DID in this turn as ONE imperative phrase under 8 words. Describe the WORK, not metadata. Skip things like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y feature', 'refactor Z'. No period, no trailing punctuation. Output only the phrase:
 
 $SUMMARY" </dev/null >/dev/null 2>&1
         llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)

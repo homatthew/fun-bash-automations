@@ -34,7 +34,19 @@ url_encode_path() {
 }
 
 normalize_message() {
+  # Strip markdown (backticks, bold/italic, link syntax) since macOS
+  # notifications render as plain text — otherwise you see literal `,
+  # **, and [foo](bar) in the banner.
   printf '%s' "$1" \
+    | sed -E '
+        s/```[^`]*```//g;
+        s/`([^`]+)`/\1/g;
+        s/\*\*([^*]+)\*\*/\1/g;
+        s/__([^_]+)__/\1/g;
+        s/\[([^]]+)\]\([^)]+\)/\1/g;
+        s/^#{1,6}[[:space:]]+//;
+        s/^[[:space:]]*[-*+•][[:space:]]+/• /;
+      ' \
     | tr '\n' ' ' \
     | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
     | cut -c1-300
@@ -118,7 +130,7 @@ case "$EVENT" in
           -m gpt-5-nano \
           -c model_reasoning_effort='"low"' \
           --output-last-message "$_tmp" \
-          "Summarize this assistant-turn output into ONE imperative phrase under 8 words. No period, no trailing punctuation. Output only the phrase:
+          "Summarize what the agent actually DID in this turn as ONE imperative phrase under 8 words. Describe the WORK, not metadata. Skip things like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y feature', 'refactor Z'. No period, no trailing punctuation. Output only the phrase:
 
 $MESSAGE" </dev/null >/dev/null 2>&1
         llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
