@@ -405,34 +405,20 @@ pg_default_change_stats() {
   printf '%s commits, %s files, +%s/-%s\n' "$count" "$files" "${added:-0}" "${removed:-0}"
 }
 
-# Best-effort one-line summary of what's on this branch since the base.
-# Used to pre-fill the "describe change here" placeholder so the user
-# rarely has to type it from scratch.
+# Best-effort multi-bullet summary of what's on this branch since the
+# base. Called ONCE by pg_cmd_draft_approve and passed down to both
+# default-template functions — no caching needed.
 #
-# If `codex` is on PATH (Netflix gateway auth handled by user's config),
-# ask gpt-5-nano at low reasoning effort. Falls back to the first-subject
-# heuristic on any failure. Opt out with PG_USE_LLM=0.
-#
-# Cached in /tmp/pg-summary.$$ across the current process so draft-approve
-# (which calls this twice, once for intent, once for assert_flow) only
-# hits the model once. PG_DEBUG=1 logs the path taken to stderr.
+# If `codex` is on PATH (Netflix gateway auth via user's config.toml),
+# asks gpt-5-nano at low reasoning effort for 2-3 short imperative
+# bullets. Falls back to first-subject heuristic on any failure.
+# Opt out with PG_USE_LLM=0. PG_DEBUG=1 logs decisions to stderr.
 pg_default_change_summary() {
-  local cache="/tmp/pg-summary.$$"
-  # -s: exists AND non-empty. -f would cache-hit on a 0-byte stale file
-  # left by a prior pg that died mid-flight, silently emptying the draft.
-  if [[ -s "$cache" ]]; then
-    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: cache hit ($cache)" >&2
-    cat "$cache"
-    return 0
-  fi
-  # Purge a stale empty cache so later writes aren't confused.
-  [[ -e "$cache" ]] && rm -f "$cache"
-
   local base_ref count first_subject commits tmp summary
   base_ref=$(pg_default_base_ref_snapshot)
   [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || {
     [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: no base ref" >&2
-    printf 'describe change here\n' | tee "$cache"
+    printf 'describe change here\n'
     return 0
   }
   count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
@@ -441,7 +427,7 @@ pg_default_change_summary() {
 
   if [[ -z "$first_subject" ]]; then
     [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: no new commits" >&2
-    printf 'no new commits\n' | tee "$cache"
+    printf 'no new commits\n'
     return 0
   fi
 
@@ -457,10 +443,10 @@ pg_default_change_summary() {
       elif command -v timeout >/dev/null 2>&1; then
         timeout_cmd=(timeout 15)
       fi
-      # Ask for 2-3 short bullets covering the actual changes, not just a
-      # one-liner. The user gets more signal to lean on when reviewing.
-      local codex_err="/tmp/pg-summary.err.$$"
-      "${timeout_cmd[@]}" codex exec \
+      local codex_err
+      codex_err=$(mktemp -t pg-summary-err) || codex_err=/dev/null
+      # Use :+ expansion so `set -u` doesn't trip on an empty array.
+      "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
         -m gpt-5-nano \
         -c model_reasoning_effort='"low"' \
         --output-last-message "$tmp" \
@@ -475,7 +461,7 @@ $commits" </dev/null >/dev/null 2>"$codex_err"
       fi
       rm -f "$tmp" "$codex_err"
       if [[ "$rc" -eq 0 && -n "$summary" ]]; then
-        printf '%s\n' "$summary" | tee "$cache"
+        printf '%s\n' "$summary"
         return 0
       fi
     fi
@@ -483,48 +469,40 @@ $commits" </dev/null >/dev/null 2>"$codex_err"
     [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: LLM skipped (PG_USE_LLM=${PG_USE_LLM:-1}, codex present=$(command -v codex >/dev/null 2>&1 && echo yes || echo no))" >&2
   fi
 
-  # Fallback: first subject + hint that there's more.
+  # Fallback: first subject + "(+N more)".
   if [[ "$count" -le 1 ]]; then
-    printf '%s\n' "$first_subject" | tee "$cache"
+    printf '%s\n' "$first_subject"
   else
-    printf '%s (+%d more)\n' "$first_subject" "$((count - 1))" | tee "$cache"
+    printf '%s (+%d more)\n' "$first_subject" "$((count - 1))"
   fi
 }
 
 pg_default_user_intent() {
-  local branch="$1"
-  local pr_number="$2"
-  local summary stats
-  summary=$(pg_default_change_summary)
-  stats=$(pg_default_change_stats)
+  local branch="$1" pr_number="$2" summary="$3" stats="$4"
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 allow pushes for $branch
 same branch, same pr #$pr_number
-$summary
+${summary:-describe change here}
 ${stats:-(no stats)}
 EOF
   else
     cat <<EOF
 allow pushes for $branch
 same branch, bind pr after first push
-$summary
+${summary:-describe change here}
 ${stats:-(no stats)}
 EOF
   fi
 }
 
 pg_default_assert_flow() {
-  local branch="$1"
-  local pr_number="$2"
-  local summary stats
-  summary=$(pg_default_change_summary)
-  stats=$(pg_default_change_stats)
+  local branch="$1" pr_number="$2" summary="$3" stats="$4"
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 update pr #$pr_number
 branch $branch
-$summary
+${summary:-describe change here}
 ${stats:-(no stats)}
 no rewrite
 EOF
@@ -532,7 +510,7 @@ EOF
     cat <<EOF
 new pr flow
 branch $branch
-$summary
+${summary:-describe change here}
 ${stats:-(no stats)}
 no rewrite
 EOF
@@ -1054,8 +1032,6 @@ pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
   local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
   local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path scope_json
-  # Always clean up the per-process summary cache, even if we fail partway.
-  trap 'rm -f "/tmp/pg-summary.$$" 2>/dev/null || true' RETURN
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --intent)
@@ -1135,8 +1111,15 @@ pg_cmd_draft_approve() {
     fi
   fi
 
-  [[ -n "$intent" ]] || intent=$(pg_default_user_intent "$branch_name" "$pr_number")
-  [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number")
+  # Compute the change summary (may call codex, ~7s) and stats ONCE,
+  # then feed both default-template generators from the same values.
+  local _pg_summary _pg_stats
+  if [[ -z "$intent" || -z "$assert_flow" ]]; then
+    _pg_summary=$(pg_default_change_summary)
+    _pg_stats=$(pg_default_change_stats)
+  fi
+  [[ -n "$intent" ]] || intent=$(pg_default_user_intent "$branch_name" "$pr_number" "$_pg_summary" "$_pg_stats")
+  [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number" "$_pg_summary" "$_pg_stats")
 
   # Build approved_scope. Auto-detect then let explicit flags override.
   # --no-scope disables semantic approval (falls back to single-push anchor-exact).
@@ -1326,9 +1309,6 @@ EOF
 
   echo "Approval script: $script_file"
   echo "Draft file: $draft_file"
-
-  # Clean up the per-process summary cache so next invocation re-queries.
-  rm -f "/tmp/pg-summary.$$" 2>/dev/null || true
 
   # Auto-run the approval script unless explicitly suppressed. This gives the
   # user a single `pg` command that opens vim on the draft (intent + assert +
