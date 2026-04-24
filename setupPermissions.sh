@@ -130,6 +130,17 @@ if command -v brew &> /dev/null; then
 	#   macOS → terminal-notifier (via brew)
 	#   Linux → notify-send (libnotify, via apt on Debian/Ubuntu)
 	if $IS_MAC; then
+		# alerter: maintained notifier with reliable click-to-open on
+		# macOS 15+ (terminal-notifier's click handler is broken).
+		# Our hooks prefer alerter and fall back to terminal-notifier.
+		if ! command -v alerter &> /dev/null; then
+			echo "Installing alerter..."
+			brew install vjeantet/tap/alerter
+			echo "✓ alerter installed"
+		else
+			echo "✓ alerter already installed"
+		fi
+
 		if ! command -v terminal-notifier &> /dev/null; then
 			echo "Installing terminal-notifier..."
 			brew install terminal-notifier

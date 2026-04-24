@@ -2006,10 +2006,14 @@ pg_notify_approved() {
       done
       open_url="vscode://file$encoded"
     fi
-    local msg="$branch_name${pr_number:+ · PR #$pr_number} — agent may now push"
+    # Title = repo name so the user can tell WHICH repo approved when
+    # multiple notifications stack. Subtitle declares the event.
+    local title="${repo_name:-push-gate}"
+    local subtitle="pg approved · $branch_name${pr_number:+ · PR #$pr_number}"
+    local msg="agent may now push"
     if command -v alerter >/dev/null 2>&1; then
       (
-        resp=$(alerter --title "push-gate" --subtitle "lease approved" \
+        resp=$(alerter --title "$title" --subtitle "$subtitle" \
           --message "$msg" --sound Pop --timeout 60 --ignore-dnd \
           --sender "com.matthewho.claudenotify" --json 2>/dev/null)
         act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
@@ -2019,8 +2023,8 @@ pg_notify_approved() {
       ) >/dev/null 2>&1 &
     else
       local args=(
-        -title "push-gate"
-        -subtitle "lease approved"
+        -title "$title"
+        -subtitle "$subtitle"
         -message "$msg"
         -sound Pop
         -group "pg-approval-$key"
