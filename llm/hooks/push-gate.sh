@@ -418,11 +418,15 @@ pg_default_change_stats() {
 # hits the model once. PG_DEBUG=1 logs the path taken to stderr.
 pg_default_change_summary() {
   local cache="/tmp/pg-summary.$$"
-  if [[ -f "$cache" ]]; then
+  # -s: exists AND non-empty. -f would cache-hit on a 0-byte stale file
+  # left by a prior pg that died mid-flight, silently emptying the draft.
+  if [[ -s "$cache" ]]; then
     [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: cache hit ($cache)" >&2
     cat "$cache"
     return 0
   fi
+  # Purge a stale empty cache so later writes aren't confused.
+  [[ -e "$cache" ]] && rm -f "$cache"
 
   local base_ref count first_subject commits tmp summary
   base_ref=$(pg_default_base_ref_snapshot)
@@ -1050,6 +1054,8 @@ pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
   local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
   local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path scope_json
+  # Always clean up the per-process summary cache, even if we fail partway.
+  trap 'rm -f "/tmp/pg-summary.$$" 2>/dev/null || true' RETURN
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --intent)
