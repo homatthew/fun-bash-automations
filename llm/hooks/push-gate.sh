@@ -1669,11 +1669,6 @@ EOF
 }
 
 pg_cmd_approve() {
-  # Require interactive terminal — prevent agents from self-approving by calling this directly
-  if [[ ! -t 0 ]]; then
-    pg_fail "Blocked: pg approve requires an interactive terminal. Run the approval script printed by pg draft-approve instead."
-    return 1
-  fi
   local draft="" lease_path repo_root approved_anchor existing_created_at existing_created_by
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1688,6 +1683,52 @@ pg_cmd_approve() {
     esac
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+
+  # Enforce that the semantic brief was actually filled in. If the LLM
+  # interview failed AND the user saved without editing, the draft will
+  # still carry placeholder strings. Block with a clear message so the
+  # user re-edits and re-approves.
+  local _pg_brief_w _pg_brief_y _pg_brief_a _pg_intent_text
+  _pg_brief_w=$(jq -r '.brief.what // ""' "$draft")
+  _pg_brief_y=$(jq -r '.brief.why // ""' "$draft")
+  _pg_brief_a=$(jq -r '.brief.approach // ""' "$draft")
+  _pg_intent_text=$(jq -r '.user_intent // ""' "$draft")
+  local _pg_missing=()
+  _pg_is_placeholder() {
+    local v="$1"
+    [[ -z "$v" ]] && return 0
+    case "$v" in
+      *'<describe'*|*'<fill in'*|*'<fill'*|*'<motivating'*|*'<architectural'*) return 0 ;;
+    esac
+    return 1
+  }
+  _pg_is_placeholder "$_pg_brief_w" && _pg_missing+=("brief.what")
+  _pg_is_placeholder "$_pg_brief_y" && _pg_missing+=("brief.why")
+  _pg_is_placeholder "$_pg_brief_a" && _pg_missing+=("brief.approach")
+  # Also scan user_intent for raw placeholder strings in case the brief
+  # object was filled but the rendered intent text wasn't updated.
+  case "$_pg_intent_text" in
+    *'<describe'*|*'<fill in'*|*'<motivating'*|*'<architectural'*)
+      _pg_missing+=("user_intent: still has <fill-in> placeholder text")
+      ;;
+  esac
+  if [[ ${#_pg_missing[@]} -gt 0 ]]; then
+    local msg="Approval blocked: the semantic brief has unfilled fields. Edit the YAML draft and replace the placeholders."
+    msg+=$'\n'"Unfilled:"
+    for f in "${_pg_missing[@]}"; do msg+=$'\n'"  - $f"; done
+    msg+=$'\n'"Draft: $draft"
+    msg+=$'\n'"To re-edit + retry: bash ${draft%.json}.sh"
+    pg_fail "$msg"
+    return 1
+  fi
+
+  # Require interactive terminal — prevent agents from self-approving by
+  # calling this directly. Runs AFTER the brief check so the missing-
+  # fields error still fires in non-tty contexts (helps agents diagnose).
+  if [[ ! -t 0 ]]; then
+    pg_fail "Blocked: pg approve requires an interactive terminal. Run the approval script printed by pg draft-approve instead."
+    return 1
+  fi
 
   repo_root=$(jq -r '.repo_root' "$draft")
   approved_anchor=$(jq -r '.approved_anchor' "$draft")
