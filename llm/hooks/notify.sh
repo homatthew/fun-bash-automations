@@ -30,7 +30,6 @@ cleanup_and_exit() {
 OSC_EXT_PUBLISHER="homatthew"
 OSC_EXT_NAME="vscode-terminal-osc-notifier"
 OSC_EXT_URI_PATH="/focus"
-OSC_NOTIFY_FORMAT="777;notify;tid=%s;%s;%s"
 
 url_encode_path() {
   local s="$1" out="" c i
@@ -84,17 +83,6 @@ notify_editor_scheme() {
   printf '%s' "${NOTIFY_EDITOR_SCHEME:-vscode}"
 }
 
-# Stable per-agent-session so the extension rebinds to the same key
-# across multiple Stop/Notification events from one session. Claude
-# provides SESSION_ID; fall back to pid+time when absent.
-make_stable_tid() {
-  if [ -n "${SESSION_ID:-}" ]; then
-    printf 'fba-%s' "$SESSION_ID"
-  else
-    printf 'fba-%s-%s' "$$" "$(date +%s)"
-  fi
-}
-
 NOTIFY_LOG="${NOTIFY_LOG:-/tmp/fba-notify.log}"
 
 nlog() {
@@ -115,11 +103,22 @@ pick_backend() {
 }
 
 backend_alerter() {
-  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6"
-  nlog "alerter invoke: title=$title subtitle=$subtitle sender=${sender:-<none>} open=${open_url:-<none>}"
+  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="${7:-banner}"
+  # Stop events: short banner (auto-dismisses).
+  # Notification events: alert-style with action button — alerter only renders
+  # as a persistent alert when --actions is supplied; --timeout 0 means no
+  # auto-close so Claude's input prompts don't disappear.
+  local extra_args=()
+  if [ "$style" = "alert" ]; then
+    extra_args+=(--actions "Focus" --timeout 0)
+  else
+    extra_args+=(--timeout 60)
+  fi
+  nlog "alerter invoke: title=$title subtitle=$subtitle style=$style sender=${sender:-<none>} open=${open_url:-<none>}"
   (
     resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$message" \
-      --sound Pop --timeout 60 --ignore-dnd \
+      --sound Pop --ignore-dnd \
+      "${extra_args[@]}" \
       ${sender:+--sender "$sender"} --json 2>&1)
     nlog "alerter response: $resp"
     act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
@@ -147,41 +146,30 @@ backend_terminal_notifier() {
   terminal-notifier "${args[@]}" >/dev/null 2>&1 &
 }
 
-# VS Code integrated terminal: emit an OSC 777 carrying a stable tid
-# so the forked extension binds our tid to this terminal, THEN fire
-# alerter with a URL that hits the extension's URI handler. Extension's
-# own UI is silenced via settings (see bin/install-osc-notifier).
-write_ancestor_pids() {
-  # Walk up the process tree from PPID and write ancestor PIDs to a temp file
-  # so the VS Code extension can match terminal.processId against them.
+# Walk up the process tree from PPID and return ancestor PIDs as a
+# comma-separated list. The VS Code extension matches these against
+# terminal.processId to find the exact terminal among many tabs.
+ancestor_pids() {
   local _pid=$PPID _ppid _pids=""
   for _ in 1 2 3 4 5; do
     _ppid=$(ps -o ppid= -p "$_pid" 2>/dev/null | tr -d ' ')
     [ -z "$_ppid" ] || [ "$_ppid" = "1" ] && break
-    _pids="$_pids$_ppid "
+    _pids="${_pids:+$_pids,}$_ppid"
     _pid=$_ppid
   done
-  printf '%s' "$_pids" > /tmp/fba-ancestor-pids 2>/dev/null || true
-  nlog "vscode: ancestor_pids=$_pids"
+  printf '%s' "$_pids"
 }
 
 backend_vscode() {
-  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5"
-  local tid
-  tid=$(make_stable_tid)
-  write_ancestor_pids
-  local osc_title osc_body
-  osc_title=$(printf '%s' "$subtitle" | tr ';\a\r\n' '    ')
-  osc_body=$(printf '%s'  "$message"  | tr ';\a\r\n' '    ')
-  nlog "vscode: tid=$tid osc_title=$osc_title"
-  # shellcheck disable=SC2059
-  if printf "\e]$OSC_NOTIFY_FORMAT\a\a" "$tid" "$osc_title" "$osc_body" > /dev/tty 2>/dev/null; then
-    nlog "vscode: OSC write ok"
-  else
-    nlog "vscode: OSC write failed (no tty?)"
-  fi
-  local open_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?tid=$(url_encode_path "$tid")&cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")"
-  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url"
+  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" style="${6:-banner}"
+  # Ring the terminal bell so the tab gets a bell icon when not active.
+  printf '\a' > /dev/tty 2>/dev/null || true
+  local pids event_lc
+  pids=$(ancestor_pids)
+  event_lc=$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')
+  nlog "vscode: event=$event_lc pids=$pids"
+  local open_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$pids")&event=$event_lc"
+  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style"
 }
 
 SCRIPT_PATH="$0"
@@ -301,8 +289,7 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   _backend=$(pick_backend)
   _preview_url="$OPEN_URL"
   if [ "$_backend" = "vscode" ]; then
-    _tid=$(make_stable_tid)
-    _preview_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?tid=$(url_encode_path "$_tid")"
+    _preview_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")"
   fi
   printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s sender=%s open=%s\n' \
     "$_backend" "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "${_preview_url:-<none>}" >&2
@@ -310,10 +297,14 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
 fi
 
 _chosen_backend=$(pick_backend)
-nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE"
+# Notification events block on user input — use persistent alert style so
+# they don't auto-dismiss before the user notices.
+ALERT_STYLE="banner"
+[ "$EVENT" = "Notification" ] && ALERT_STYLE="alert"
+nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" ;;
-  alerter)           backend_alerter           "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" ;;
+  vscode)            backend_vscode            "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" ;;
+  alerter)           backend_alerter           "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" ;;
   terminal_notifier) backend_terminal_notifier "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
