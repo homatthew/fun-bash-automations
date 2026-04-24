@@ -393,16 +393,19 @@ pg_find_pr_json() {
   echo "$raw" | jq -c '.[0] // {}'
 }
 
-# "N commits, M files, +X/-Y" — quick size line for intent/assert templates.
+# "N commit(s), M file(s), +X/-Y" — quick size line for intent/assert
+# templates. Pluralizes commit/file so "1 commit, 1 file" reads naturally.
 pg_default_change_stats() {
-  local base_ref count files added removed
+  local base_ref count files added removed commit_word file_word
   base_ref=$(pg_default_base_ref_snapshot)
   [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
   count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
   files=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null | grep -c . || echo 0)
   read -r added removed < <(git diff --numstat "$base_ref"..HEAD 2>/dev/null \
     | awk 'BEGIN{a=0;r=0} {a+=$1; r+=$2} END{print a" "r}')
-  printf '%s commits, %s files, +%s/-%s\n' "$count" "$files" "${added:-0}" "${removed:-0}"
+  [[ "$count" -eq 1 ]] && commit_word=commit || commit_word=commits
+  [[ "$files" -eq 1 ]] && file_word=file   || file_word=files
+  printf '%s %s, %s %s, +%s/-%s\n' "$count" "$commit_word" "$files" "$file_word" "${added:-0}" "${removed:-0}"
 }
 
 # Best-effort multi-bullet summary of what's on this branch since the
@@ -428,6 +431,14 @@ pg_default_change_summary() {
   if [[ -z "$first_subject" ]]; then
     [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: no new commits" >&2
     printf 'no new commits\n'
+    return 0
+  fi
+
+  # Short-circuit for a single commit: the LLM would just paraphrase the
+  # one subject we already have. Print it verbatim and save ~7s.
+  if [[ "$count" -le 1 ]]; then
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: single-commit fast path" >&2
+    printf '%s\n' "$first_subject"
     return 0
   fi
 
@@ -732,6 +743,109 @@ pg_detect_scope() {
     --argjson max_commits "$buffer_commits" \
     --argjson max_added_lines "$buffer_lines" \
     '{base_ref: $base, paths: $paths, subjects: $subjects, max_commits: $max_commits, max_added_lines: $max_added_lines}'
+}
+
+# Ask an LLM whether the current branch diff semantically matches the
+# user-approved intent stored in the lease. Emits {allowed, reason,
+# verdict}. Fails closed on LLM errors.
+pg_validate_intent_match() {
+  local lease_json="$1"
+  local intent commits shortstat base_ref
+
+  intent=$(echo "$lease_json" | jq -r '.user_intent // ""')
+  if [[ -z "$intent" ]]; then
+    jq -n '{allowed:true, verdict:"skip", reason:"lease has no user_intent"}'
+    return 0
+  fi
+
+  base_ref=$(echo "$lease_json" | jq -r '.base_ref_snapshot // empty')
+  if [[ -z "$base_ref" ]] || ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+    jq -n '{allowed:true, verdict:"skip", reason:"base_ref unavailable"}'
+    return 0
+  fi
+
+  commits=$(git log "$base_ref"..HEAD --format='%h %s' 2>/dev/null)
+  [[ -n "$commits" ]] || commits="none"
+  shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+  [[ -n "$shortstat" ]] || shortstat="no diff"
+
+  if ! command -v codex >/dev/null 2>&1; then
+    jq -n --arg r "codex not on PATH; semantic intent check cannot run. Re-run pg with updated intent or install codex." \
+      '{allowed:false, verdict:"unavailable", reason:$r}'
+    return 0
+  fi
+
+  local tmp codex_err timeout_cmd=()
+  tmp=$(mktemp -t pg-intent) || { jq -n '{allowed:false, verdict:"error", reason:"mktemp failed"}'; return 0; }
+  codex_err=$(mktemp -t pg-intent-err) || codex_err=/dev/null
+  if command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd=(gtimeout 20)
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout 20)
+  fi
+
+  local prompt
+  prompt=$(cat <<EOF
+A user pre-approved a git push with this intent:
+
+<intent>
+$intent
+</intent>
+
+The branch currently has these commits since $base_ref:
+
+<commits>
+$commits
+</commits>
+
+Diff summary: $shortstat
+
+Does the actual change on the branch semantically match the approved intent?
+Rules:
+- Respond with EXACTLY one line.
+- Start with MATCH: or MISMATCH: (uppercase, colon).
+- Follow with a brief rationale under 20 words.
+- Err toward MATCH when intent is broad and commits are plausibly in scope.
+- Say MISMATCH only when commits are clearly off-topic or out of scope.
+EOF
+)
+
+  "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
+    -m gpt-5-nano \
+    -c model_reasoning_effort='"low"' \
+    --output-last-message "$tmp" \
+    "$prompt" </dev/null >/dev/null 2>"$codex_err"
+  local rc=$?
+
+  local response reason
+  response=$(awk 'NF{print; exit}' "$tmp" 2>/dev/null)
+  if [[ "${PG_DEBUG:-0}" == "1" ]]; then
+    echo "pg_validate_intent_match: rc=$rc, response: $response" >&2
+    [[ -s "$codex_err" ]] && sed 's/^/  /' "$codex_err" >&2
+  fi
+  rm -f "$tmp" "$codex_err"
+
+  if [[ "$rc" -ne 0 || -z "$response" ]]; then
+    jq -n --arg r "semantic intent check failed to run (codex rc=$rc). Retry or re-run pg with updated intent." \
+      '{allowed:false, verdict:"error", reason:$r}'
+    return 0
+  fi
+
+  case "$response" in
+    MATCH:*)
+      reason=${response#MATCH: }
+      jq -n --arg r "$reason" '{allowed:true, verdict:"match", reason:$r}'
+      ;;
+    MISMATCH:*)
+      reason=${response#MISMATCH: }
+      jq -n --arg r "$reason" \
+        '{allowed:false, verdict:"mismatch", reason:("Blocked: branch diverges from approved intent - " + $r + ". Re-run pg to re-approve, or adjust the branch.")}'
+      ;;
+    *)
+      jq -n --arg r "$response" \
+        '{allowed:false, verdict:"unparseable", reason:("semantic intent check returned unparseable response: " + $r)}'
+      ;;
+  esac
 }
 
 # Validate that the current HEAD diff against lease's base_ref stays within
@@ -1502,6 +1616,19 @@ pg_cmd_list() {
   done
 }
 
+pg_cmd_check_intent() {
+  local branch="${1:-}" branch_ref lease_path lease_json
+  branch_ref=$(pg_branch_ref "$branch")
+  lease_path=$(pg_lease_path_for_ref "$branch_ref")
+  if [[ ! -f "$lease_path" ]]; then
+    jq -n --arg br "$(pg_branch_display "$branch_ref")" \
+      '{allowed:false, verdict:"no-lease", reason:("No lease for " + $br + ". Run `pg` to generate one.")}'
+    return 0
+  fi
+  lease_json=$(cat "$lease_path")
+  pg_validate_intent_match "$lease_json"
+}
+
 pg_cmd_check() {
   local branch="${1:-}" branch_ref lease_path lease_json scope base_ref
   local changed count added subjects validation
@@ -1750,6 +1877,19 @@ pg_cmd_push() {
     pg_fail "Blocked: new commits landed after lease was approved (lease anchor $approved_anchor, HEAD $current_head). Run \`pg\` to re-approve with a semantic scope."
   fi
 
+  # Semantic intent check — LLM compares lease.user_intent to current
+  # commits/diff. Fails closed if the check can't run; fails closed on
+  # MISMATCH. No bypass flag by design.
+  local intent_result intent_allowed intent_reason intent_verdict
+  intent_result=$(pg_validate_intent_match "$lease_json")
+  intent_allowed=$(echo "$intent_result" | jq -r '.allowed')
+  intent_verdict=$(echo "$intent_result" | jq -r '.verdict')
+  if [[ "$intent_allowed" != "true" ]]; then
+    intent_reason=$(echo "$intent_result" | jq -r '.reason')
+    pg_fail "$intent_reason"
+  fi
+  [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_cmd_push: intent check verdict=$intent_verdict" >&2
+
   pg_write_pending_assertion "$remote" "$branch_ref" "$assert_flow" "$lease_json"
   cleanup_pending() {
     rm -f "$pending_path"
@@ -1913,6 +2053,9 @@ pg_main() {
     check)
       pg_cmd_check "$@"
       ;;
+    check-intent)
+      pg_cmd_check_intent "$@"
+      ;;
     revoke)
       pg_cmd_revoke "$@"
       ;;
@@ -1954,6 +2097,9 @@ Usage:
   pg check [branch]      Machine-readable JSON: current HEAD vs approved_scope
                          Output: {allowed, reason?, approved_scope, current:{head,
                          commits, added_lines, changed_files, subjects, approved_anchor}}
+  pg check-intent [branch]
+                         LLM semantic match: lease.user_intent vs current diff
+                         Output: {allowed, verdict, reason}
   pg leases [--all] [--repo <path>] [--json]
                          Cross-repo lease index (SQLite at ~/.push-gate/leases.db)
   pg leases reindex      Scan ~/repos/*/.git/push-gate/leases and populate DB
