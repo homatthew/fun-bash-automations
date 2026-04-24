@@ -105,10 +105,38 @@ fi
 
 case "$EVENT" in
   Stop)
-    SUBTITLE="Done"
     MESSAGE="${LAST_ASSISTANT:-}"
     [ -z "$MESSAGE" ] && MESSAGE="$(extract_transcript_message)"
     [ -z "$MESSAGE" ] && MESSAGE="Task complete"
+    # Subtitle: "<branch> · <LLM one-line title>". LLM falls back to
+    # first-line heuristic if codex unavailable.
+    llm_title=""
+    if command -v codex >/dev/null 2>&1; then
+      _tmp=$(mktemp -t notify-title 2>/dev/null) || _tmp=""
+      if [ -n "$_tmp" ]; then
+        NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
+          -m gpt-5-nano \
+          -c model_reasoning_effort='"low"' \
+          --output-last-message "$_tmp" \
+          "Summarize this assistant-turn output into ONE imperative phrase under 8 words. No period, no trailing punctuation. Output only the phrase:
+
+$MESSAGE" </dev/null >/dev/null 2>&1
+        llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        rm -f "$_tmp"
+      fi
+    fi
+    if [ -z "$llm_title" ]; then
+      llm_title=$(printf '%s\n' "$MESSAGE" \
+        | sed -E 's/^[[:space:]]*[•\-\*]?[[:space:]]*//' \
+        | awk 'NF{print; exit}' \
+        | cut -c1-60)
+      [ -z "$llm_title" ] && llm_title="done"
+    fi
+    if [ -n "${BRANCH:-}" ]; then
+      SUBTITLE="${BRANCH} · ${llm_title}"
+    else
+      SUBTITLE="$llm_title"
+    fi
     ;;
   Notification)
     SUBTITLE="${NOTIF_TITLE:-Needs input}"

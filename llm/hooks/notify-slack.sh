@@ -191,12 +191,44 @@ send_macos_notification() {
 case "$EVENT" in
   Stop)
     ICON=":white_check_mark:"
-    SUBTITLE="Done"
     COLOR="#2eb886"
     RAW="${LAST_ASSISTANT:-}"
     [ -z "$RAW" ] && RAW="$(extract_transcript_last || true)"
     [ -z "$RAW" ] && RAW="Task complete"
     SUMMARY="$(extract_summary "$RAW" 800)"
+    # Subtitle: "<branch> · <one-line activity title>". Branch up front
+    # disambiguates when you have multiple branches/worktrees active.
+    # Title is LLM-generated via codex when available (~2s), falls back
+    # to first-line-of-summary heuristic.
+    llm_title=""
+    if command -v codex >/dev/null 2>&1; then
+      _tmp=$(mktemp -t notify-title 2>/dev/null) || _tmp=""
+      if [ -n "$_tmp" ]; then
+        # NOTIFY_SUPPRESS=1 prevents the child codex's own Stop hook
+        # from firing back into this script (infinite recursion).
+        NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
+          -m gpt-5-nano \
+          -c model_reasoning_effort='"low"' \
+          --output-last-message "$_tmp" \
+          "Summarize this assistant-turn output into ONE imperative phrase under 8 words. No period, no trailing punctuation. Output only the phrase:
+
+$SUMMARY" </dev/null >/dev/null 2>&1
+        llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        rm -f "$_tmp"
+      fi
+    fi
+    if [ -z "$llm_title" ]; then
+      llm_title=$(printf '%s\n' "$SUMMARY" \
+        | sed -E 's/^[[:space:]]*[•\-\*]?[[:space:]]*//' \
+        | awk 'NF{print; exit}' \
+        | cut -c1-60)
+      [ -z "$llm_title" ] && llm_title="done"
+    fi
+    if [ -n "${BRANCH:-}" ]; then
+      SUBTITLE="${BRANCH} · ${llm_title}"
+    else
+      SUBTITLE="$llm_title"
+    fi
     ;;
   Notification)
     ICON=":warning:"
