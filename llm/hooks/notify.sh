@@ -16,6 +16,11 @@ cleanup_and_exit() {
   exit 0
 }
 
+# Suppress when the caller is an internal LLM invocation (e.g. pg
+# running `codex exec` for its semantic brief/intent check). Parent
+# sets NOTIFY_SUPPRESS=1 which propagates through into this hook.
+[ "${NOTIFY_SUPPRESS:-0}" = "1" ] && cleanup_and_exit
+
 url_encode_path() {
   local s="$1" out="" c i
   for ((i=0; i<${#s}; i++)); do

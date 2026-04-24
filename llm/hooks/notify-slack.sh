@@ -23,6 +23,12 @@ INPUT=$(cat)
 emit_success() { [ "${RUNTIME:-}" = "codex" ] && printf '{}\n'; return 0; }
 cleanup_and_exit() { emit_success; exit 0; }
 
+# Suppress notifications when this session is an internal LLM call made
+# by another tool (e.g. pg invoking `codex exec` for the semantic brief
+# or intent check). The parent sets NOTIFY_SUPPRESS=1, which propagates
+# through the codex child process into its Stop hook environment.
+[ "${NOTIFY_SUPPRESS:-0}" = "1" ] && cleanup_and_exit
+
 SCRIPT_PATH="$0"
 case "$SCRIPT_PATH" in
   *"/.codex/"*) RUNTIME="codex" ;;
