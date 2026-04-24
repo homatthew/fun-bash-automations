@@ -1,6 +1,6 @@
 ---
 name: push-gate
-description: "Current push-gate approval policy. ALWAYS invoke BEFORE suggesting or running any `pg`, `push-gate`, lease approval, or bypass flag — before touching `PG_SKIP_EDIT`, `PG_ALLOW_DESCENDANT`, `PG_SCOPE_OVERRIDE`, `/tmp/pg-approve-*.sh`, or `pg draft-approve`. Also when user asks about pushing, approval flow, leases, `compose`, or 'how do I push'. Forces re-read of live policy so stale sessions catch bypass prohibitions and YAML flow changes."
+description: "Current push-gate approval policy. ALWAYS invoke BEFORE suggesting or running any `pg`, `push-gate`, lease approval, or bypass flag. Forces re-read of live policy so stale sessions catch bypass prohibitions and the canonical three-command flow (pg / pg push / pg leases)."
 ---
 
 # push-gate
@@ -41,32 +41,29 @@ examples:
 
 If you find yourself about to type any of those, STOP.
 
-## Step 3 — Sanctioned flow
-
-The only correct way to approve is a human running `pg` (no args) in their
-own interactive terminal.
+## Step 3 — Sanctioned flow (three commands, nothing else)
 
 ```
-cd <repo-root>
-pg
+1. pg [-C <path>]                   ← human in their terminal: approve
+2. pg push --assert-flow "..."      ← agent: push under the active lease
+3. pg leases                        ← (optional) list active leases
 ```
 
-What happens:
+**Step 1** runs a single flow:
+- LLM interviews the commits → fills `what / why / approach / scope / risks`
+- vim opens on `/tmp/pg-approve-<repo>-<branch>.yaml`
+- user edits or leaves the LLM-filled values, `:wq`
+- script renders preview, prompts `Proceed? [y/N]`
+- `y` → lease written at `<repo>/.git/push-gate/leases/refs/heads/<branch>.json`
+- sentinel at `/tmp/pg-approved/<repo>__<branch>` + macOS banner fire
 
-1. Vim opens on `/tmp/pg-approve-<repo>-<branch>.yaml` — the full draft in
-   YAML (intent, agent_assertion_template, approved_scope: paths /
-   subjects / max_commits / max_added_lines).
-2. User edits. `:wq` to continue. `:cq` or empty-save to abort.
-3. Script converts YAML → JSON, validates, renders preview.
-4. `Proceed? [y/N]` — human types `y`.
-5. Lease written; sentinel at `/tmp/pg-approved/<repo>__<branch>` + macOS
-   notification fire.
+**Step 2** (agent) invokes guard layers automatically: anchor → scope → semantic
+intent match. Scope drift or intent drift → blocked with a specific reason.
+Re-pushing the same already-published commits makes 0 LLM calls (instant pass).
 
-After approval, the agent may push with:
-
-```
-pg push --assert-flow $'update pr #<N>\nbranch <branch>\n<summary>\nno rewrite'
-```
+Never suggest `pg compose`, `pg draft-approve`, or `pg approve --draft F` to
+the user — those are internal plumbing called BY `pg`. If you see a user
+output referencing them, re-read `pg --help` to re-ground.
 
 ## Step 4 — When the agent has no tty
 
