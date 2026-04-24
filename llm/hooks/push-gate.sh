@@ -598,7 +598,7 @@ risks: <one line, or "none apparent">
 EOF
 )
 
-  "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
+  NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
     -m gpt-5-nano \
     -c model_reasoning_effort='"low"' \
     --output-last-message "$tmp" \
@@ -663,7 +663,7 @@ pg_default_change_summary() {
       local codex_err
       codex_err=$(mktemp -t pg-summary-err) || codex_err=/dev/null
       # Use :+ expansion so `set -u` doesn't trip on an empty array.
-      "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
+      NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
         -m gpt-5-nano \
         -c model_reasoning_effort='"low"' \
         --output-last-message "$tmp" \
@@ -1103,7 +1103,7 @@ Rules:
 EOF
 )
 
-  "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
+  NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
     -m gpt-5-nano \
     -c model_reasoning_effort='"low"' \
     --output-last-message "$tmp" \
@@ -1988,12 +1988,16 @@ pg_notify_approved() {
       done
       open_url="vscode://file$encoded"
     fi
+    # -sender: use the Claude Notify placeholder bundle so the banner
+    # carries Claude's icon instead of the default terminal-notifier
+    # one. Installed by bin/install-claude-notify-app (ran from fba-deploy).
     local args=(
       -title "push-gate"
       -subtitle "lease approved"
       -message "$branch_name${pr_number:+ · PR #$pr_number} — agent may now push"
       -sound Pop
       -group "pg-approval-$key"
+      -sender "com.matthewho.claudenotify"
       -timeout 10
       -ignoreDnD
     )
