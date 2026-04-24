@@ -120,20 +120,28 @@ case "$EVENT" in
     MESSAGE="${LAST_ASSISTANT:-}"
     [ -z "$MESSAGE" ] && MESSAGE="$(extract_transcript_message)"
     [ -z "$MESSAGE" ] && MESSAGE="Task complete"
-    # Subtitle: "<branch> · <LLM one-line title>". LLM falls back to
-    # first-line heuristic if codex unavailable.
+    # Single codex call produces title + plain-text body for the banner.
+    # LLM strips markdown more reliably than sed.
     llm_title=""
+    llm_body=""
     if command -v codex >/dev/null 2>&1; then
-      _tmp=$(mktemp -t notify-title 2>/dev/null) || _tmp=""
+      _tmp=$(mktemp -t notify-brief 2>/dev/null) || _tmp=""
       if [ -n "$_tmp" ]; then
         NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
           -m gpt-5-nano \
           -c model_reasoning_effort='"low"' \
           --output-last-message "$_tmp" \
-          "Summarize what the agent actually DID in this turn as ONE imperative phrase under 8 words. Describe the WORK, not metadata. Skip things like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y feature', 'refactor Z'. No period, no trailing punctuation. Output only the phrase:
+          "Given the assistant-turn output below, produce EXACTLY two lines for a macOS notification:
 
+title: <one imperative phrase under 8 words describing the WORK the agent did. NOT metadata like 'Commit abc123', 'PR #N created', 'Done', file paths, or SHA hashes. Prefer verbs: 'fix bug in X', 'add Y', 'refactor Z'>
+body: <plain-text summary under 180 chars. STRIP ALL markdown: remove backticks, triple-backtick fences, asterisks (bold/italic), underscores, link brackets, heading hashes, code blocks. Output readable prose only.>
+
+Output ONLY those two lines in that exact format. No preamble, no trailing text.
+
+---
 $MESSAGE" </dev/null >/dev/null 2>&1
-        llm_title=$(awk 'NF{print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        llm_title=$(awk -F': *' '/^title:/{sub(/^title: */,""); print; exit}' "$_tmp" 2>/dev/null | cut -c1-60)
+        llm_body=$(awk -F': *' '/^body:/{sub(/^body: */,""); print; exit}' "$_tmp" 2>/dev/null | cut -c1-200)
         rm -f "$_tmp"
       fi
     fi
@@ -144,6 +152,7 @@ $MESSAGE" </dev/null >/dev/null 2>&1
         | cut -c1-60)
       [ -z "$llm_title" ] && llm_title="done"
     fi
+    [ -n "$llm_body" ] && MESSAGE="$llm_body"
     if [ -n "${BRANCH:-}" ]; then
       SUBTITLE="${BRANCH} · ${llm_title}"
     else
