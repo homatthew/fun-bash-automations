@@ -54,7 +54,17 @@ CREATE TABLE IF NOT EXISTS leases (
 );
 CREATE INDEX IF NOT EXISTS idx_leases_status ON leases(status);
 CREATE INDEX IF NOT EXISTS idx_leases_repo_name ON leases(repo_name);
+-- Structured semantic brief columns. Added idempotently so older DBs
+-- upgrade on first use. "duplicate column name" errors are expected
+-- and silenced by the 2>/dev/null on the whole block.
+ALTER TABLE leases ADD COLUMN brief_what TEXT;
+ALTER TABLE leases ADD COLUMN brief_why TEXT;
+ALTER TABLE leases ADD COLUMN brief_approach TEXT;
+ALTER TABLE leases ADD COLUMN brief_scope TEXT;
+ALTER TABLE leases ADD COLUMN brief_risks TEXT;
+ALTER TABLE leases ADD COLUMN bead_ids TEXT;
 SQL
+  return 0
 }
 
 # Write or refresh a lease row from a lease JSON file.
@@ -69,6 +79,7 @@ pg_db_upsert_lease() {
   # Extract into shell vars via jq (each value null-safe).
   local repo_root branch_ref repo_name branch_name remote pr_number pr_url
   local anchor base_ref status intent assert scope created_at updated_at
+  local brief_what brief_why brief_approach brief_scope brief_risks bead_ids
   repo_root=$(jq -r '.repo_root // ""' "$lease_path")
   branch_ref=$(jq -r '.branch_ref // ""' "$lease_path")
   repo_name=$(jq -r '.repo_name // ""' "$lease_path")
@@ -84,6 +95,12 @@ pg_db_upsert_lease() {
   scope=$(jq -c '.approved_scope // null' "$lease_path")
   created_at=$(jq -r '.created_at // ""' "$lease_path")
   updated_at=$(jq -r '.updated_at // .created_at // ""' "$lease_path")
+  brief_what=$(jq -r '.brief.what // ""' "$lease_path")
+  brief_why=$(jq -r '.brief.why // ""' "$lease_path")
+  brief_approach=$(jq -r '.brief.approach // ""' "$lease_path")
+  brief_scope=$(jq -r '.brief.scope // ""' "$lease_path")
+  brief_risks=$(jq -r '.brief.risks // ""' "$lease_path")
+  bead_ids=$(jq -r '.bead_ids // [] | join(",")' "$lease_path")
 
   [[ -n "$repo_root" && -n "$branch_ref" ]] || return 0
 
@@ -92,7 +109,8 @@ INSERT INTO leases (
   repo_root, branch_ref, repo_name, branch_name, remote,
   pr_number, pr_url, approved_anchor, base_ref, status,
   user_intent, agent_assertion_template, approved_scope_json,
-  lease_file_path, created_at, updated_at
+  lease_file_path, created_at, updated_at,
+  brief_what, brief_why, brief_approach, brief_scope, brief_risks, bead_ids
 ) VALUES (
   $(pg_sql_quote "$repo_root"), $(pg_sql_quote "$branch_ref"),
   $(pg_sql_quote "$repo_name"), $(pg_sql_quote "$branch_name"),
@@ -104,7 +122,10 @@ INSERT INTO leases (
   $(pg_sql_quote "$intent"), $(pg_sql_quote "$assert"),
   $(pg_sql_quote "$scope"),
   $(pg_sql_quote "$lease_path"),
-  $(pg_sql_quote "$created_at"), $(pg_sql_quote "$updated_at")
+  $(pg_sql_quote "$created_at"), $(pg_sql_quote "$updated_at"),
+  $(pg_sql_quote "$brief_what"), $(pg_sql_quote "$brief_why"),
+  $(pg_sql_quote "$brief_approach"), $(pg_sql_quote "$brief_scope"),
+  $(pg_sql_quote "$brief_risks"), $(pg_sql_quote "$bead_ids")
 )
 ON CONFLICT(repo_root, branch_ref) DO UPDATE SET
   repo_name = excluded.repo_name,
@@ -119,7 +140,13 @@ ON CONFLICT(repo_root, branch_ref) DO UPDATE SET
   agent_assertion_template = excluded.agent_assertion_template,
   approved_scope_json = excluded.approved_scope_json,
   lease_file_path = excluded.lease_file_path,
-  updated_at = excluded.updated_at;
+  updated_at = excluded.updated_at,
+  brief_what = excluded.brief_what,
+  brief_why = excluded.brief_why,
+  brief_approach = excluded.brief_approach,
+  brief_scope = excluded.brief_scope,
+  brief_risks = excluded.brief_risks,
+  bead_ids = excluded.bead_ids;
 SQL
 }
 
@@ -438,6 +465,70 @@ pg_default_path_categories() {
   '
 }
 
+# Run a structured semantic interview against codex. Returns YAML with
+# fields: what, why, approach, scope, risks. Caller parses with yq.
+# Empty output on any failure — caller falls back to simpler template.
+pg_semantic_brief() {
+  command -v codex >/dev/null 2>&1 || return 0
+  [[ "${PG_USE_LLM:-1}" == "1" ]] || return 0
+
+  local base_ref commits shortstat branch
+  base_ref=$(pg_default_base_ref_snapshot)
+  [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
+  commits=$(git log "$base_ref"..HEAD --format='%h %s%n%b' 2>/dev/null | head -200)
+  [[ -n "$commits" ]] || return 0
+  shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+  branch=$(pg_branch_name 2>/dev/null || echo "")
+
+  local tmp timeout_cmd=()
+  tmp=$(mktemp -t pg-brief) || return 0
+  if command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd=(gtimeout 20)
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout_cmd=(timeout 20)
+  fi
+
+  local prompt
+  prompt=$(cat <<EOF
+You are interviewing a developer about a git branch they want to push.
+Produce a structured brief by reading ONLY the commits and diff stat
+below. Do not invent facts.
+
+Branch: $branch
+Diff: $shortstat
+
+Commits (subject + body):
+$commits
+
+Output EXACTLY this YAML, with each value on ONE line, under 15 words.
+Use "unstated" for why if no motivation is given. Use "straightforward"
+for approach if no strategy is apparent. Use "none apparent" for risks
+if you cannot identify any. Do not include code fences or preamble.
+
+what: <one line: what changes>
+why: <one line: motivating reason, or "unstated">
+approach: <one line: strategy/trade-off, or "straightforward">
+scope: <one of: tests, prod, docs, deps, config, mixed>
+risks: <one line, or "none apparent">
+EOF
+)
+
+  "${timeout_cmd[@]:+${timeout_cmd[@]}}" codex exec \
+    -m gpt-5-nano \
+    -c model_reasoning_effort='"low"' \
+    --output-last-message "$tmp" \
+    "$prompt" </dev/null >/dev/null 2>&1
+  local rc=$?
+
+  local brief=""
+  if [[ "$rc" -eq 0 && -s "$tmp" ]]; then
+    # Keep only the five known lines to strip any stray prose.
+    brief=$(awk '/^(what|why|approach|scope|risks):/ {print}' "$tmp")
+  fi
+  rm -f "$tmp"
+  printf '%s' "$brief"
+}
+
 # Best-effort multi-bullet summary of what's on this branch since the
 # base. Called ONCE by pg_cmd_draft_approve and passed down to both
 # default-template functions — no caching needed.
@@ -518,70 +609,98 @@ $commits" </dev/null >/dev/null 2>"$codex_err"
   fi
 }
 
-# user_intent is now a CONTRACT, not a narrative. Each line is a
-# falsifiable claim the semantic check will evaluate strictly:
-#   APPROVED: what kinds of changes are allowed (categories + summary)
-#   DENIED:   what must NOT appear (anything else)
-#   LIMITS:   hard caps (commit count, line count)
-#
-# The semantic check prompt (see pg_validate_intent_match) is hostile-
-# by-default: any deviation from APPROVED or hit on DENIED → MISMATCH.
-pg_default_user_intent() {
-  local branch="$1" pr_number="$2" summary="$3" stats="$4"
-  local categories denied
-  categories=$(pg_default_path_categories)
-  # Infer DENIED from categories present. If prod:0, deny production
-  # file additions. If the breakdown doesn't include a category, deny it.
-  denied="any files outside the APPROVED categories"
-  if echo "$categories" | grep -q 'prod:0'; then
-    denied="any production-code changes (src/main, non-test source files); $denied"
-  fi
+# Attempt to auto-detect bead references from commit subjects/bodies on
+# this branch. Looks for tokens like "bead-xxx", "[bead-xxx]", "fba-123",
+# "dump-64q" — alphanumeric-slug ids used by the beads tracker. Returns
+# one id per line, deduped.
+pg_detect_beads() {
+  local base_ref commits
+  base_ref=$(pg_default_base_ref_snapshot)
+  [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
+  commits=$(git log "$base_ref"..HEAD --format='%s%n%b' 2>/dev/null)
+  # Also include branch name in the scan
+  commits="$commits
+$(git branch --show-current 2>/dev/null)"
+  printf '%s\n' "$commits" \
+    | grep -oE '\b[a-z][a-z0-9-]*-[a-z0-9]{2,}\b' \
+    | grep -v -E '^(git|no|yes|pr)-' \
+    | awk '!seen[$0]++'
+}
 
-  local pr_line="same branch, bind pr after first push"
-  local action="new pr flow"
-  if [[ -n "$pr_number" ]]; then
-    pr_line="same branch, same pr #$pr_number"
-    action="update pr #$pr_number"
-  fi
+# Fetch bead metadata as a readable block. Empty if bd is unavailable
+# or no beads are supplied.
+pg_fetch_bead_context() {
+  command -v bd >/dev/null 2>&1 || return 0
+  local beads="$1"
+  [[ -n "$beads" ]] || return 0
+  local out="" id json title notes status
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    json=$(bd show "$id" --json 2>/dev/null) || continue
+    [[ -n "$json" && "$json" != "null" && "$json" != "[]" ]] || continue
+    title=$(echo "$json" | jq -r '.[0].title // .title // empty' 2>/dev/null)
+    notes=$(echo "$json" | jq -r '.[0].notes // .notes // empty' 2>/dev/null)
+    status=$(echo "$json" | jq -r '.[0].status // .status // empty' 2>/dev/null)
+    [[ -z "$title" ]] && continue
+    out="$out${out:+$'\n'}${id} [${status:-unknown}] ${title}"
+    if [[ -n "$notes" && "$notes" != "null" ]]; then
+      # Trim to ~200 chars so a verbose bead doesn't blow up the prompt
+      out="$out"$'\n'"  "$(printf '%s' "$notes" | tr '\n' ' ' | cut -c1-200)
+    fi
+  done <<< "$beads"
+  printf '%s' "$out"
+}
+
+# user_intent is a semantic contract the LLM will evaluate strictly.
+# Brief fields (what/why/approach/scope/risks) come from the LLM
+# interview in pg_semantic_brief; caller extracts them and passes down.
+pg_default_user_intent() {
+  local branch="$1" pr_number="$2" beads_block="$3"
+  local what="$4" why="$5" approach="$6" scope="$7" risks="$8"
+  local target_line="new pr (unbound)"
+  [[ -n "$pr_number" ]] && target_line="PR #$pr_number"
 
   cat <<EOF
-allow pushes for $branch
-$pr_line
-APPROVED:
-${summary:-describe change here}
-file categories: ${categories:-unknown}
-${stats:-(no stats)}
+Branch: $branch → $target_line
+
+APPROVED CHANGE:
+  · what:     ${what:-<describe what changes>}
+  · why:      ${why:-<fill in: motivating bug/ask/ticket>}
+  · approach: ${approach:-<fill in: architectural strategy or trade-offs>}
+  · scope:    ${scope:-<tests, prod, docs, deps, config, mixed>}
+  · risks:    ${risks:-<none apparent>}
+
+RELATED BEADS:
+${beads_block:-  · (none detected — add bead IDs here to ground the semantic check)}
+
 DENIED:
-$denied
-commits that do not match APPROVED summary
-new dependency additions not noted in APPROVED summary
-LIMITS:
-see approved_scope: paths/subjects/max_commits/max_added_lines
+  · any file outside approved_scope.paths
+  · any commit not aligned with APPROVED CHANGE above
+  · any new dependency not named in APPROVED CHANGE
+  · any behavior change beyond APPROVED CHANGE
+
+LIMITS: see approved_scope (paths · subjects · max_commits · max_added_lines)
 EOF
 }
 
-# agent_assertion_template is a CHECKLIST the agent must type via
-# --assert-flow before push. Different shape than intent (terse
-# factual claims agent affirms; intent is the user's grant). Its role:
-# each line is a verifiable commitment. If the diff at push time
-# contradicts any, the semantic check returns MISMATCH.
+# agent_assertion_template: terse checklist the agent types back. Each
+# line is a falsifiable affirmation. LLM cross-checks against the diff.
 pg_default_assert_flow() {
-  local branch="$1" pr_number="$2" summary="$3" stats="$4"
-  local categories
-  categories=$(pg_default_path_categories)
-
-  local action="new pr flow"
-  [[ -n "$pr_number" ]] && action="update pr #$pr_number"
+  local branch="$1" pr_number="$2" beads_block="$3"
+  local what="$4" why="$5" approach="$6" scope="$7" risks="$8"
+  local target_line="create new PR"
+  [[ -n "$pr_number" ]] && target_line="update PR #$pr_number"
 
   cat <<EOF
-$action
-branch $branch
-change matches: ${summary:-describe change here}
-file categories exactly: ${categories:-unknown}
-${stats:-(no stats)}
-no production-code changes beyond APPROVED summary
-no new deps beyond APPROVED summary
-no rewrite
+Branch: $branch → $target_line
+
+Agent affirms ALL:
+  · every new commit furthers: ${what:-<the APPROVED CHANGE>}
+  · no drift from why: ${why:-<stated reason>}
+  · no drift from approach: ${approach:-<stated approach>}
+  · no file outside approved_scope.paths
+  · no new dependency beyond those in APPROVED CHANGE
+  · no history rewrite
 EOF
 }
 
@@ -861,14 +980,14 @@ pg_validate_intent_match() {
 
   local prompt
   prompt=$(cat <<EOF
-A user pre-approved a git push with this contract. Treat it as a
-strict allowlist — APPROVED lines say what is permitted; DENIED lines
-say what must NOT appear; LIMITS bound magnitude. Anything not
-explicitly permitted is denied by default.
+A user pre-approved a git push with this contract. Read the APPROVED
+CHANGE (what, why, approach), RELATED BEADS (linked tracker items
+describing motivation and prior context), and DENIED (what must not
+appear). Anything not clearly consistent with APPROVED is denied.
 
-<intent>
+<contract>
 $intent
-</intent>
+</contract>
 
 The following commits are NEW on the branch since $since_label (the
 last push point, or the base if this is the first push). These are
@@ -878,22 +997,24 @@ the ONLY commits to evaluate — already-pushed commits are out of scope.
 $commits
 </new_commits>
 
-New-commit diff summary: $shortstat
-
-Task: decide if EVERY new commit fits the contract.
+Task: decide if EVERY new commit is semantically consistent with the
+APPROVED CHANGE in the contract — the what, the why, and the approach.
 
 Rules:
 - Respond with EXACTLY one line.
 - Start with MATCH: or MISMATCH: (uppercase, colon).
 - Follow with a brief rationale under 20 words.
-- Be HOSTILE BY DEFAULT. If ANY new commit introduces something the
-  APPROVED section does not clearly permit, respond MISMATCH and name
-  the offending commit.
-- Common MISMATCH triggers: unrelated refactors mixed in, new deps
-  not noted in APPROVED, production-code edits when APPROVED was test-only,
-  scope creep beyond the stated change summary.
-- MATCH is appropriate only when every new commit plainly fits the
-  APPROVED summary and does not trigger DENIED clauses.
+- Be HOSTILE BY DEFAULT. Ambiguity → MISMATCH.
+- MATCH when every new commit plainly furthers the APPROVED CHANGE and
+  coheres with the stated why / approach / linked beads.
+- MISMATCH when ANY new commit:
+    · adds scope the user did not describe (new feature, refactor,
+      cleanup) even if plausible-sounding
+    · diverges from the approach (e.g. different algorithm than stated)
+    · introduces new dependencies not named in APPROVED
+    · touches production code when the approved work is test-only
+    · is off-topic from the linked beads
+- If unsure, choose MISMATCH and name the offending commit.
 EOF
 )
 
@@ -1312,15 +1433,29 @@ pg_cmd_draft_approve() {
     fi
   fi
 
-  # Compute the change summary (may call codex, ~7s) and stats ONCE,
-  # then feed both default-template generators from the same values.
-  local _pg_summary _pg_stats
+  # Run the semantic interview (single codex call) to extract
+  # what/why/approach/scope/risks. Also detect + fetch bead context.
+  local _pg_brief _pg_what _pg_why _pg_approach _pg_scope _pg_risks
+  local _pg_bead_ids _pg_bead_block
   if [[ -z "$intent" || -z "$assert_flow" ]]; then
-    _pg_summary=$(pg_default_change_summary)
-    _pg_stats=$(pg_default_change_stats)
+    _pg_brief=$(pg_semantic_brief)
+    if [[ -n "$_pg_brief" ]]; then
+      _pg_what=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="what"{sub(/^what: */,""); print; exit}')
+      _pg_why=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="why"{sub(/^why: */,""); print; exit}')
+      _pg_approach=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="approach"{sub(/^approach: */,""); print; exit}')
+      _pg_scope=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="scope"{sub(/^scope: */,""); print; exit}')
+      _pg_risks=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="risks"{sub(/^risks: */,""); print; exit}')
+    fi
+    _pg_bead_ids=$(pg_detect_beads)
+    _pg_bead_block=$(pg_fetch_bead_context "$_pg_bead_ids")
+    if [[ -n "$_pg_bead_block" ]]; then
+      _pg_bead_block=$(printf '%s\n' "$_pg_bead_block" | sed 's/^/  · /')
+    fi
   fi
-  [[ -n "$intent" ]] || intent=$(pg_default_user_intent "$branch_name" "$pr_number" "$_pg_summary" "$_pg_stats")
-  [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number" "$_pg_summary" "$_pg_stats")
+  [[ -n "$intent" ]] || intent=$(pg_default_user_intent "$branch_name" "$pr_number" "$_pg_bead_block" \
+    "$_pg_what" "$_pg_why" "$_pg_approach" "$_pg_scope" "$_pg_risks")
+  [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number" "$_pg_bead_block" \
+    "$_pg_what" "$_pg_why" "$_pg_approach" "$_pg_scope" "$_pg_risks")
 
   # Build approved_scope. Auto-detect then let explicit flags override.
   # --no-scope disables semantic approval (falls back to single-push anchor-exact).
@@ -1365,6 +1500,12 @@ pg_cmd_draft_approve() {
     --arg user_intent "$intent" \
     --arg agent_assertion_template "$assert_flow" \
     --argjson approved_scope "$scope_json" \
+    --arg brief_what "${_pg_what:-}" \
+    --arg brief_why "${_pg_why:-}" \
+    --arg brief_approach "${_pg_approach:-}" \
+    --arg brief_scope "${_pg_scope:-}" \
+    --arg brief_risks "${_pg_risks:-}" \
+    --arg bead_ids "${_pg_bead_ids:-}" \
     --arg created_by "${USER:-unknown}" \
     --arg created_at "$(pg_now_utc)" \
     '{
@@ -1384,6 +1525,14 @@ pg_cmd_draft_approve() {
       user_intent: $user_intent,
       agent_assertion_template: $agent_assertion_template,
       approved_scope: $approved_scope,
+      brief: {
+        what: (if $brief_what == "" then null else $brief_what end),
+        why: (if $brief_why == "" then null else $brief_why end),
+        approach: (if $brief_approach == "" then null else $brief_approach end),
+        scope: (if $brief_scope == "" then null else $brief_scope end),
+        risks: (if $brief_risks == "" then null else $brief_risks end)
+      },
+      bead_ids: (if $bead_ids == "" then [] else ($bead_ids | split("\n") | map(select(length > 0))) end),
       created_by: $created_by,
       created_at: $created_at,
       status: "active"
