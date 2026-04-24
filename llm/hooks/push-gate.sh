@@ -1802,10 +1802,10 @@ fi
 
 "\$HELPER" preview-draft --draft "\$DRAFT_FILE"
 echo
-printf 'Proceed? [y/N] '
+printf 'Proceed? [Y/n] '
 read -r answer
 case "\$answer" in
-  y|Y|yes|YES)
+  ""|y|Y|yes|YES)
     "\$HELPER" approve --draft "\$DRAFT_FILE"
     ;;
   *)
@@ -1973,14 +1973,32 @@ pg_notify_approved() {
 
   # 3. macOS desktop notification. Click opens the canonical repo in VS Code.
   if [[ "$(uname -s)" == "Darwin" ]] && command -v terminal-notifier >/dev/null 2>&1; then
-    local repo_root open_url encoded
-    repo_root=$(jq -r '.repo_root // empty' "$draft" 2>/dev/null)
-    if [[ -n "$repo_root" ]]; then
-      # inline minimal URL-encoder for the path segment
+    # Resolve the MAIN repo path (preferred click target) by walking
+    # the lease/draft fields in order of specificity:
+    #   1. draft.common_dir → dirname → main repo path (handles worktrees)
+    #   2. lease_path        → climb up to main repo
+    #   3. draft.repo_root   → worktree path (fallback)
+    # This way the banner always carries -open when we can find ANY
+    # plausible path.
+    local click_path open_url encoded common_dir
+    common_dir=$(jq -r '.common_dir // empty' "$draft" 2>/dev/null)
+    if [[ -n "$common_dir" && -d "$common_dir" ]]; then
+      click_path=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd)
+    fi
+    if [[ -z "$click_path" && -n "$lease_path" && -f "$lease_path" ]]; then
+      # lease is at <common_dir>/push-gate/leases/refs/heads/<branch>.json
+      click_path=$(cd "$lease_path" 2>/dev/null; echo "")  # noop, the lease is a file not a dir
+      local lease_common="${lease_path%%/push-gate/*}"
+      [[ -n "$lease_common" && -d "$lease_common" ]] && click_path=$(cd "$(dirname "$lease_common")" 2>/dev/null && pwd)
+    fi
+    if [[ -z "$click_path" ]]; then
+      click_path=$(jq -r '.repo_root // empty' "$draft" 2>/dev/null)
+    fi
+    if [[ -n "$click_path" ]]; then
       encoded=""
       local c i
-      for ((i=0; i<${#repo_root}; i++)); do
-        c="${repo_root:i:1}"
+      for ((i=0; i<${#click_path}; i++)); do
+        c="${click_path:i:1}"
         case "$c" in
           [a-zA-Z0-9._~/:-]) encoded+="$c" ;;
           *) printf -v c '%%%02X' "'$c"; encoded+="$c" ;;
