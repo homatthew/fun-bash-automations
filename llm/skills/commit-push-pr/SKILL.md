@@ -37,39 +37,48 @@ Create a concise commit message based on staged changes. Follow repo conventions
 
 ## Step 4: Push
 
-**Before pushing, generate a durable `push-gate` draft and ask the user to run the generated approval script.** The push guard hook blocks pushes until the branch has a matching durable lease, and the actual push must go through `pg push --assert-flow ...`.
+Push-gate blocks all `git push` until a lease exists. The canonical flow
+is three commands, one per actor:
 
 > **Do NOT bypass push-gate.** Never suggest `PG_SKIP_EDIT=1`,
-> `PG_ALLOW_DESCENDANT=1`, `yes y | bash /tmp/pg-approve-*.sh`, or any other
-> mechanism that skips the editor review step. The edit-before-approve flow
-> is the policy, not a convenience. If the push is blocked and no
-> interactive terminal is available here, stop and ask the user to run
-> `pg compose` in their own terminal. See
+> `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`, `PG_ALLOW_INFERENCE=1`
+> (that last one is for humans without an agent, not for you), or piping
+> `yes` into the approval prompt. See
 > [`llm/command-guard-policy.md` → Push-gate bypass prohibition](../../command-guard-policy.md).
 
-`pg draft-approve` auto-detects two topology defaults:
-- If an `upstream` remote exists, PR lookup/binding defaults to the upstream repo.
-- Push remote stays sticky for tracked branches; otherwise it prefers `upstream` only when the current viewer has write access there, and falls back to `origin`.
+### 4a. Prepare (agent)
 
-Tell the user (substitute the actual working directory and branch):
-> Ready to push `$BRANCH`. Run in your terminal:
-> ```
-> cd <working-directory>
-> pg draft-approve \
->   --intent $'allow pushes for <branch>\nsame branch\nsame pr\nnew lease after rewrite' \
->   --assert-flow $'update pr #<pr>\nbranch <branch>\n<main areas>\nno rewrite'
-> ```
-> Then run the generated `/tmp/pg-approve-...sh` script after reviewing or editing the draft.
+Hand off your rationale. See the `push-gate-prepare` skill for details.
 
-Once the user confirms the lease was approved, **self-validate** before pushing:
+```bash
+pg prepare \
+  --what     'one-line: what this branch changes' \
+  --why      'one-line: motivating bug/ask' \
+  --approach 'one-line: strategy and trade-offs' \
+  --risks    'one-line: caveats, or "none apparent"'
+```
+
+### 4b. Approve (user)
+
+Tell the user:
+
+> Run in your terminal: `pg -C <absolute-repo-path>`
+
+Their editor opens on the YAML draft with your prepared brief. They
+review, edit if needed, and confirm. On approval, the lease is written
+and a macOS notification fires.
+
+### 4c. Self-validate and push (agent)
+
+After the user confirms, verify the lease still covers the current HEAD:
 
 ```bash
 pg check | jq '{allowed, reason, current}'
 ```
 
-If `.allowed` is `false` or `.current.anchor_matches_head` is `false`, stop and
-ask the user to re-run `pg compose` to refresh the lease. Never skip this
-check or act on a stale lease.
+If `.allowed` is `false` or `.current.anchor_matches_head` is `false`,
+commits have landed since approval or scope has drifted. Re-run
+`pg prepare` with the updated rationale and ask the user to re-run `pg`.
 
 Then push:
 

@@ -465,6 +465,91 @@ pg_default_path_categories() {
   '
 }
 
+# Path to a prefill file written by `pg prepare` before approval.
+# Scoped by (repo, branch) so multiple branches can have concurrent
+# prepares without stepping on each other.
+pg_prepare_path() {
+  local repo_name branch
+  repo_name=$(pg_repo_name)
+  branch=$(pg_branch_name 2>/dev/null || echo "unknown")
+  printf '/tmp/pg-prepare-%s-%s.json' \
+    "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$branch")"
+}
+
+# pg prepare — agent's handoff. Captures rationale (what/why/approach)
+# from the agent that actually did the work, so the user's approval
+# draft reflects real context instead of LLM inference from commits.
+# Required before `pg` will produce a draft (see pg_cmd_draft_approve).
+pg_cmd_prepare() {
+  local what="" why="" approach="" scope="" risks="" beads=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --what)     what="$2"; shift 2 ;;
+      --why)      why="$2"; shift 2 ;;
+      --approach) approach="$2"; shift 2 ;;
+      --scope)    scope="$2"; shift 2 ;;
+      --risks)    risks="$2"; shift 2 ;;
+      --beads)    beads="$2"; shift 2 ;;
+      *) pg_fail "Unknown prepare option: $1"; return 1 ;;
+    esac
+  done
+
+  # Required fields — agents must state these explicitly. Empty or
+  # placeholder-ish values get rejected here rather than leaking into
+  # a draft.
+  local missing=()
+  [[ -z "$what" || "$what" == "<"* ]]         && missing+=("--what")
+  [[ -z "$why" || "$why" == "<"* ]]           && missing+=("--why")
+  [[ -z "$approach" || "$approach" == "<"* ]] && missing+=("--approach")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    local m
+    local msg="pg prepare requires --what, --why, and --approach."
+    msg+=$'\n'"Missing or placeholder-only:"
+    for m in "${missing[@]}"; do msg+=$'\n'"  - $m"; done
+    msg+=$'\n\nExample:'
+    msg+=$'\n'"  pg prepare \\"
+    msg+=$'\n'"    --what 'add LZ4 chunked-value repro test' \\"
+    msg+=$'\n'"    --why 'reproduce size-mismatch bug from prod sync job' \\"
+    msg+=$'\n'"    --approach 'standalone test + hex fixtures; no prod code changes' \\"
+    msg+=$'\n'"    --risks 'dependencies.lock churn from LZ4 bump'"
+    pg_fail "$msg"
+    return 1
+  fi
+
+  local repo_root branch head_sha path
+  repo_root=$(pg_repo_root) || { pg_fail "not in a git repo"; return 1; }
+  branch=$(pg_branch_name 2>/dev/null) || { pg_fail "not on a branch"; return 1; }
+  head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+  path=$(pg_prepare_path)
+
+  jq -n \
+    --arg repo_root "$repo_root" \
+    --arg branch "$branch" \
+    --arg what "$what" \
+    --arg why "$why" \
+    --arg approach "$approach" \
+    --arg scope "$scope" \
+    --arg risks "$risks" \
+    --arg beads "$beads" \
+    --arg head "$head_sha" \
+    --arg at "$(pg_now_utc)" \
+    '{
+      repo_root: $repo_root,
+      branch: $branch,
+      what: $what,
+      why: $why,
+      approach: $approach,
+      scope: (if $scope == "" then null else $scope end),
+      risks: (if $risks == "" then null else $risks end),
+      beads: (if $beads == "" then [] else ($beads | split(",") | map(. | ascii_downcase | gsub("^ +| +$"; ""))) end),
+      prepared_at: $at,
+      prepared_at_head: $head
+    }' > "$path"
+
+  echo "Prepared brief written: $path"
+  echo "Now ask the user to run:  pg -C $repo_root    (or just 'pg' if they're cd'd in)"
+}
+
 # Run a structured semantic interview against codex. Returns YAML with
 # fields: what, why, approach, scope, risks. Caller parses with yq.
 # Empty output on any failure — caller falls back to simpler template.
@@ -1434,46 +1519,93 @@ pg_cmd_draft_approve() {
   fi
 
   # Run the semantic interview (single codex call) to extract
-  # what/why/approach/scope/risks. Also detect + fetch bead context.
-  local _pg_brief _pg_what _pg_why _pg_approach _pg_scope _pg_risks
-  local _pg_bead_ids _pg_bead_block
+  # Brief inputs: prefer a prefill file written by `pg prepare` (agent
+  # handoff), fall back to the LLM-reads-commits interview only when the
+  # user explicitly opts in via PG_ALLOW_INFERENCE=1. Otherwise fail
+  # fast: the agent has richer context than commits alone expose, and
+  # letting pg silently infer undermines the whole semantic check.
+  local _pg_what _pg_why _pg_approach _pg_scope _pg_risks
+  local _pg_bead_ids _pg_bead_block _pg_prepare_path
   if [[ -z "$intent" || -z "$assert_flow" ]]; then
-    _pg_brief=$(pg_semantic_brief)
-    if [[ -n "$_pg_brief" ]]; then
-      _pg_what=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="what"{sub(/^what: */,""); print; exit}')
-      _pg_why=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="why"{sub(/^why: */,""); print; exit}')
-      _pg_approach=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="approach"{sub(/^approach: */,""); print; exit}')
-      _pg_scope=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="scope"{sub(/^scope: */,""); print; exit}')
-      _pg_risks=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="risks"{sub(/^risks: */,""); print; exit}')
-    else
-      # Early, structured warning when the LLM interview couldn't produce
-      # a brief. Surfaced BEFORE the editor opens so the user (and any
-      # agent reading stderr) knows exactly what happened and what to do.
-      cat >&2 <<EOF
-─────────────────────────────────────────────────────────────────
-⚠  semantic brief interview failed
+    _pg_prepare_path=$(pg_prepare_path)
+    if [[ -f "$_pg_prepare_path" ]]; then
+      # Use the agent's prepared brief.
+      _pg_what=$(jq -r '.what // ""' "$_pg_prepare_path")
+      _pg_why=$(jq -r '.why // ""' "$_pg_prepare_path")
+      _pg_approach=$(jq -r '.approach // ""' "$_pg_prepare_path")
+      _pg_scope=$(jq -r '.scope // ""' "$_pg_prepare_path")
+      _pg_risks=$(jq -r '.risks // ""' "$_pg_prepare_path")
+      _pg_bead_ids=$(jq -r '.beads[]? // empty' "$_pg_prepare_path")
+      [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg: using prepared brief from $_pg_prepare_path" >&2
 
-WHAT  pg couldn't auto-fill APPROVED CHANGE (what/why/approach).
-      The draft YAML will open with <fill in: ...> placeholders.
-
-WHY   Likely causes (in order):
-      1. codex not on PATH            (PG_USE_LLM=${PG_USE_LLM:-1})
-      2. codex returned non-zero      (auth, network, gateway)
-      3. PG_USE_LLM=0 is set          (LLM disabled intentionally)
-      Run with PG_DEBUG=1 pg ... to see the codex stderr.
-
-FIX   Two recovery paths, pick one:
-
-      A. Fill the brief manually in vim. Replace each
-         <fill in: ...> line in user_intent / brief.
-         Save :wq; pg approve will re-check and accept.
-
-      B. Abort with :cq, resolve codex, then re-run pg.
-         Check: command -v codex && codex exec --help | head -1
-─────────────────────────────────────────────────────────────────
+      # Warn if prepare is stale (HEAD moved since preparation).
+      local _pg_prep_head _pg_cur_head
+      _pg_prep_head=$(jq -r '.prepared_at_head // ""' "$_pg_prepare_path")
+      _pg_cur_head=$(git rev-parse HEAD 2>/dev/null || echo "")
+      if [[ -n "$_pg_prep_head" && "$_pg_prep_head" != "$_pg_cur_head" ]]; then
+        cat >&2 <<EOF
+⚠  prepared brief is stale
+   prepared at HEAD: ${_pg_prep_head:0:12}
+   current HEAD:     ${_pg_cur_head:0:12}
+   If the agent added new commits after preparing, consider re-running
+   pg prepare to refresh what/why/approach.
 EOF
+      fi
+    elif [[ "${PG_ALLOW_INFERENCE:-0}" == "1" ]]; then
+      # Explicit opt-in: let the LLM infer from commits.
+      local _pg_brief
+      _pg_brief=$(pg_semantic_brief)
+      if [[ -n "$_pg_brief" ]]; then
+        _pg_what=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="what"{sub(/^what: */,""); print; exit}')
+        _pg_why=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="why"{sub(/^why: */,""); print; exit}')
+        _pg_approach=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="approach"{sub(/^approach: */,""); print; exit}')
+        _pg_scope=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="scope"{sub(/^scope: */,""); print; exit}')
+        _pg_risks=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="risks"{sub(/^risks: */,""); print; exit}')
+      fi
+    else
+      # Fail-fast: no prepared brief, no inference opt-in → block.
+      cat >&2 <<EOF
+─────────────────────────────────────────────────────────────────────
+✗  NO PREPARED BRIEF for this branch — approval blocked.
+
+WHAT  pg now requires the agent (Claude, Codex, etc.) to hand off a
+      semantic brief BEFORE you approve a push. The brief captures
+      what the agent did, why, and the approach it chose — context
+      that isn't in commit subjects.
+
+WHY   The semantic check at push time compares new commits against
+      what you approved. If the brief was inferred from commits only,
+      it's a pale copy of itself — the check just re-reads the same
+      commits. The agent that did the work has the real context
+      (original ask, rejected approaches, caveats).
+
+FIX   1. Ask your agent to run (in this repo):
+
+            pg prepare \\
+              --what     'short: what changes' \\
+              --why      'short: motivating reason' \\
+              --approach 'short: strategy and trade-offs' \\
+              --risks    'short: any concern or caveat'
+
+         The agent should invoke this at the END of its implementation,
+         before telling you to run pg.
+
+      2. Then re-run:   pg   (or pg -C <repo>)
+
+      Escape hatch (rare): if no agent is involved and you want to
+      author the brief yourself via the LLM interview:
+
+         PG_ALLOW_INFERENCE=1 pg
+
+─────────────────────────────────────────────────────────────────────
+EOF
+      pg_fail "pg prepare required before approval. See the message above."
+      return 1
     fi
-    _pg_bead_ids=$(pg_detect_beads)
+    # Bead detection still happens either way.
+    if [[ -z "$_pg_bead_ids" ]]; then
+      _pg_bead_ids=$(pg_detect_beads)
+    fi
     _pg_bead_block=$(pg_fetch_bead_context "$_pg_bead_ids")
     if [[ -n "$_pg_bead_block" ]]; then
       _pg_bead_block=$(printf '%s\n' "$_pg_bead_block" | sed 's/^/  · /')
@@ -1776,6 +1908,12 @@ pg_cmd_approve() {
   echo "Lease approved: $lease_path"
   pg_db_upsert_lease "$lease_path" || true
   pg_notify_approved "$draft" "$lease_path" || true
+
+  # Consume the prepare prefill so the next approval requires a fresh
+  # handoff (agents must restate rationale for each approval cycle).
+  local _pg_consumed_prepare
+  _pg_consumed_prepare=$(pg_prepare_path 2>/dev/null || true)
+  [[ -n "$_pg_consumed_prepare" && -f "$_pg_consumed_prepare" ]] && rm -f "$_pg_consumed_prepare"
 }
 
 # Notify the initiating Claude/Codex session that the lease was approved.
@@ -2253,6 +2391,9 @@ pg_main() {
     draft-approve)
       pg_cmd_draft_approve "$@"
       ;;
+    prepare)
+      pg_cmd_prepare "$@"
+      ;;
     approve)
       pg_cmd_approve "$@"
       ;;
@@ -2307,17 +2448,22 @@ pg_main() {
       ;;
     ""|help|--help|-h)
       cat <<'EOF'
-Push-gate — approve a branch, then push through the guard.
+Push-gate — agent prepares, human approves, agent pushes.
 
-The three steps you'll ever type:
+The canonical three-step flow (one command per actor):
 
-  1.  pg [-C <path>]                APPROVE a branch for pushing
-                                    (LLM interview → vim → y/N → lease).
+  1. AGENT:  pg prepare --what "..." --why "..." --approach "..."
+             Captures the agent's real context before handoff.
 
-  2.  pg push --assert-flow "..."   PUSH under the active lease.
-                                    Scope + semantic checks run here.
+  2. HUMAN:  pg [-C <path>]
+             Opens vim on the agent's brief, review, y/N, lease written.
 
-  3.  pg leases                     LIST active leases across repos.
+  3. AGENT:  pg push --assert-flow "..."
+             Scope + semantic checks run, then git push.
+
+Status / inspection:
+
+  pg leases                        All active leases across repos.
 
 Useful inspection:
 

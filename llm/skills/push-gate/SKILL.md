@@ -34,6 +34,9 @@ examples:
 - `PG_SKIP_EDIT=1` — skips the vim review step, which IS the policy.
 - `PG_ALLOW_DESCENDANT=1` — bypasses anchor-exact on legacy leases.
 - `PG_SCOPE_OVERRIDE=1` — bypasses semantic scope validation.
+- `PG_ALLOW_INFERENCE=1` — skips the agent prepare step and falls back
+  to LLM-inferred brief from commits. Reserved for humans working
+  without an agent; agents must call `pg prepare` instead.
 - `yes | …`, `<<<y`, here-strings, or any other pattern that pipes an
   automated confirmation into the approval prompt.
 - Running `/tmp/pg-approve-*.sh` directly with env overrides when bare `pg`
@@ -61,9 +64,13 @@ If you find yourself about to type any of those, STOP.
 intent match. Scope drift or intent drift → blocked with a specific reason.
 Re-pushing the same already-published commits makes 0 LLM calls (instant pass).
 
-Never suggest `pg compose`, `pg draft-approve`, or `pg approve --draft F` to
-the user — those are internal plumbing called BY `pg`. If you see a user
-output referencing them, re-read `pg --help` to re-ground.
+Never suggest `pg draft-approve`, `pg approve --draft F`, or `pg compose`
+(removed) to the user — those are internal plumbing called BY `pg`. If
+you see a user output referencing them, re-read `pg --help` to re-ground.
+
+**Before telling the user to run `pg`, always run `pg prepare` first.**
+See the `push-gate-prepare` skill for the required arguments. If `pg`
+blocks with "NO PREPARED BRIEF", your fix is `pg prepare`, not a bypass.
 
 ## Step 4 — When the agent has no tty
 

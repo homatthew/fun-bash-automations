@@ -57,6 +57,8 @@ workaround when a push is blocked:
 - `PG_SKIP_EDIT=1` (bypasses the editor review step)
 - `PG_ALLOW_DESCENDANT=1` (overrides lease-anchor drift)
 - `PG_SCOPE_OVERRIDE=1` (overrides the approved_scope path/commit/line caps)
+- `PG_ALLOW_INFERENCE=1` (escape hatch for HUMANS working without an agent
+  — agents must run `pg prepare` instead)
 - Piping `yes`, `echo y`, or any non-interactive confirmation into the
   approval prompt
 - Manually editing `~/.push-gate/` lease state or `/tmp/pg-approve-*.json`
@@ -65,11 +67,15 @@ workaround when a push is blocked:
   to unblock it
 
 When push-gate blocks and no interactive terminal is available, the correct
-response is: stop, tell the user to run `pg compose` (or
-`bash /tmp/pg-approve-<repo>-<branch>.sh` without env overrides) in their own
-terminal, and wait. The `--assert-flow TEXT` argument on `pg push` is the
-semantic-scope assertion checked against the approved template — it is NOT a
-bypass.
+response has two parts:
+
+1. Agent runs `pg prepare --what ... --why ... --approach ...` to hand off
+   the rationale (see `push-gate-prepare` skill).
+2. Agent asks the user to run `pg` (or `pg -C <path>`) in their own
+   terminal, and waits.
+
+The `--assert-flow TEXT` argument on `pg push` is the semantic-scope
+assertion checked against the approved template — it is NOT a bypass.
 
 ### Semantic self-check: `pg check`
 
@@ -82,9 +88,10 @@ current HEAD against the active lease's `approved_scope`. Output is JSON:
 - `current` — head, approved_anchor, `anchor_matches_head`, commits,
   added_lines, changed_files, subjects
 
-If `allowed: false` or `anchor_matches_head: false`, stop and ask the user to
-regenerate the lease with `pg compose`. Never push on a stale or
-scope-violating lease, and never bypass the failure with an override env.
+If `allowed: false` or `anchor_matches_head: false`, stop, run
+`pg prepare` again with the updated rationale, then ask the user to run
+`pg` to regenerate the lease. Never push on a stale or scope-violating
+lease, and never bypass the failure with an override env.
 
 ### Git config and bypasses
 
@@ -129,6 +136,15 @@ scope-violating lease, and never bypass the failure with an override env.
 ### GitHub destructive actions
 
 - Block agent-initiated merge/close/delete actions that require human judgment
+
+### GitHub host safety
+
+- Block `GH_HOST=github.netflix.net`; agents must use
+  `GH_HOST=git.netflix.net` for Netflix GHE
+- Block `gh api` gist creation unless the command explicitly targets Netflix
+  GHE via `GH_HOST=git.netflix.net` or `--hostname git.netflix.net`
+- Block gist uploads unless uploaded filenames or gist payload keys use
+  contiguous ordered prefixes like `01_...`, `02_...`, `03_...`
 
 ### Process killing
 
