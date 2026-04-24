@@ -2006,21 +2006,31 @@ pg_notify_approved() {
       done
       open_url="vscode://file$encoded"
     fi
-    # -sender: use the Claude Notify placeholder bundle so the banner
-    # carries Claude's icon instead of the default terminal-notifier
-    # one. Installed by bin/install-claude-notify-app (ran from fba-deploy).
-    local args=(
-      -title "push-gate"
-      -subtitle "lease approved"
-      -message "$branch_name${pr_number:+ · PR #$pr_number} — agent may now push"
-      -sound Pop
-      -group "pg-approval-$key"
-      -sender "com.matthewho.claudenotify"
-      -timeout 10
-      -ignoreDnD
-    )
-    [[ -n "${open_url:-}" ]] && args+=(-open "$open_url")
-    terminal-notifier "${args[@]}" >/dev/null 2>&1 &
+    local msg="$branch_name${pr_number:+ · PR #$pr_number} — agent may now push"
+    if command -v alerter >/dev/null 2>&1; then
+      (
+        resp=$(alerter --title "push-gate" --subtitle "lease approved" \
+          --message "$msg" --sound Pop --timeout 60 --ignore-dnd \
+          --sender "com.matthewho.claudenotify" --json 2>/dev/null)
+        act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
+        if [[ "$act" == "contentsClicked" && -n "${open_url:-}" ]]; then
+          open "$open_url" >/dev/null 2>&1 || true
+        fi
+      ) >/dev/null 2>&1 &
+    else
+      local args=(
+        -title "push-gate"
+        -subtitle "lease approved"
+        -message "$msg"
+        -sound Pop
+        -group "pg-approval-$key"
+        -sender "com.matthewho.claudenotify"
+        -timeout 10
+        -ignoreDnD
+      )
+      [[ -n "${open_url:-}" ]] && args+=(-open "$open_url")
+      terminal-notifier "${args[@]}" >/dev/null 2>&1 &
+    fi
   fi
 }
 
