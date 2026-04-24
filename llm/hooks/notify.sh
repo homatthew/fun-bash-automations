@@ -129,8 +129,8 @@ backend_alerter() {
       # Also run `code <cwd>` in background + re-fire for cross-window case.
       # Extension ignores the one whose cwd doesn't match its workspace.
       open "$open_url" >/dev/null 2>&1 || true
-      if [[ "$open_url" == *"&cwd="* ]] && command -v code >/dev/null 2>&1; then
-        _cwd=$(printf '%s' "$open_url" | sed 's/.*&cwd=//' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
+      if [[ "$open_url" == *"cwd="* ]] && command -v code >/dev/null 2>&1; then
+        _cwd=$(printf '%s' "$open_url" | sed -E 's/.*[?&]cwd=([^&]*).*/\1/' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
         [ -n "$_cwd" ] && ( code "$_cwd" >/dev/null 2>&1; open "$open_url" >/dev/null 2>&1 ) &
       fi
     fi
@@ -213,6 +213,10 @@ else
   REPO="$(basename "$CWD")"
 fi
 
+# Current branch in the working directory (worktrees report their own branch).
+BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+[ "$BRANCH" = "HEAD" ] && BRANCH=""  # detached HEAD — nothing meaningful to show
+
 case "$EVENT" in
   Stop)
     MESSAGE="${LAST_ASSISTANT:-}"
@@ -261,12 +265,17 @@ $MESSAGE" </dev/null >/dev/null 2>&1
     # Claude's payload only carries a generic "needs your attention" string.
     # Pull the last assistant message from the transcript so the banner shows
     # the actual question/context the user has to act on.
-    SUBTITLE="${NOTIF_TITLE:-Needs input}"
     _ctx="$(extract_transcript_message)"
     if [ -n "$_ctx" ]; then
       MESSAGE="$_ctx"
     else
       MESSAGE="${NOTIF_MSG:-Waiting for input}"
+    fi
+    _label="${NOTIF_TITLE:-Needs input}"
+    if [ -n "${BRANCH:-}" ]; then
+      SUBTITLE="${BRANCH} · ${_label}"
+    else
+      SUBTITLE="$_label"
     fi
     ;;
   *) cleanup_and_exit ;;
