@@ -184,6 +184,22 @@ send_macos_notification() {
       "$title" "$subtitle" "$one_line" "$group" "${open_url:-<none>}" "${activate:-<none>}" >&2
     return 0
   fi
+  # Prefer alerter (maintained, JSON output, reliable click on macOS 15+).
+  # Fall back to terminal-notifier if alerter is missing.
+  if command -v alerter >/dev/null 2>&1; then
+    # Async: alerter blocks until user interacts or timeout. We spawn it in
+    # a subshell and act on `contentsClicked` via `open` (which uses the
+    # registered URL handler, no scheme surgery needed on our side).
+    (
+      resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$one_line" \
+        --sound Pop --timeout 60 --ignore-dnd --sender "$sender" --json 2>/dev/null)
+      act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
+      if [ "$act" = "contentsClicked" ] && [ -n "$open_url" ]; then
+        open "$open_url" >/dev/null 2>&1 || true
+      fi
+    ) >/dev/null 2>&1 &
+    return 0
+  fi
   command -v terminal-notifier >/dev/null 2>&1 || return 0
   local args=(-title "$title" -subtitle "$subtitle" -message "$one_line" -sound Pop -group "$group" -sender "$sender" -timeout 10 -ignoreDnD)
   if [ -n "$open_url" ]; then

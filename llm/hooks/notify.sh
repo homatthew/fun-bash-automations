@@ -179,13 +179,25 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   cleanup_and_exit
 fi
 
-ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10 -ignoreDnD)
-[ -n "$SENDER" ] && ARGS+=(-sender "$SENDER")
-if [ -n "$OPEN_URL" ]; then
-  ARGS+=(-open "$OPEN_URL")
-elif [ -n "$ACTIVATE" ]; then
-  ARGS+=(-activate "$ACTIVATE")
+if command -v alerter >/dev/null 2>&1; then
+  (
+    resp=$(alerter --title "$REPO" --subtitle "$SUBTITLE" --message "$MESSAGE" \
+      --sound Pop --timeout 60 --ignore-dnd \
+      ${SENDER:+--sender "$SENDER"} --json 2>/dev/null)
+    act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
+    if [ "$act" = "contentsClicked" ] && [ -n "$OPEN_URL" ]; then
+      open "$OPEN_URL" >/dev/null 2>&1 || true
+    fi
+  ) >/dev/null 2>&1 &
+else
+  ARGS=(-title "$REPO" -subtitle "$SUBTITLE" -message "$MESSAGE" -sound Pop -group "$GROUP" -timeout 10 -ignoreDnD)
+  [ -n "$SENDER" ] && ARGS+=(-sender "$SENDER")
+  if [ -n "$OPEN_URL" ]; then
+    ARGS+=(-open "$OPEN_URL")
+  elif [ -n "$ACTIVATE" ]; then
+    ARGS+=(-activate "$ACTIVATE")
+  fi
+  terminal-notifier "${ARGS[@]}" >/dev/null 2>&1 &
 fi
-terminal-notifier "${ARGS[@]}" >/dev/null 2>&1 &
 
 cleanup_and_exit
