@@ -408,6 +408,36 @@ pg_default_change_stats() {
   printf '%s %s, %s %s, +%s/-%s\n' "$count" "$commit_word" "$files" "$file_word" "${added:-0}" "${removed:-0}"
 }
 
+# Categorize changed paths by shape. Returns a single line like:
+#   "tests:6, locks:4, build:1, docs:1, prod:0"
+# Production = anything not matching the other rules. An agent can be
+# asked to affirm "prod:0" as a falsifiable claim.
+pg_default_path_categories() {
+  local base_ref
+  base_ref=$(pg_default_base_ref_snapshot)
+  [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
+  git diff --name-only "$base_ref"..HEAD 2>/dev/null | awk '
+    BEGIN { tests=0; locks=0; build=0; docs=0; prod=0 }
+    {
+      p = tolower($0)
+      if (p ~ /(^|\/)(tests?|src\/test)\// || p ~ /\.test\./ || p ~ /_test\./ || p ~ /test_[^\/]+\.py$/) { tests++; next }
+      if (p ~ /\.lock$/ || p ~ /(^|\/)(package-lock|yarn\.lock|pnpm-lock|poetry\.lock|cargo\.lock|gemfile\.lock)$/) { locks++; next }
+      if (p ~ /(^|\/)(build\.gradle|pom\.xml|cargo\.toml|pyproject\.toml|package\.json|go\.mod|makefile|dockerfile)/ || p ~ /\.gradle$/) { build++; next }
+      if (p ~ /\.(md|rst|adoc|txt)$/ || p ~ /(^|\/)(readme|changelog|license|notice)(\.|$)/) { docs++; next }
+      prod++
+    }
+    END {
+      parts = ""
+      if (tests > 0) parts = parts (parts ? ", " : "") "tests:" tests
+      if (locks > 0) parts = parts (parts ? ", " : "") "locks:" locks
+      if (build > 0) parts = parts (parts ? ", " : "") "build:" build
+      if (docs  > 0) parts = parts (parts ? ", " : "") "docs:" docs
+      parts = parts (parts ? ", " : "") "prod:" prod
+      print parts
+    }
+  '
+}
+
 # Best-effort multi-bullet summary of what's on this branch since the
 # base. Called ONCE by pg_cmd_draft_approve and passed down to both
 # default-template functions — no caching needed.
@@ -488,44 +518,71 @@ $commits" </dev/null >/dev/null 2>"$codex_err"
   fi
 }
 
+# user_intent is now a CONTRACT, not a narrative. Each line is a
+# falsifiable claim the semantic check will evaluate strictly:
+#   APPROVED: what kinds of changes are allowed (categories + summary)
+#   DENIED:   what must NOT appear (anything else)
+#   LIMITS:   hard caps (commit count, line count)
+#
+# The semantic check prompt (see pg_validate_intent_match) is hostile-
+# by-default: any deviation from APPROVED or hit on DENIED → MISMATCH.
 pg_default_user_intent() {
   local branch="$1" pr_number="$2" summary="$3" stats="$4"
-  if [[ -n "$pr_number" ]]; then
-    cat <<EOF
-allow pushes for $branch
-same branch, same pr #$pr_number
-${summary:-describe change here}
-${stats:-(no stats)}
-EOF
-  else
-    cat <<EOF
-allow pushes for $branch
-same branch, bind pr after first push
-${summary:-describe change here}
-${stats:-(no stats)}
-EOF
+  local categories denied
+  categories=$(pg_default_path_categories)
+  # Infer DENIED from categories present. If prod:0, deny production
+  # file additions. If the breakdown doesn't include a category, deny it.
+  denied="any files outside the APPROVED categories"
+  if echo "$categories" | grep -q 'prod:0'; then
+    denied="any production-code changes (src/main, non-test source files); $denied"
   fi
+
+  local pr_line="same branch, bind pr after first push"
+  local action="new pr flow"
+  if [[ -n "$pr_number" ]]; then
+    pr_line="same branch, same pr #$pr_number"
+    action="update pr #$pr_number"
+  fi
+
+  cat <<EOF
+allow pushes for $branch
+$pr_line
+APPROVED:
+${summary:-describe change here}
+file categories: ${categories:-unknown}
+${stats:-(no stats)}
+DENIED:
+$denied
+commits that do not match APPROVED summary
+new dependency additions not noted in APPROVED summary
+LIMITS:
+see approved_scope: paths/subjects/max_commits/max_added_lines
+EOF
 }
 
+# agent_assertion_template is a CHECKLIST the agent must type via
+# --assert-flow before push. Different shape than intent (terse
+# factual claims agent affirms; intent is the user's grant). Its role:
+# each line is a verifiable commitment. If the diff at push time
+# contradicts any, the semantic check returns MISMATCH.
 pg_default_assert_flow() {
   local branch="$1" pr_number="$2" summary="$3" stats="$4"
-  if [[ -n "$pr_number" ]]; then
-    cat <<EOF
-update pr #$pr_number
+  local categories
+  categories=$(pg_default_path_categories)
+
+  local action="new pr flow"
+  [[ -n "$pr_number" ]] && action="update pr #$pr_number"
+
+  cat <<EOF
+$action
 branch $branch
-${summary:-describe change here}
+change matches: ${summary:-describe change here}
+file categories exactly: ${categories:-unknown}
 ${stats:-(no stats)}
+no production-code changes beyond APPROVED summary
+no new deps beyond APPROVED summary
 no rewrite
 EOF
-  else
-    cat <<EOF
-new pr flow
-branch $branch
-${summary:-describe change here}
-${stats:-(no stats)}
-no rewrite
-EOF
-  fi
 }
 
 pg_lease_path_for_ref() {
@@ -745,12 +802,14 @@ pg_detect_scope() {
     '{base_ref: $base, paths: $paths, subjects: $subjects, max_commits: $max_commits, max_added_lines: $max_added_lines}'
 }
 
-# Ask an LLM whether the current branch diff semantically matches the
-# user-approved intent stored in the lease. Emits {allowed, reason,
-# verdict}. Fails closed on LLM errors.
+# Ask an LLM whether commits new since the last push semantically
+# match the user-approved intent. Re-pushes of already-published
+# commits are instant-MATCH (nothing new to check). New commits that
+# drift from APPROVED / hit DENIED → MISMATCH.
 pg_validate_intent_match() {
   local lease_json="$1"
-  local intent commits shortstat base_ref
+  local intent commits shortstat base_ref remote branch
+  local since_ref since_label
 
   intent=$(echo "$lease_json" | jq -r '.user_intent // ""')
   if [[ -z "$intent" ]]; then
@@ -764,9 +823,25 @@ pg_validate_intent_match() {
     return 0
   fi
 
-  commits=$(git log "$base_ref"..HEAD --format='%h %s' 2>/dev/null)
-  [[ -n "$commits" ]] || commits="none"
-  shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+  # Check only commits NEW since last push: remote/branch..HEAD if the
+  # remote tip exists; otherwise fall back to the approval base.
+  remote=$(echo "$lease_json" | jq -r '.remote // "origin"')
+  branch=$(echo "$lease_json" | jq -r '.branch_name // ""')
+  if [[ -n "$branch" ]] && git rev-parse --verify "refs/remotes/$remote/$branch" >/dev/null 2>&1; then
+    since_ref="refs/remotes/$remote/$branch"
+    since_label="$remote/$branch"
+  else
+    since_ref="$base_ref"
+    since_label="$base_ref (first push)"
+  fi
+
+  commits=$(git log "$since_ref"..HEAD --format='%h %s' 2>/dev/null)
+  if [[ -z "$commits" ]]; then
+    # No new commits since last push → trivial re-push, nothing to verify.
+    jq -n '{allowed:true, verdict:"no-new-commits", reason:"no new commits since last push"}'
+    return 0
+  fi
+  shortstat=$(git diff --shortstat "$since_ref"..HEAD 2>/dev/null | sed 's/^ *//')
   [[ -n "$shortstat" ]] || shortstat="no diff"
 
   if ! command -v codex >/dev/null 2>&1; then
@@ -786,27 +861,39 @@ pg_validate_intent_match() {
 
   local prompt
   prompt=$(cat <<EOF
-A user pre-approved a git push with this intent:
+A user pre-approved a git push with this contract. Treat it as a
+strict allowlist — APPROVED lines say what is permitted; DENIED lines
+say what must NOT appear; LIMITS bound magnitude. Anything not
+explicitly permitted is denied by default.
 
 <intent>
 $intent
 </intent>
 
-The branch currently has these commits since $base_ref:
+The following commits are NEW on the branch since $since_label (the
+last push point, or the base if this is the first push). These are
+the ONLY commits to evaluate — already-pushed commits are out of scope.
 
-<commits>
+<new_commits>
 $commits
-</commits>
+</new_commits>
 
-Diff summary: $shortstat
+New-commit diff summary: $shortstat
 
-Does the actual change on the branch semantically match the approved intent?
+Task: decide if EVERY new commit fits the contract.
+
 Rules:
 - Respond with EXACTLY one line.
 - Start with MATCH: or MISMATCH: (uppercase, colon).
 - Follow with a brief rationale under 20 words.
-- Err toward MATCH when intent is broad and commits are plausibly in scope.
-- Say MISMATCH only when commits are clearly off-topic or out of scope.
+- Be HOSTILE BY DEFAULT. If ANY new commit introduces something the
+  APPROVED section does not clearly permit, respond MISMATCH and name
+  the offending commit.
+- Common MISMATCH triggers: unrelated refactors mixed in, new deps
+  not noted in APPROVED, production-code edits when APPROVED was test-only,
+  scope creep beyond the stated change summary.
+- MATCH is appropriate only when every new commit plainly fits the
+  APPROVED summary and does not trigger DENIED clauses.
 EOF
 )
 
