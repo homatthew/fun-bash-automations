@@ -1445,6 +1445,33 @@ pg_cmd_draft_approve() {
       _pg_approach=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="approach"{sub(/^approach: */,""); print; exit}')
       _pg_scope=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="scope"{sub(/^scope: */,""); print; exit}')
       _pg_risks=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="risks"{sub(/^risks: */,""); print; exit}')
+    else
+      # Early, structured warning when the LLM interview couldn't produce
+      # a brief. Surfaced BEFORE the editor opens so the user (and any
+      # agent reading stderr) knows exactly what happened and what to do.
+      cat >&2 <<EOF
+─────────────────────────────────────────────────────────────────
+⚠  semantic brief interview failed
+
+WHAT  pg couldn't auto-fill APPROVED CHANGE (what/why/approach).
+      The draft YAML will open with <fill in: ...> placeholders.
+
+WHY   Likely causes (in order):
+      1. codex not on PATH            (PG_USE_LLM=${PG_USE_LLM:-1})
+      2. codex returned non-zero      (auth, network, gateway)
+      3. PG_USE_LLM=0 is set          (LLM disabled intentionally)
+      Run with PG_DEBUG=1 pg ... to see the codex stderr.
+
+FIX   Two recovery paths, pick one:
+
+      A. Fill the brief manually in vim. Replace each
+         <fill in: ...> line in user_intent / brief.
+         Save :wq; pg approve will re-check and accept.
+
+      B. Abort with :cq, resolve codex, then re-run pg.
+         Check: command -v codex && codex exec --help | head -1
+─────────────────────────────────────────────────────────────────
+EOF
     fi
     _pg_bead_ids=$(pg_detect_beads)
     _pg_bead_block=$(pg_fetch_bead_context "$_pg_bead_ids")
@@ -2199,83 +2226,6 @@ pg_cmd_push() {
   return "$result"
 }
 
-pg_cmd_compose() {
-  local reset="false"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --reset)
-        reset="true"
-        shift
-        ;;
-      *)
-        pg_fail "Unknown compose option: $1"
-        return 1
-        ;;
-    esac
-  done
-
-  local branch repo_name tmpfile helper_path pr_json pr_number intent_body assert_body
-  repo_name=$(pg_repo_name)
-  branch=$(pg_branch_name) || { pg_fail "Not on a branch."; return 1; }
-  tmpfile="/tmp/pg-compose-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch").sh"
-  helper_path=$(pg_helper_path)
-
-  if [[ "$reset" == "true" ]]; then
-    rm -f "$tmpfile"
-  fi
-
-  if [[ ! -f "$tmpfile" ]]; then
-    pr_json=$(pg_find_pr_json "$branch" "$(pg_default_pr_repo 2>/dev/null || true)" 2>/dev/null || echo "{}")
-    pr_number=$(echo "$pr_json" | jq -r '.number // empty')
-
-    if [[ -n "$pr_number" ]]; then
-      intent_body="allow pushes for $branch
-same branch
-same pr #$pr_number
-new commit"
-      assert_body="update pr #$pr_number
-branch $branch
-describe change here
-no rewrite"
-    else
-      intent_body="allow pushes for $branch
-same branch
-bind pr after first push
-new commit"
-      assert_body="push to $branch
-branch $branch
-describe change here
-no rewrite"
-    fi
-
-    cat >"$tmpfile" <<SH
-#!/bin/bash
-# Edit the --intent and --assert-flow strings below. Save + quit to run draft-approve.
-# Empty-save to cancel. File persists — re-run with: pg compose (or: bash $tmpfile)
-# Regenerate template with: pg compose --reset
-
-"$helper_path" draft-approve \\
-  --intent '$intent_body' \\
-  --assert-flow '$assert_body'
-SH
-    chmod +x "$tmpfile"
-  fi
-
-  "${EDITOR:-vi}" "$tmpfile"
-
-  if [[ ! -s "$tmpfile" ]]; then
-    echo "Canceled (empty file)"
-    rm -f "$tmpfile"
-    return 1
-  fi
-
-  # Compose runs draft-approve, which now auto-runs the approval script
-  # (vim on JSON → preview → y/N → approve). No further chaining needed.
-  if ! bash "$tmpfile"; then
-    echo "draft-approve failed — leaving $tmpfile for re-edit."
-    return 1
-  fi
-}
 
 pg_main() {
   # -C <path> (git-style): run from another repo without cd. Must come
@@ -2302,9 +2252,6 @@ pg_main() {
   case "$command" in
     draft-approve)
       pg_cmd_draft_approve "$@"
-      ;;
-    compose)
-      pg_cmd_compose "$@"
       ;;
     approve)
       pg_cmd_approve "$@"
@@ -2360,26 +2307,37 @@ pg_main() {
       ;;
     ""|help|--help|-h)
       cat <<'EOF'
-Usage:
-  pg [-C <path>] <subcommand>    -C runs as if pg were invoked in <path>
-  pg                     Generate approval draft for current branch
-  pg compose [--reset]   Open $EDITOR with a draft-approve template, run on save
-  pg draft-approve       Generate approval draft
-  pg draft-approve --pr-repo HOST/OWNER/REPO
-  pg approve --draft F   Approve durable lease from draft file
-  pg preview-draft --draft F
-  pg push --assert-flow TEXT [--remote origin] [--force-with-lease] [--set-upstream]
-  pg push --branch TARGET [--source-ref HEAD|local-branch] --assert-flow TEXT
-  pg status | show [branch] | list | revoke [branch] | doctor | bind-pr --auto [--repo HOST/OWNER/REPO]
-  pg check [branch]      Machine-readable JSON: current HEAD vs approved_scope
-                         Output: {allowed, reason?, approved_scope, current:{head,
-                         commits, added_lines, changed_files, subjects, approved_anchor}}
-  pg check-intent [branch]
-                         LLM semantic match: lease.user_intent vs current diff
-                         Output: {allowed, verdict, reason}
-  pg leases [--all] [--repo <path>] [--json]
-                         Cross-repo lease index (SQLite at ~/.push-gate/leases.db)
-  pg leases reindex      Scan ~/repos/*/.git/push-gate/leases and populate DB
+Push-gate — approve a branch, then push through the guard.
+
+The three steps you'll ever type:
+
+  1.  pg [-C <path>]                APPROVE a branch for pushing
+                                    (LLM interview → vim → y/N → lease).
+
+  2.  pg push --assert-flow "..."   PUSH under the active lease.
+                                    Scope + semantic checks run here.
+
+  3.  pg leases                     LIST active leases across repos.
+
+Useful inspection:
+
+  pg check [branch]         Is HEAD within the approved scope? (JSON)
+  pg check-intent [branch]  LLM: does the diff match user_intent? (JSON)
+  pg show   [branch]        Full lease dump for a branch.
+  pg revoke [branch]        Drop a lease (new approval required).
+
+Plumbing (called by pg itself — you rarely invoke these directly):
+
+  pg draft-approve      First half of pg: writes the YAML draft.
+  pg approve --draft F  Second half: writes the lease after y/N.
+  pg preview-draft      Renders the summary the approval script shows.
+  pg guard-check        Called by bash-safety-guard on every git push.
+
+Escape hatches:
+
+  -C <path>                Run as if pg were invoked in <path>.
+  PG_USE_LLM=0             Skip LLM interview (you fill brief manually).
+  PG_DEBUG=1               Print codex stderr + decision traces.
 EOF
       ;;
     *)
