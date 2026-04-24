@@ -138,6 +138,13 @@ frontmost_bundle_id() {
   osascript -e 'tell application "System Events" to get bundle identifier of first process whose frontmost is true' 2>/dev/null
 }
 
+# Editor URL scheme. Defaults to vscode. Override with
+# NOTIFY_EDITOR_SCHEME=cursor (or any other editor that implements a
+# similar file URL handler).
+notify_editor_scheme() {
+  printf '%s' "${NOTIFY_EDITOR_SCHEME:-vscode}"
+}
+
 # URL-encode path segment: keep / : - _ . ~ and alnum, percent-encode the rest.
 # Needed because terminal-notifier -open goes through NSURL which is strict.
 url_encode_path() {
@@ -163,7 +170,7 @@ send_macos_notification() {
   # terminal if no repo path is resolvable.
   local open_url="" activate=""
   if [ -n "${MAIN_REPO_PATH:-}" ]; then
-    open_url="vscode://file$(url_encode_path "$MAIN_REPO_PATH")"
+    open_url="$(notify_editor_scheme)://file$(url_encode_path "$MAIN_REPO_PATH")"
   else
     case "${TERM_PROGRAM:-}" in
       ghostty) activate="com.mitchellh.ghostty" ;;
@@ -306,7 +313,7 @@ FOOTER="\`$CWD_DISPLAY\`"
 # VS Code link always points to main repo (not worktree) so it opens the
 # canonical tree regardless of where Claude is actually running.
 if [ -n "$MAIN_REPO_PATH" ]; then
-  FOOTER="$FOOTER · <vscode://file$MAIN_REPO_PATH|VS Code>"
+  FOOTER="$FOOTER · <$(notify_editor_scheme)://file$MAIN_REPO_PATH|VS Code>"
 fi
 
 if [ "$RUNTIME" = "codex" ]; then
