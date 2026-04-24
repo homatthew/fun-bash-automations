@@ -393,19 +393,42 @@ pg_find_pr_json() {
   echo "$raw" | jq -c '.[0] // {}'
 }
 
+# "N commits, M files, +X/-Y" — quick size line for intent/assert templates.
+pg_default_change_stats() {
+  local base_ref count files added removed
+  base_ref=$(pg_default_base_ref_snapshot)
+  [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
+  count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+  files=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null | grep -c . || echo 0)
+  read -r added removed < <(git diff --numstat "$base_ref"..HEAD 2>/dev/null \
+    | awk 'BEGIN{a=0;r=0} {a+=$1; r+=$2} END{print a" "r}')
+  printf '%s commits, %s files, +%s/-%s\n' "$count" "$files" "${added:-0}" "${removed:-0}"
+}
+
 # Best-effort one-line summary of what's on this branch since the base.
 # Used to pre-fill the "describe change here" placeholder so the user
 # rarely has to type it from scratch.
 #
 # If `codex` is on PATH (Netflix gateway auth handled by user's config),
-# ask gpt-5-nano with minimal reasoning effort — takes ~2s and reads all
-# commit subjects. Falls back to the first-subject heuristic on any
-# failure. Opt out with PG_USE_LLM=0.
+# ask gpt-5-nano at low reasoning effort. Falls back to the first-subject
+# heuristic on any failure. Opt out with PG_USE_LLM=0.
+#
+# Cached in /tmp/pg-summary.$$ across the current process so draft-approve
+# (which calls this twice, once for intent, once for assert_flow) only
+# hits the model once. PG_DEBUG=1 logs the path taken to stderr.
 pg_default_change_summary() {
+  local cache="/tmp/pg-summary.$$"
+  if [[ -f "$cache" ]]; then
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: cache hit ($cache)" >&2
+    cat "$cache"
+    return 0
+  fi
+
   local base_ref count first_subject commits tmp summary
   base_ref=$(pg_default_base_ref_snapshot)
   [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || {
-    printf 'describe change here\n'
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: no base ref" >&2
+    printf 'describe change here\n' | tee "$cache"
     return 0
   }
   count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
@@ -413,69 +436,76 @@ pg_default_change_summary() {
   first_subject=$(printf '%s\n' "$commits" | head -1)
 
   if [[ -z "$first_subject" ]]; then
-    printf 'no new commits\n'
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: no new commits" >&2
+    printf 'no new commits\n' | tee "$cache"
     return 0
   fi
 
   if [[ "${PG_USE_LLM:-1}" == "1" ]] \
      && command -v codex >/dev/null 2>&1 \
      && [[ -n "$commits" ]]; then
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: calling codex ($count commits)" >&2
     tmp=$(mktemp -t pg-summary) || tmp=""
     if [[ -n "$tmp" ]]; then
-      # Hard cap so a hung codex doesn't block approval. GNU timeout may be
-      # `gtimeout` (brew coreutils) or `timeout` (Linux). Skip wrapping if
-      # neither is present.
       local timeout_cmd=()
       if command -v gtimeout >/dev/null 2>&1; then
-        timeout_cmd=(gtimeout 10)
+        timeout_cmd=(gtimeout 15)
       elif command -v timeout >/dev/null 2>&1; then
-        timeout_cmd=(timeout 10)
+        timeout_cmd=(timeout 15)
       fi
-      # Note: reasoning_effort="minimal" is incompatible with web_search
-      # which codex pulls in by default; use "low" (still ~5s total).
-      summary=$(
-        "${timeout_cmd[@]}" codex exec \
-          -m gpt-5-nano \
-          -c model_reasoning_effort='"low"' \
-          --output-last-message "$tmp" \
-          "Summarize these commit subjects as ONE imperative sentence under 15 words. Output only the sentence, no markdown, no preamble:
+      # Ask for 2-3 short bullets covering the actual changes, not just a
+      # one-liner. The user gets more signal to lean on when reviewing.
+      local codex_err="/tmp/pg-summary.err.$$"
+      "${timeout_cmd[@]}" codex exec \
+        -m gpt-5-nano \
+        -c model_reasoning_effort='"low"' \
+        --output-last-message "$tmp" \
+        "Summarize the following commit subjects from one branch into 2-3 concise bullets (each <= 12 words, imperative voice). Group related commits. Output ONLY the bullets, one per line starting with '- ', no preamble, no markdown code fences:
 
-$commits" </dev/null >/dev/null 2>&1 \
-          && awk 'NF{print; exit}' "$tmp"
-      )
-      rm -f "$tmp"
-      if [[ -n "$summary" ]]; then
-        printf '%s\n' "$summary"
+$commits" </dev/null >/dev/null 2>"$codex_err"
+      local rc=$?
+      summary=$(awk 'NF{buf = buf ? buf "\n" $0 : $0} END{print buf}' "$tmp" 2>/dev/null)
+      if [[ "${PG_DEBUG:-0}" == "1" ]]; then
+        echo "pg_default_change_summary: codex rc=$rc, $(wc -c < "$tmp" 2>/dev/null || echo 0) bytes out" >&2
+        [[ -s "$codex_err" ]] && { echo "pg_default_change_summary: codex stderr:" >&2; sed 's/^/  /' "$codex_err" >&2; }
+      fi
+      rm -f "$tmp" "$codex_err"
+      if [[ "$rc" -eq 0 && -n "$summary" ]]; then
+        printf '%s\n' "$summary" | tee "$cache"
         return 0
       fi
     fi
+  else
+    [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_default_change_summary: LLM skipped (PG_USE_LLM=${PG_USE_LLM:-1}, codex present=$(command -v codex >/dev/null 2>&1 && echo yes || echo no))" >&2
   fi
 
+  # Fallback: first subject + hint that there's more.
   if [[ "$count" -le 1 ]]; then
-    printf '%s\n' "$first_subject"
+    printf '%s\n' "$first_subject" | tee "$cache"
   else
-    printf '%s (+%d more)\n' "$first_subject" "$((count - 1))"
+    printf '%s (+%d more)\n' "$first_subject" "$((count - 1))" | tee "$cache"
   fi
 }
 
 pg_default_user_intent() {
   local branch="$1"
   local pr_number="$2"
-  local summary
+  local summary stats
   summary=$(pg_default_change_summary)
+  stats=$(pg_default_change_stats)
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 allow pushes for $branch
-same branch
-same pr #$pr_number
+same branch, same pr #$pr_number
 $summary
+${stats:-(no stats)}
 EOF
   else
     cat <<EOF
 allow pushes for $branch
-same branch
-bind pr after first push
+same branch, bind pr after first push
 $summary
+${stats:-(no stats)}
 EOF
   fi
 }
@@ -483,13 +513,15 @@ EOF
 pg_default_assert_flow() {
   local branch="$1"
   local pr_number="$2"
-  local summary
+  local summary stats
   summary=$(pg_default_change_summary)
+  stats=$(pg_default_change_stats)
   if [[ -n "$pr_number" ]]; then
     cat <<EOF
 update pr #$pr_number
 branch $branch
 $summary
+${stats:-(no stats)}
 no rewrite
 EOF
   else
@@ -497,6 +529,7 @@ EOF
 new pr flow
 branch $branch
 $summary
+${stats:-(no stats)}
 no rewrite
 EOF
   fi
@@ -1287,6 +1320,9 @@ EOF
 
   echo "Approval script: $script_file"
   echo "Draft file: $draft_file"
+
+  # Clean up the per-process summary cache so next invocation re-queries.
+  rm -f "/tmp/pg-summary.$$" 2>/dev/null || true
 
   # Auto-run the approval script unless explicitly suppressed. This gives the
   # user a single `pg` command that opens vim on the draft (intent + assert +
