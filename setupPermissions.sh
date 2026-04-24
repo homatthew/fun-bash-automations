@@ -268,6 +268,45 @@ ln -s ~/repos/fun-bash-automations/ghostty/config ~/.config/ghostty/config
 echo "✓ Ghostty config symlinked"
 
 # ==============================================================================
+# VS Code OSC notifier fork
+# ==============================================================================
+# The notify hooks drive a forked VS Code extension that binds an OSC 777
+# `tid` to the emitting terminal so banner clicks focus the right tab.
+# fba-deploy -> bin/install-osc-notifier handles build + install, but we
+# need the clone + vsce + node on PATH before that runs.
+if $IS_MAC; then
+	echo ""
+	echo "Checking VS Code OSC notifier fork..."
+
+	if command -v brew &> /dev/null && ! command -v node &> /dev/null; then
+		echo "Installing node (required for VS Code extension build)..."
+		brew install node
+		echo "✓ node installed"
+	fi
+
+	if command -v npm &> /dev/null; then
+		if ! npm ls -g --depth=0 @vscode/vsce >/dev/null 2>&1; then
+			echo "Installing @vscode/vsce globally..."
+			npm install -g @vscode/vsce
+			echo "✓ @vscode/vsce installed"
+		else
+			echo "✓ @vscode/vsce already installed"
+		fi
+	else
+		echo "⚠ npm not found; VS Code extension build will be skipped"
+	fi
+
+	if [ ! -d "$HOME/repos/vscode-terminal-osc-notifier" ]; then
+		echo "Cloning homatthew/vscode-terminal-osc-notifier..."
+		git clone git@github.com:homatthew/vscode-terminal-osc-notifier.git \
+			"$HOME/repos/vscode-terminal-osc-notifier"
+		echo "✓ fork cloned"
+	else
+		echo "✓ fork already cloned at ~/repos/vscode-terminal-osc-notifier"
+	fi
+fi
+
+# ==============================================================================
 # Claude + Codex Configuration
 # ==============================================================================
 echo ""
@@ -334,4 +373,10 @@ else
 	echo "  (symlink locking only applies on macOS)"
 fi
 echo ""
+if $IS_MAC; then
+	echo "VS Code extension:"
+	echo "  homatthew.vscode-terminal-osc-notifier (source: ~/repos/vscode-terminal-osc-notifier)"
+	echo "  Installed by fba-deploy → bin/install-osc-notifier."
+	echo ""
+fi
 echo "Run 'source ~/.zshrc' to reload configuration."

@@ -29,6 +29,17 @@ cleanup_and_exit() { emit_success; exit 0; }
 # through the codex child process into its Stop hook environment.
 [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && cleanup_and_exit
 
+# ═══════════════════════════════════════════════════════════════════
+# COUPLING: these constants pair with the forked extension at
+#   https://github.com/homatthew/vscode-terminal-osc-notifier
+# If you change any of them, change the corresponding value in that
+# repo too. See llm/hooks/README.md for the full dependency picture.
+# ═══════════════════════════════════════════════════════════════════
+OSC_EXT_PUBLISHER="homatthew"
+OSC_EXT_NAME="vscode-terminal-osc-notifier"
+OSC_EXT_URI_PATH="/focus"
+OSC_NOTIFY_FORMAT="777;notify;tid=%s;%s;%s"
+
 SCRIPT_PATH="$0"
 case "$SCRIPT_PATH" in
   *"/.codex/"*) RUNTIME="codex" ;;
@@ -177,55 +188,97 @@ url_encode_path() {
   printf '%s' "$out"
 }
 
+# Stable per-agent-session so the extension rebinds to the same key
+# across multiple Stop/Notification events from one session.
+make_stable_tid() {
+  if [ -n "${SESSION_ID:-}" ]; then
+    printf 'fba-%s' "$SESSION_ID"
+  else
+    printf 'fba-%s-%s' "$$" "$(date +%s)"
+  fi
+}
+
+pick_backend() {
+  [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && { printf 'suppressed'; return; }
+  if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
+    [ "$(frontmost_bundle_id || true)" = "com.mitchellh.ghostty" ] && { printf 'suppressed'; return; }
+  fi
+  [ "${TERM_PROGRAM:-}" = "vscode" ] && { printf 'vscode'; return; }
+  command -v alerter           >/dev/null 2>&1 && { printf 'alerter'; return; }
+  command -v terminal-notifier >/dev/null 2>&1 && { printf 'terminal_notifier'; return; }
+  printf 'suppressed'
+}
+
+backend_alerter() {
+  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6"
+  (
+    resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$message" \
+      --sound Pop --timeout 60 --ignore-dnd \
+      ${sender:+--sender "$sender"} --json 2>/dev/null)
+    act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
+    if [ "$act" = "contentsClicked" ] && [ -n "$open_url" ]; then
+      open "$open_url" >/dev/null 2>&1 || true
+    fi
+  ) >/dev/null 2>&1 &
+}
+
+backend_terminal_notifier() {
+  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6"
+  local args=(-title "$title" -subtitle "$subtitle" -message "$message"
+              -sound Pop -group "$group" -timeout 10 -ignoreDnD)
+  [ -n "$sender" ]   && args+=(-sender "$sender")
+  [ -n "$open_url" ] && args+=(-open "$open_url")
+  terminal-notifier "${args[@]}" >/dev/null 2>&1 &
+}
+
+# VS Code integrated terminal: emit an OSC 777 carrying a stable tid
+# so the forked extension binds our tid to this terminal, THEN fire
+# alerter with a URL that hits the extension's URI handler. Extension's
+# own UI is silenced via settings (see bin/install-osc-notifier).
+backend_vscode() {
+  local title="$1" subtitle="$2" message="$3" group="$4" sender="$5"
+  local tid
+  tid=$(make_stable_tid)
+  local osc_title osc_body
+  osc_title=$(printf '%s' "$subtitle" | tr ';\a\r\n' '    ')
+  osc_body=$(printf '%s'  "$message"  | tr ';\a\r\n' '    ')
+  # shellcheck disable=SC2059
+  printf "\e]$OSC_NOTIFY_FORMAT\a" "$tid" "$osc_title" "$osc_body" > /dev/tty 2>/dev/null || true
+  local open_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?tid=$(url_encode_path "$tid")"
+  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url"
+}
+
 send_macos_notification() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5"
   [ "$(uname -s)" = "Darwin" ] || return 0
-  if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
-    [ "$(frontmost_bundle_id || true)" = "com.mitchellh.ghostty" ] && return 0
-  fi
-  # Clicking the notification opens VS Code at the canonical repo path
-  # (main repo, not worktree). Falls back to -activate for the current
-  # terminal if no repo path is resolvable.
-  local open_url="" activate=""
-  if [ -n "${MAIN_REPO_PATH:-}" ]; then
-    open_url="$(notify_editor_scheme)://file$(url_encode_path "$MAIN_REPO_PATH")"
-  else
-    case "${TERM_PROGRAM:-}" in
-      ghostty) activate="com.mitchellh.ghostty" ;;
-      vscode)  activate="com.microsoft.VSCode" ;;
-    esac
-  fi
+
   local one_line
   one_line=$(strip_markdown_for_banner "$message" | cut -c1-200)
+  local open_url=""
+  [ -n "${MAIN_REPO_PATH:-}" ] && \
+    open_url="$(notify_editor_scheme)://file$(url_encode_path "$MAIN_REPO_PATH")"
+
+  local backend preview_url
+  backend=$(pick_backend)
+  preview_url="$open_url"
+  if [ "$backend" = "vscode" ]; then
+    local _tid
+    _tid=$(make_stable_tid)
+    preview_url="vscode://${OSC_EXT_PUBLISHER}.${OSC_EXT_NAME}${OSC_EXT_URI_PATH}?tid=$(url_encode_path "$_tid")"
+  fi
+
   if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
-    printf 'macos title=%s subtitle=%s message=%s group=%s open=%s activate=%s\n' \
-      "$title" "$subtitle" "$one_line" "$group" "${open_url:-<none>}" "${activate:-<none>}" >&2
+    printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s open=%s\n' \
+      "$backend" "$title" "$subtitle" "$one_line" "$group" "${preview_url:-<none>}" >&2
     return 0
   fi
-  # Prefer alerter (maintained, JSON output, reliable click on macOS 15+).
-  # Fall back to terminal-notifier if alerter is missing.
-  if command -v alerter >/dev/null 2>&1; then
-    # Async: alerter blocks until user interacts or timeout. We spawn it in
-    # a subshell and act on `contentsClicked` via `open` (which uses the
-    # registered URL handler, no scheme surgery needed on our side).
-    (
-      resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$one_line" \
-        --sound Pop --timeout 60 --ignore-dnd --sender "$sender" --json 2>/dev/null)
-      act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
-      if [ "$act" = "contentsClicked" ] && [ -n "$open_url" ]; then
-        open "$open_url" >/dev/null 2>&1 || true
-      fi
-    ) >/dev/null 2>&1 &
-    return 0
-  fi
-  command -v terminal-notifier >/dev/null 2>&1 || return 0
-  local args=(-title "$title" -subtitle "$subtitle" -message "$one_line" -sound Pop -group "$group" -sender "$sender" -timeout 10 -ignoreDnD)
-  if [ -n "$open_url" ]; then
-    args+=(-open "$open_url")
-  elif [ -n "$activate" ]; then
-    args+=(-activate "$activate")
-  fi
-  terminal-notifier "${args[@]}" >/dev/null 2>&1 &
+
+  case "$backend" in
+    vscode)            backend_vscode            "$title" "$subtitle" "$one_line" "$group" "$sender" ;;
+    alerter)           backend_alerter           "$title" "$subtitle" "$one_line" "$group" "$sender" "$open_url" ;;
+    terminal_notifier) backend_terminal_notifier "$title" "$subtitle" "$one_line" "$group" "$sender" "$open_url" ;;
+    suppressed)        : ;;
+  esac
 }
 
 # Build message parts
