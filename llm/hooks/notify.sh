@@ -258,8 +258,16 @@ $MESSAGE" </dev/null >/dev/null 2>&1
     fi
     ;;
   Notification)
+    # Claude's payload only carries a generic "needs your attention" string.
+    # Pull the last assistant message from the transcript so the banner shows
+    # the actual question/context the user has to act on.
     SUBTITLE="${NOTIF_TITLE:-Needs input}"
-    MESSAGE="${NOTIF_MSG:-Waiting for input}"
+    _ctx="$(extract_transcript_message)"
+    if [ -n "$_ctx" ]; then
+      MESSAGE="$_ctx"
+    else
+      MESSAGE="${NOTIF_MSG:-Waiting for input}"
+    fi
     ;;
   *) cleanup_and_exit ;;
 esac
