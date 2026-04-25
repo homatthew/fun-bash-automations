@@ -6,9 +6,11 @@ set -euo pipefail
 INPUT=$(cat)
 
 emit_success() {
-  if [ "${RUNTIME:-}" = "codex" ]; then
+  case "${RUNTIME:-$0}" in
+    *codex*)
     printf '{}\n'
-  fi
+      ;;
+  esac
 }
 
 cleanup_and_exit() {
@@ -81,6 +83,39 @@ extract_transcript_message() {
   ' "$TRANSCRIPT" 2>/dev/null
 }
 
+extract_display_title() {
+  local raw="$1" out
+  out=$(printf '%s' "$raw" | jq -er '
+    if type == "object" then (.title // empty)
+    elif type == "string" then .
+    else empty end
+  ' 2>/dev/null || true)
+  [ -n "$out" ] && { printf '%s' "$out"; return; }
+
+  out=$(printf '%s\n' "$raw" | sed -n -E 's/^[[:space:]]*[Tt]itle:[[:space:]]*//p' | awk 'NF{print; exit}')
+  [ -n "$out" ] && { printf '%s' "$out"; return; }
+
+  printf '%s' "$raw"
+}
+
+extract_display_message() {
+  local raw="$1" out
+  out=$(printf '%s' "$raw" | jq -er '
+    if type == "object" then (.body // .message // .summary // .title // empty)
+    elif type == "string" then .
+    else empty end
+  ' 2>/dev/null || true)
+  [ -n "$out" ] && { printf '%s' "$out"; return; }
+
+  out=$(printf '%s\n' "$raw" | sed -n -E 's/^[[:space:]]*[Bb]ody:[[:space:]]*//p' | awk 'NF{print; exit}')
+  [ -n "$out" ] && { printf '%s' "$out"; return; }
+
+  out=$(printf '%s\n' "$raw" | sed -n -E 's/^[[:space:]]*[Tt]itle:[[:space:]]*//p' | awk 'NF{print; exit}')
+  [ -n "$out" ] && { printf '%s' "$out"; return; }
+
+  printf '%s' "$raw"
+}
+
 notify_editor_scheme() {
   printf '%s' "${NOTIFY_EDITOR_SCHEME:-vscode}"
 }
@@ -91,8 +126,90 @@ nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$NOTIFY_LOG" 2>/dev/null || true
 }
 
+notify_state_file() {
+  local key
+  key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')
+  printf '/tmp/fba-notify-state-%s' "$key"
+}
+
+notify_summary_file() {
+  local key
+  key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')
+  printf '/tmp/fba-notify-summary-%s' "$key"
+}
+
+write_notify_state() {
+  local file="$1" value="$2"
+  [ -n "$file" ] || return 0
+  printf '%s' "$value" > "$file" 2>/dev/null || true
+}
+
+write_notify_summary() {
+  local file="$1" value="$2"
+  [ -n "$file" ] || return 0
+  [ -n "$value" ] || return 0
+  printf '%s' "$value" > "$file" 2>/dev/null || true
+}
+
+read_notify_summary() {
+  local file="$1"
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  head -n 1 "$file" 2>/dev/null | cut -c1-80
+}
+
+prompt_task_summary() {
+  local prompt="$1" clean
+  clean=$(normalize_message "$prompt" 140)
+  clean=$(printf '%s' "$clean" | sed -E '
+    :again
+    s/^([Oo]k(ay)?|[Gg]reat|[Tt]hen|[Ss]o|[Aa]lso|[Nn]ow)[,[:space:]]+//;
+    s/^([Cc]an|[Cc]ould|[Ww]ould) you[[:space:]]+//;
+    s/^([Pp]lease|[Ll]et'\''s|[Ww]e need to|[Ww]e want to|[Ii] want to|[Jj]ust)[[:space:]]+//;
+    t again
+    s/[[:space:]]+/ /g;
+    s/^ //; s/ $//;')
+
+  if printf '%s' "$clean" | grep -Eiq 'notif|alerter|hook|focus|icon|show|vscode'; then
+    printf 'Improving notification behavior'
+  elif printf '%s' "$clean" | grep -Eiq 'summary|task running|running task|working label|start message'; then
+    printf 'Summarizing running task'
+  elif printf '%s' "$clean" | grep -Eiq 'commit|push|pull request|[^[:alpha:]]pr[^[:alpha:]]'; then
+    printf 'Preparing repository changes'
+  elif printf '%s' "$clean" | grep -Eiq 'test|verify|smoke|lint|build'; then
+    printf 'Verifying current changes'
+  elif printf '%s' "$clean" | grep -Eiq 'debug|log|trace|error|fail|timeout'; then
+    printf 'Debugging runtime behavior'
+  elif printf '%s' "$clean" | grep -Eiq 'readme|doc|architecture|handoff|second brain'; then
+    printf 'Documenting implementation details'
+  elif [ -n "$clean" ]; then
+    printf '%s' "$clean" | awk '
+      {
+        limit = NF < 7 ? NF : 7
+        for (i = 1; i <= limit; i++) {
+          if (i > 1) printf " "
+          printf "%s", $i
+        }
+      }'
+  else
+    printf 'Handling current request'
+  fi
+}
+
+stop_message_is_unhelpful() {
+  local value
+  value=$(normalize_message "$1" 80 | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    ""|"{}"|"[]"|"done"|"task complete"|"task completed"|"complete"|"completed"|"finished")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 dispatch_alerter() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="$7" cwd="$8"
+  local action_label="${9:-Show}"
+  local sound="${10-Pop}"
   local dispatcher spec label
   dispatcher="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-dispatch.sh"
   if [ ! -x "$dispatcher" ]; then
@@ -108,9 +225,11 @@ dispatch_alerter() {
     --arg sender "$sender" \
     --arg open_url "$open_url" \
     --arg style "$style" \
+    --arg action_label "$action_label" \
+    --arg sound "$sound" \
     --arg cwd "$cwd" \
     --arg log "$NOTIFY_LOG" \
-    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, cwd:$cwd, log:$log}' \
+    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, action_label:$action_label, sound:$sound, cwd:$cwd, log:$log}' \
     > "$spec"
   label="com.matthewho.fba.notify.${RUNTIME:-agent}.$$.$RANDOM"
   if launchctl submit -l "$label" -o /tmp/fba-notify-dispatch.out -e /tmp/fba-notify-dispatch.err -- /bin/bash "$dispatcher" "$spec" >/dev/null 2>&1; then
@@ -119,6 +238,40 @@ dispatch_alerter() {
   fi
   nlog "launchctl dispatch failed; falling back to nohup"
   nohup /bin/bash "$dispatcher" "$spec" >/dev/null 2>&1 &
+}
+
+dispatch_working_summary() {
+  local prompt="$1" title="$2" subtitle="$3" group="$4" sender="$5" open_url="$6" cwd="$7" state_file="$8" state_id="$9" summary_file="${10:-}"
+  local summarizer spec label
+  [ -n "$prompt" ] || return 0
+  command -v codex >/dev/null 2>&1 || return 0
+  summarizer="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-working-summary.sh"
+  if [ ! -x "$summarizer" ]; then
+    nlog "working summarizer missing: $summarizer"
+    return 0
+  fi
+  spec=$(mktemp -t fba-notify-working-summary 2>/dev/null) || return 0
+  jq -n \
+    --arg prompt "$prompt" \
+    --arg title "$title" \
+    --arg subtitle "$subtitle" \
+    --arg group "$group" \
+    --arg sender "$sender" \
+    --arg open_url "$open_url" \
+    --arg cwd "$cwd" \
+    --arg log "$NOTIFY_LOG" \
+    --arg state_file "$state_file" \
+    --arg state_id "$state_id" \
+    --arg summary_file "$summary_file" \
+    '{prompt:$prompt, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file}' \
+    > "$spec"
+  label="com.matthewho.fba.notify.summary.${RUNTIME:-agent}.$$.$RANDOM"
+  if launchctl submit -l "$label" -o /tmp/fba-notify-summary.out -e /tmp/fba-notify-summary.err -- /bin/bash "$summarizer" "$spec" >/dev/null 2>&1; then
+    nlog "working summarizer dispatched: label=$label"
+    return 0
+  fi
+  nlog "launchctl working summarizer failed; falling back to nohup"
+  nohup /bin/bash "$summarizer" "$spec" >/dev/null 2>&1 &
 }
 
 pick_backend() {
@@ -138,24 +291,26 @@ pick_backend() {
 
 backend_alerter() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="${7:-banner}"
-  # Stop events: short banner (auto-dismisses).
-  # Notification events: alert-style with action button — alerter only renders
-  # as a persistent alert when --actions is supplied; --timeout 0 means no
-  # auto-close so Claude's input prompts don't disappear.
+  local action_label="${8:-Show}"
+  local sound="${9-Pop}"
+  # Alert style is persistent. alerter only renders a sticky alert when
+  # --actions is supplied; --timeout 0 means no auto-close.
   local extra_args=()
   if [ "$style" = "alert" ]; then
-    extra_args+=(--actions "Respond" --timeout 0)
+    extra_args+=(--actions "$action_label" --timeout 0)
   else
     extra_args+=(--timeout 60)
   fi
-  nlog "alerter invoke: title=$title subtitle=$subtitle style=$style msg_len=${#message} sender=${sender:-<none>} open=${open_url:-<none>}"
-  if dispatch_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "${MAIN_REPO_PATH:-$CWD}"; then
+  [ -n "$sound" ] && extra_args+=(--sound "$sound")
+  nlog "alerter invoke: title=$title subtitle=$subtitle style=$style action=$action_label sound=${sound:-<none>} msg_len=${#message} sender=${sender:-<none>} open=${open_url:-<none>}"
+  if dispatch_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "${MAIN_REPO_PATH:-$CWD}" "$action_label" "$sound"; then
     return
   fi
   (
     resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$message" \
-      --sound Pop --ignore-dnd \
+      --ignore-dnd \
       "${extra_args[@]}" \
+      ${group:+--group "$group"} \
       ${sender:+--sender "$sender"} --json 2>&1)
     nlog "alerter response: $resp"
     act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
@@ -191,8 +346,11 @@ ancestor_pids() {
 
 backend_vscode() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" style="${6:-banner}"
-  # Ring the terminal bell so the tab gets a bell icon when not active.
-  (printf '\a' > /dev/tty) 2>/dev/null || true
+  local action_label="${7:-Show}"
+  local sound="${8-Pop}"
+  # Ring the terminal bell for audible notifications so the tab gets a bell
+  # icon when not active. Quiet working notifications only update macOS state.
+  [ -n "$sound" ] && (printf '\a' > /dev/tty) 2>/dev/null || true
   local pids event_lc
   pids=$(ancestor_pids)
   event_lc=$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')
@@ -200,7 +358,7 @@ backend_vscode() {
   local _label
   _label=$(printf '%s' "$subtitle" | cut -c1-80)
   local open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$pids")&event=$event_lc&label=$(url_encode_path "$_label")"
-  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style"
+  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "$action_label" "$sound"
 }
 
 SCRIPT_PATH="$0"
@@ -216,6 +374,7 @@ fi
 
 eval "$(printf '%s' "$INPUT" | jq -r '
   @sh "EVENT=\(.hook_event_name // "")",
+  @sh "TURN_ID=\(.turn_id // "")",
   @sh "NOTIF_TYPE=\(.notification_type // "")",
   @sh "STOP_ACTIVE=\(.stop_hook_active // false)",
   @sh "SESSION_ID=\(.session_id // "")",
@@ -223,7 +382,8 @@ eval "$(printf '%s' "$INPUT" | jq -r '
   @sh "TRANSCRIPT=\(.transcript_path // "")",
   @sh "NOTIF_TITLE=\(.title // "")",
   @sh "NOTIF_MSG=\(.message // "")",
-  @sh "LAST_ASSISTANT=\(.last_assistant_message // "")"
+  @sh "LAST_ASSISTANT=\(.last_assistant_message // "")",
+  @sh "PROMPT=\(.prompt // "")"
 ')"
 
 [ "$NOTIF_TYPE" = "idle_prompt" ] && cleanup_and_exit
@@ -253,16 +413,63 @@ fi
 BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 [ "$BRANCH" = "HEAD" ] && BRANCH=""  # detached HEAD — nothing meaningful to show
 
+if [ "$RUNTIME" = "codex" ]; then
+  GROUP="codex-$REPO"
+  SENDER_BUNDLE="com.openai.codex"
+else
+  GROUP="claude-$REPO"
+  # com.anthropic.claudefordesktop -sender hangs terminal-notifier on this
+  # machine (Claude.app notification endpoint is broken). Use the placeholder
+  # Claude Notify.app bundle (~/Applications/Claude Notify.app) which carries
+  # Claude's icon but a clean bundle-id.
+  SENDER_BUNDLE="com.matthewho.claudenotify"
+fi
+
+RUN_ID="${TURN_ID:-$SESSION_ID}"
+[ -z "$RUN_ID" ] && RUN_ID="${RUNTIME:-agent}-$REPO-$$"
+STATE_FILE="$(notify_state_file "$GROUP")"
+SUMMARY_FILE="$(notify_summary_file "$GROUP")"
+TASK_SUMMARY="$(read_notify_summary "$SUMMARY_FILE")"
+
 case "$EVENT" in
+  UserPromptSubmit)
+    TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
+    write_notify_summary "$SUMMARY_FILE" "$TASK_SUMMARY"
+    MESSAGE="$TASK_SUMMARY"
+    if [ -n "${BRANCH:-}" ]; then
+      SUBTITLE="${BRANCH} · ${TASK_SUMMARY}"
+    else
+      SUBTITLE="$TASK_SUMMARY"
+    fi
+    ;;
   Stop)
-    MESSAGE="${LAST_ASSISTANT:-}"
-    [ -z "$MESSAGE" ] && MESSAGE="$(extract_transcript_message)"
-    [ -z "$MESSAGE" ] && MESSAGE="Task complete"
-    llm_title=$(printf '%s\n' "$MESSAGE" \
+    RAW_MESSAGE="${LAST_ASSISTANT:-}"
+    fallback_title=""
+    [ -z "$RAW_MESSAGE" ] && RAW_MESSAGE="$(extract_transcript_message)"
+    if stop_message_is_unhelpful "$RAW_MESSAGE"; then
+      if [ -n "$TASK_SUMMARY" ]; then
+        RAW_MESSAGE="Finished: $TASK_SUMMARY"
+        fallback_title="$TASK_SUMMARY"
+      else
+        RAW_MESSAGE="Completed current request"
+        fallback_title="Current request completed"
+      fi
+    fi
+    MESSAGE="$(extract_display_message "$RAW_MESSAGE")"
+    title_source="$(extract_display_title "$RAW_MESSAGE")"
+    [ -n "$fallback_title" ] && title_source="$fallback_title"
+    if stop_message_is_unhelpful "$title_source"; then
+      if [ -n "$TASK_SUMMARY" ]; then
+        title_source="$TASK_SUMMARY"
+      else
+        title_source="Current request completed"
+      fi
+    fi
+    llm_title=$(printf '%s\n' "$title_source" \
       | sed -E 's/^[[:space:]]*[•\-\*]?[[:space:]]*//' \
       | awk 'NF{print; exit}' \
       | cut -c1-60)
-    [ -z "$llm_title" ] && llm_title="done"
+    [ -z "$llm_title" ] && llm_title="Current request completed"
     if [ -n "${BRANCH:-}" ]; then
       SUBTITLE="${BRANCH} · ${llm_title}"
     else
@@ -289,25 +496,20 @@ case "$EVENT" in
   *) cleanup_and_exit ;;
 esac
 
-# Notification events render in alert dialogs which can show a paragraph;
-# Stop events render as banners which truncate visually after ~2 lines.
+# Notification events render in alert dialogs which can show a paragraph.
+# Running and Stop notifications stay shorter so they scan well as status.
 if [ "$EVENT" = "Notification" ]; then
   MESSAGE="$(normalize_message "$MESSAGE" 1000)"
+elif [ "$EVENT" = "UserPromptSubmit" ]; then
+  MESSAGE="$(normalize_message "$MESSAGE" 200)"
 else
   MESSAGE="$(normalize_message "$MESSAGE" 300)"
 fi
 
-if [ "$RUNTIME" = "codex" ]; then
-  GROUP="codex-$REPO"
-  SENDER_BUNDLE="com.openai.codex"
-else
-  GROUP="claude-$REPO"
-  # com.anthropic.claudefordesktop -sender hangs terminal-notifier on this
-  # machine (Claude.app notification endpoint is broken). Use the placeholder
-  # Claude Notify.app bundle (~/Applications/Claude Notify.app) which carries
-  # Claude's icon but a clean bundle-id.
-  SENDER_BUNDLE="com.matthewho.claudenotify"
-fi
+case "$EVENT" in
+  UserPromptSubmit) write_notify_state "$STATE_FILE" "$RUN_ID" ;;
+  Stop|Notification) write_notify_state "$STATE_FILE" "final:$RUN_ID" ;;
+esac
 
 # Fallback click target for non-VSCode backends: open the main repo in
 # the editor. backend_vscode ignores this — it builds its own URL.
@@ -322,21 +524,39 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   if [ "$_backend" = "vscode" ]; then
     _preview_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")"
   fi
-  printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s sender=%s open=%s\n' \
-    "$_backend" "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "${_preview_url:-<none>}" >&2
+  _dry_action="Show"
+  _dry_sound="Pop"
+  [ "$EVENT" = "Notification" ] && _dry_action="Respond"
+  [ "$EVENT" = "UserPromptSubmit" ] && _dry_sound=""
+  printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
+    "$_backend" "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
   cleanup_and_exit
 fi
 
 _chosen_backend=$(pick_backend)
-# Notification events block on user input — use persistent alert style so
-# they don't auto-dismiss before the user notices.
-ALERT_STYLE="banner"
-[ "$EVENT" = "Notification" ] && ALERT_STYLE="alert"
-nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE"
+_summary_open_url="$OPEN_URL"
+if [ "$_chosen_backend" = "vscode" ]; then
+  _summary_pids=$(ancestor_pids)
+  _summary_label=$(printf '%s' "$SUBTITLE" | cut -c1-80)
+  _summary_open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$_summary_pids")&event=userpromptsubmit&label=$(url_encode_path "$_summary_label")"
+fi
+# Keep agent notifications persistent. The dispatcher is detached from the
+# hook timeout, and the group id replaces older notifications for the same
+# runtime/repo.
+ALERT_STYLE="alert"
+ACTION_LABEL="Show"
+SOUND="Pop"
+[ "$EVENT" = "UserPromptSubmit" ] && SOUND=""
+[ "$EVENT" = "Notification" ] && ACTION_LABEL="Respond"
+nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" ;;
-  alerter)           backend_alerter           "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" ;;
+  vscode)            backend_vscode            "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
+  alerter)           backend_alerter           "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
+
+if [ "$EVENT" = "UserPromptSubmit" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_working_summary "$PROMPT" "$REPO" "${BRANCH:-}" "$GROUP" "$SENDER_BUNDLE" "$_summary_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE"
+fi
 
 cleanup_and_exit

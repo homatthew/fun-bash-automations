@@ -21,6 +21,8 @@ eval "$(jq -r '
   @sh "SENDER=\(.sender // "")",
   @sh "OPEN_URL=\(.open_url // "")",
   @sh "STYLE=\(.style // "banner")",
+  @sh "ACTION_LABEL=\(.action_label // "Show")",
+  @sh "SOUND=\(.sound // "Pop")",
   @sh "CWD=\(.cwd // "")",
   @sh "LOG=\(.log // "/tmp/fba-notify.log")"
 ' "$SPEC")"
@@ -31,14 +33,16 @@ nlog() {
 
 extra_args=()
 if [ "$STYLE" = "alert" ]; then
-  extra_args+=(--actions "Respond" --timeout 0)
+  extra_args+=(--actions "$ACTION_LABEL" --timeout 0)
 else
   extra_args+=(--timeout 60)
 fi
+[ -n "$SOUND" ] && extra_args+=(--sound "$SOUND")
 
 resp=$(alerter --title "$TITLE" --subtitle "$SUBTITLE" --message "$MESSAGE" \
-  --sound Pop --ignore-dnd \
+  --ignore-dnd \
   "${extra_args[@]}" \
+  ${GROUP:+--group "$GROUP"} \
   ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
 
 nlog "alerter response: $resp"
