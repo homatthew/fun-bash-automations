@@ -2,11 +2,10 @@
 # Build and install the forked vscode-terminal-osc-notifier extension.
 #
 # Why this exists:
-#   llm/hooks/notify.sh and notify-slack.sh emit an OSC 777 carrying a
-#   caller-supplied `tid`. The forked extension binds that tid to the
-#   emitting VS Code terminal and exposes a URI handler that focuses the
-#   bound terminal on click. Upstream doesn't support the tid shape, so
-#   we ship a local build.
+#   llm/hooks/notify.sh and notify-slack.sh create macOS notifications
+#   whose click target is a vscode:// URI handled by this fork. The URI
+#   carries ancestor PIDs; the extension maps those to VS Code terminals
+#   and focuses the originating terminal/window.
 #
 # Idempotent: re-running pulls, rebuilds, re-packages, and re-installs.
 # Preserves all other keys in the VS Code User settings.json via jq.
@@ -16,7 +15,6 @@ set -euo pipefail
 EXT_REPO="$HOME/repos/vscode-terminal-osc-notifier"
 EXT_PUBLISHER="homatthew"
 EXT_NAME="vscode-terminal-osc-notifier"
-EXT_VERSION="0.1.5"
 UPSTREAM_PUBLISHER="wenbopan"
 VSIX_OUT="/tmp/osc-notifier.vsix"
 VSCODE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
@@ -47,13 +45,14 @@ else
   git -C "$EXT_REPO" pull --ff-only --quiet 2>/dev/null || true
 fi
 
-if ! grep -q 'userTid' "$EXT_REPO/src/extension.ts"; then
-  echo "install-osc-notifier: $EXT_REPO/src/extension.ts is missing the tid-binding patch." >&2
-  echo "  Either you're on upstream or the patch was reverted. Skipping build." >&2
+if ! grep -q 'cwdMatches' "$EXT_REPO/src/extension.ts" || ! grep -q 'findTerminalByPids' "$EXT_REPO/src/extension.ts"; then
+  echo "install-osc-notifier: $EXT_REPO/src/extension.ts is missing the cwd/pid focus patch." >&2
+  echo "  Either you're on upstream or the focus patch was reverted. Skipping build." >&2
   exit 0
 fi
 
 cd "$EXT_REPO"
+EXT_VERSION="$(node -p "require('./package.json').version")"
 
 if [[ ! -d node_modules ]] || [[ package.json -nt node_modules ]]; then
   echo "install-osc-notifier: npm install" >&2

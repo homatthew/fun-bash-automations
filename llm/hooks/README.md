@@ -8,6 +8,7 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 | Script | Event(s) | What it does |
 |---|---|---|
 | `notify.sh` | Stop, Notification | macOS banner only. Used when Slack is disabled. |
+| `notify-dispatch.sh` | (helper) | Detached `alerter --json` runner. Owns click handling so hooks return quickly. |
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on `pg push` / push-gate lease approval. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
@@ -18,59 +19,75 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 Only one of `notify.sh` / `notify-slack.sh` is referenced from
 `settings.json` at a time — don't route both at once.
 
-## Backend strategy pattern
+## Current Notify Architecture
 
-Both notify scripts share the same internal structure. A single
-dispatcher chooses exactly one backend per invocation:
+`notify.sh` has three separate jobs. Keep them separate:
+
+1. Scrape message context from the Claude/Codex payload and transcript JSON.
+2. Scrape terminal focus context from the hook process tree into ancestor PIDs.
+3. Send the macOS notification through `alerter`, then route clicks to the forked VS Code extension.
+
+The main hook must not wait on `alerter --json`; that can keep the hook alive until timeout. Instead, `notify.sh` writes a small JSON job and starts `notify-dispatch.sh` through launchd. The detached helper waits for `alerter` activation, then opens the focus URI.
+
+## Backend Strategy
+
+`notify.sh` chooses exactly one backend per invocation:
 
 ```
 pick_backend()
   NOTIFY_SUPPRESS=1           → suppressed
   Ghostty frontmost           → suppressed
-  TERM_PROGRAM=vscode         → vscode    (OSC bind + alerter)
+  TERM_PROGRAM=vscode         → vscode    (PID scrape + alerter)
   alerter in $PATH            → alerter
-  terminal-notifier in $PATH  → terminal_notifier
   else                        → suppressed
 ```
 
 | Backend | Signature | Notes |
 |---|---|---|
-| `backend_vscode` | `(title, subtitle, message, group, sender)` | Emits OSC 777 carrying a stable `tid`, then calls `backend_alerter` with a URL pointing at the forked extension's URI handler. |
-| `backend_alerter` | `(title, subtitle, message, group, sender, open_url)` | Uses `alerter --json`, opens `open_url` on `contentsClicked`. |
-| `backend_terminal_notifier` | `(title, subtitle, message, group, sender, open_url)` | Passes `-open "$open_url"` through to `terminal-notifier`. |
+| `backend_vscode` | `(title, subtitle, message, group, sender)` | Rings the terminal bell, captures ancestor PIDs, then calls `backend_alerter` with a URL pointing at the forked extension's URI handler. |
+| `backend_alerter` | `(title, subtitle, message, group, sender, open_url)` | Dispatches `notify-dispatch.sh` via launchd; the detached helper uses `alerter --json`, then opens `open_url` on `contentsClicked` / `actionClicked`. |
 | `backend_suppressed` | – | no-op |
 
-Adding a new backend = one new `backend_foo()` + one arm in
-`pick_backend`. Keep both notify scripts in sync by hand — duplication
-is cheaper than a shared lib here.
+`notify-slack.sh` predates the launchd-detached helper and may lag this shape. Do not copy behavior from it back into `notify.sh` without rechecking this section.
 
-## OSC coupling with the forked VS Code extension
+## VS Code coupling
 
 The `vscode` backend talks to a private fork of
 `vscode-terminal-osc-notifier` at
 <https://github.com/homatthew/vscode-terminal-osc-notifier>.
 
-Four strings must agree across the hook scripts **and** the extension
+Three strings must agree across the hook scripts **and** the extension
 source:
 
 | Constant (in hooks) | Matches in extension |
 |---|---|
-| `OSC_EXT_PUBLISHER` | `publisher` field in `package.json` |
-| `OSC_EXT_NAME` | `name` field in `package.json` |
-| `OSC_EXT_URI_PATH` | `uri.path === '…'` in `registerUriHandler` |
-| `OSC_NOTIFY_FORMAT` | Parser arms in `OscParser.tryParseOsc` |
+| `VSCODE_EXT_PUBLISHER` | `publisher` field in `package.json` |
+| `VSCODE_EXT_NAME` | `name` field in `package.json` |
+| `VSCODE_EXT_URI_PATH` | `uri.path === '…'` in `registerUriHandler` |
 
 If you edit any of them in either notify script, update
 `~/repos/vscode-terminal-osc-notifier/package.json` and
 `~/repos/vscode-terminal-osc-notifier/src/extension.ts` to match, then
 rebuild + reinstall via `bin/install-osc-notifier`.
 
-Why the fork: upstream auto-assigns terminal ids per
-`vscode.Terminal`, so external banners can't target a specific tab. The
-fork adds a 5-field OSC shape (`777;notify;tid=<id>;<title>;<body>`)
-that binds a caller-supplied id to the emitting terminal. The banner's
-click URL (`vscode://homatthew.vscode-terminal-osc-notifier/focus?tid=<id>`)
-then lands the user on the originating tab.
+Why the fork: the hook-created macOS banner needs a click target that
+can focus the originating VS Code terminal. Current hooks pass ancestor
+PIDs in the `vscode://homatthew.vscode-terminal-osc-notifier/focus?...`
+URL. The extension matches those against `terminal.processId`, updates
+the status bar, and focuses the matching terminal. Older OSC 777 binding
+code is intentionally not used because direct `/dev/tty` writes from a
+hook do not reach the extension parser.
+
+Expected click flow:
+
+```
+alerter click
+  -> notify-dispatch.sh gets JSON activation
+  -> open vscode://homatthew.vscode-terminal-osc-notifier/focus?cwd=...&pids=...&event=...&label=...
+  -> code <cwd>
+  -> open the same URI again
+  -> extension rejects wrong workspaces by cwd, then matches terminal.processId against pids
+```
 
 Upstream's own UI (OS banner via node-notifier + in-editor toast) is
 silenced by two settings flipped from their defaults — the installer
