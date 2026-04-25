@@ -37,8 +37,9 @@ approve each lease, then resumes on re-invocation.
 ## When NOT to use
 
 - Single branch, no stack — normal `git` / `gh` / `pg` is enough.
-- Branches with no PR yet. `stack push` skips them. Use
-  `/commit-push-pr` to create the first PR for a branch.
+- Branches with no local stack ancestry. `stack push` only knows how to push
+  branches it can place in the local stack. For an unrelated one-off branch,
+  use `/commit-push-pr`.
 - Adapting code for parent-PR renames (e.g., class rename, API break).
   `stack sync` handles the commits; you still have to read conflicts and
   adjust code yourself.
@@ -81,7 +82,9 @@ rebases local descendants onto the new parent tips. Any moved branch with an
 existing push-gate lease is reported as stale.
 
 `stack push` walks the stack parents-first. For each branch:
-- No PR → skipped (warn; create the PR via `/commit-push-pr`).
+- No PR → still goes through `pg check`; if the lease is fresh, pushes the
+  branch with `pg push --force-with-lease --set-upstream`, then lists the
+  draft PR to create with the correct base.
 - No unpushed commits → skipped silently.
 - Lease fresh (`pg check` returns `allowed && anchor==HEAD`) → runs
   `pg push --force-with-lease --assert-flow "update pr #N\nbranch <name>\n..."`.

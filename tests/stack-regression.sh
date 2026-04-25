@@ -358,8 +358,8 @@ pull_calls=$(grep -c "sync --pull" "$BRANCHLESS_LOG" || true)
 echo "ok 9 - sync cascades squash-merged parent then invokes branchless once"
 
 # ------------------------------------------------------------------------
-# 10: stack push happy path — all branches with PRs + fresh leases get pushed,
-#    no-PR branch skipped with agent handoff.
+# 10: stack push happy path — branches with PRs get updated and no-PR
+#     branches with fresh leases get pushed for PR creation.
 # ------------------------------------------------------------------------
 
 # After test 8's cascade, feature-base is a sibling of main; mho/feature-ui
@@ -374,26 +374,31 @@ fresh_lease='{"allowed":true,"current":{"anchor_matches_head":true}}'
 export STACK_TEST_PG_LOG="$PG_LOG"
 export STACK_TEST_PG_CHECK_mho_feature_base="$fresh_lease"
 export STACK_TEST_PG_CHECK_mho_feature_api="$fresh_lease"
+export STACK_TEST_PG_CHECK_mho_feature_ui="$fresh_lease"
 push_out=$(run_stack push 2>&1)
 
 expect_contains "$push_out" "Done."
-# feature-ui has no PR (only #42 + #43 in STACK_TEST_PR_JSON) → skipped.
-expect_contains "$push_out" "mho/feature-ui: no PR"
+# feature-ui has no PR (only #42 + #43 in STACK_TEST_PR_JSON), but a
+# fresh lease lets stack push publish the branch for later PR creation.
+expect_contains "$push_out" "mho/feature-ui: pushing branch for new stacked PR"
 expect_contains "$push_out" "Agent handoff:"
 expect_contains "$push_out" "#42 mho/feature-base"
 expect_contains "$push_out" "update description: /update-pr-description 42"
 expect_contains "$push_out" "mho/feature-ui -> base mho/feature-api"
 expect_contains "$push_out" "create draft PR via /commit-push-pr after push-gate approval"
 push_calls=$(grep -c "^push " "$PG_LOG" || true)
-[[ "$push_calls" == "2" ]] \
-  || fail "expected 2 pg push calls (base + api), got $push_calls: $(cat "$PG_LOG")"
+[[ "$push_calls" == "3" ]] \
+  || fail "expected 3 pg push calls (base + api + ui), got $push_calls: $(cat "$PG_LOG")"
 force_push_calls=$(grep -c "^push push --force-with-lease" "$PG_LOG" || true)
-[[ "$force_push_calls" == "2" ]] \
-  || fail "expected pg push --force-with-lease for both pushes, got: $(cat "$PG_LOG")"
+[[ "$force_push_calls" == "3" ]] \
+  || fail "expected pg push --force-with-lease for all pushes, got: $(cat "$PG_LOG")"
+set_upstream_calls=$(grep -c -- "--set-upstream" "$PG_LOG" || true)
+[[ "$set_upstream_calls" == "1" ]] \
+  || fail "expected --set-upstream for no-PR branch push, got: $(cat "$PG_LOG")"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "0" ]] \
   || fail "expected 0 pg prepare calls when leases fresh, got $prep_calls"
-echo "ok 10 - stack push runs pg push --force-with-lease for fresh-lease branches, skips no-PR"
+echo "ok 10 - stack push runs pg push --force-with-lease for fresh leases including no-PR branches"
 
 # ------------------------------------------------------------------------
 # 11: stack push stops at first branch with stale/missing lease, runs
@@ -405,7 +410,7 @@ git -C "$REPO" checkout main >/dev/null 2>&1
 
 # DFS order from order_tree walks roots in for-each-ref order (alphabetical):
 # feature-api first → expect stop on feature-api.
-unset STACK_TEST_PG_CHECK_mho_feature_base STACK_TEST_PG_CHECK_mho_feature_api
+unset STACK_TEST_PG_CHECK_mho_feature_base STACK_TEST_PG_CHECK_mho_feature_api STACK_TEST_PG_CHECK_mho_feature_ui
 export STACK_TEST_PG_CHECK_DEFAULT='{"allowed":false}'
 stop_out=$(run_stack push --prefix mho/feature- 2>&1)
 
