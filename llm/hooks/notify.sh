@@ -142,6 +142,12 @@ notify_summary_file() {
   printf '/tmp/fba-notify-summary-%s' "$key"
 }
 
+notify_context_file() {
+  local key
+  key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')
+  printf '/tmp/fba-notify-context-%s' "$key"
+}
+
 write_notify_state() {
   local file="$1" value="$2"
   [ -n "$file" ] || return 0
@@ -159,6 +165,19 @@ read_notify_summary() {
   local file="$1"
   [ -n "$file" ] && [ -f "$file" ] || return 0
   head -n 1 "$file" 2>/dev/null | cut -c1-80
+}
+
+write_notify_context() {
+  local file="$1" value="$2"
+  [ -n "$file" ] || return 0
+  [ -n "$value" ] || return 0
+  printf '%s' "$value" > "$file" 2>/dev/null || true
+}
+
+read_notify_context() {
+  local file="$1"
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  head -n 1 "$file" 2>/dev/null | cut -c1-48
 }
 
 prompt_task_summary() {
@@ -197,6 +216,80 @@ prompt_task_summary() {
   else
     printf 'Handling current request'
   fi
+}
+
+pr_context_label() {
+  local pr="$1" title
+  title=$(printf '%s' "$pr" \
+    | sed -E '
+        s/^#[0-9]+[[:space:]]+//;
+        s/[[:space:]]+\[[^]]+\]$//;
+        s/^[A-Za-z]+(\([^)]+\))?!?:[[:space:]]*//;
+        s/^(add|update|fix|implement|improve)[[:space:]]+//I;
+        s/[[:space:]]+/ /g;
+        s/^ //; s/ $//;')
+
+  [ -n "$title" ] || return 0
+  if printf '%s' "$title" | grep -Eiq 'push-gate|push gate|lease'; then
+    printf 'Push-gate leases'
+    return
+  fi
+  if printf '%s' "$title" | grep -Eiq 'notif|alerter|hook|focus|icon|show|vscode|claude|codex'; then
+    printf 'Agent notifications'
+    return
+  fi
+  printf '%s' "$title" | awk '{
+    limit = NF < 3 ? NF : 3
+    for (i = 1; i <= limit; i++) {
+      if (i > 1) printf " "
+      word = $i
+      printf "%s", toupper(substr(word, 1, 1)) substr(word, 2)
+    }
+  }' | cut -c1-48
+}
+
+prompt_task_context() {
+  local prompt="$1" clean
+  clean=$(normalize_message "$prompt" 180)
+
+  if printf '%s %s' "$REPO" "$clean" | grep -Eiq 'notif|alerter|hook|focus|icon|show|vscode|claude|codex'; then
+    printf 'Agent notifications'
+  elif printf '%s' "$clean" | grep -Eiq 'commit|push|pull request|[^[:alpha:]]pr[^[:alpha:]]'; then
+    if [ -n "${PR_CONTEXT:-}" ]; then
+      pr_context_label "$PR_CONTEXT"
+    else
+      printf 'Git workflow'
+    fi
+  elif printf '%s' "$clean" | grep -Eiq 'test|verify|smoke|lint|build'; then
+    printf 'Verification'
+  elif printf '%s' "$clean" | grep -Eiq 'debug|log|trace|error|fail|timeout'; then
+    printf 'Debugging'
+  elif printf '%s' "$clean" | grep -Eiq 'readme|doc|architecture|handoff|second brain'; then
+    printf 'Docs'
+  elif [ -n "${BRANCH:-}" ] && ! printf '%s' "$BRANCH" | grep -Eq '^(main|master|develop|dev|mh-netflix)$'; then
+    printf '%s' "$BRANCH" | cut -c1-48
+  else
+    printf '%s' "$REPO" | tr '-' ' ' | awk '{
+      for (i = 1; i <= NF; i++) {
+        $i = toupper(substr($i, 1, 1)) substr($i, 2)
+      }
+      print
+    }' | cut -c1-48
+  fi
+}
+
+git_recent_commits() {
+  git -C "$CWD" log --format='%s' -5 2>/dev/null | paste -sd '; ' - | cut -c1-300 || true
+}
+
+git_pr_context() {
+  command -v gh >/dev/null 2>&1 || return 0
+  (
+    cd "$CWD" 2>/dev/null || exit 0
+    gh pr view --json number,title,headRefName,state 2>/dev/null \
+      | jq -r 'select(.number != null) | "#\(.number) \(.title) [\(.headRefName)]"' 2>/dev/null \
+      | cut -c1-180
+  ) || true
 }
 
 stop_message_is_unhelpful() {
@@ -287,7 +380,7 @@ dispatch_alerter() {
 }
 
 dispatch_working_summary() {
-  local prompt="$1" title="$2" subtitle="$3" group="$4" sender="$5" open_url="$6" cwd="$7" state_file="$8" state_id="$9" summary_file="${10:-}"
+  local prompt="$1" title="$2" subtitle="$3" group="$4" sender="$5" open_url="$6" cwd="$7" state_file="$8" state_id="$9" summary_file="${10:-}" context_file="${11:-}" repo="${12:-}" branch="${13:-}" pr_context="${14:-}" recent_commits="${15:-}"
   local summarizer spec label
   [ -n "$prompt" ] || return 0
   command -v codex >/dev/null 2>&1 || return 0
@@ -309,7 +402,12 @@ dispatch_working_summary() {
     --arg state_file "$state_file" \
     --arg state_id "$state_id" \
     --arg summary_file "$summary_file" \
-    '{prompt:$prompt, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file}' \
+    --arg context_file "$context_file" \
+    --arg repo "$repo" \
+    --arg branch "$branch" \
+    --arg pr_context "$pr_context" \
+    --arg recent_commits "$recent_commits" \
+    '{prompt:$prompt, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file, context_file:$context_file, repo:$repo, branch:$branch, pr_context:$pr_context, recent_commits:$recent_commits}' \
     > "$spec"
   label="com.matthewho.fba.notify.summary.${RUNTIME:-agent}.$$.$RANDOM"
   if launchctl submit -l "$label" -o /tmp/fba-notify-summary.out -e /tmp/fba-notify-summary.err -- /bin/bash "$summarizer" "$spec" >/dev/null 2>&1; then
@@ -321,7 +419,7 @@ dispatch_working_summary() {
 }
 
 dispatch_final_summary() {
-  local source_text="$1" task_summary="$2" title="$3" subtitle="$4" group="$5" sender="$6" open_url="$7" cwd="$8" state_file="$9" state_id="${10}" summary_file="${11:-}"
+  local source_text="$1" task_summary="$2" title="$3" subtitle="$4" group="$5" sender="$6" open_url="$7" cwd="$8" state_file="$9" state_id="${10}" summary_file="${11:-}" context_file="${12:-}" repo="${13:-}" branch="${14:-}" pr_context="${15:-}" recent_commits="${16:-}"
   local summarizer spec label
   command -v codex >/dev/null 2>&1 || return 0
   summarizer="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-final-summary.sh"
@@ -343,7 +441,12 @@ dispatch_final_summary() {
     --arg state_file "$state_file" \
     --arg state_id "$state_id" \
     --arg summary_file "$summary_file" \
-    '{source_text:$source_text, task_summary:$task_summary, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file}' \
+    --arg context_file "$context_file" \
+    --arg repo "$repo" \
+    --arg branch "$branch" \
+    --arg pr_context "$pr_context" \
+    --arg recent_commits "$recent_commits" \
+    '{source_text:$source_text, task_summary:$task_summary, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file, context_file:$context_file, repo:$repo, branch:$branch, pr_context:$pr_context, recent_commits:$recent_commits}' \
     > "$spec"
   label="com.matthewho.fba.notify.final.${RUNTIME:-agent}.$$.$RANDOM"
   if launchctl submit -l "$label" -o /tmp/fba-notify-final.out -e /tmp/fba-notify-final.err -- /bin/bash "$summarizer" "$spec" >/dev/null 2>&1; then
@@ -492,6 +595,8 @@ fi
 # Current branch in the working directory (worktrees report their own branch).
 BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 [ "$BRANCH" = "HEAD" ] && BRANCH=""  # detached HEAD — nothing meaningful to show
+PR_CONTEXT="$(git_pr_context)"
+RECENT_COMMITS="$(git_recent_commits)"
 
 if [ "$RUNTIME" = "codex" ]; then
   GROUP="codex-$REPO"
@@ -509,7 +614,9 @@ RUN_ID="${TURN_ID:-$SESSION_ID}"
 [ -z "$RUN_ID" ] && RUN_ID="${RUNTIME:-agent}-$REPO-$$"
 STATE_FILE="$(notify_state_file "$GROUP")"
 SUMMARY_FILE="$(notify_summary_file "$GROUP")"
+CONTEXT_FILE="$(notify_context_file "$GROUP")"
 TASK_SUMMARY="$(read_notify_summary "$SUMMARY_FILE")"
+TASK_CONTEXT="$(read_notify_context "$CONTEXT_FILE")"
 DISPLAY_TITLE="$REPO"
 FINAL_SUMMARY_SOURCE=""
 
@@ -517,9 +624,13 @@ case "$EVENT" in
   UserPromptSubmit)
     DISPLAY_TITLE="$RUNNING_ICON $REPO"
     TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
+    TASK_CONTEXT="$(prompt_task_context "$PROMPT")"
     write_notify_summary "$SUMMARY_FILE" "$TASK_SUMMARY"
+    write_notify_context "$CONTEXT_FILE" "$TASK_CONTEXT"
     MESSAGE="$TASK_SUMMARY"
-    if [ -n "${BRANCH:-}" ]; then
+    if [ -n "$TASK_CONTEXT" ]; then
+      SUBTITLE="$TASK_CONTEXT"
+    elif [ -n "${BRANCH:-}" ]; then
       SUBTITLE="$BRANCH"
     else
       SUBTITLE="Active task"
@@ -555,7 +666,9 @@ case "$EVENT" in
       | awk 'NF{print; exit}' \
       | cut -c1-60)
     [ -z "$llm_title" ] && llm_title="Current request completed"
-    if [ -n "${BRANCH:-}" ]; then
+    if [ -n "$TASK_CONTEXT" ]; then
+      SUBTITLE="$TASK_CONTEXT"
+    elif [ -n "${BRANCH:-}" ]; then
       SUBTITLE="$BRANCH"
     else
       SUBTITLE="Finished"
@@ -645,9 +758,9 @@ case "$_chosen_backend" in
 esac
 
 if [ "$EVENT" = "UserPromptSubmit" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "${BRANCH:-}" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE"
+  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 elif [ "$EVENT" = "Stop" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "final:$RUN_ID" "$SUMMARY_FILE"
+  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "final:$RUN_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 fi
 
 cleanup_and_exit

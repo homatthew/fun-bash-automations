@@ -24,7 +24,12 @@ eval "$(jq -r '
   @sh "LOG=\(.log // "/tmp/fba-notify.log")",
   @sh "STATE_FILE=\(.state_file // "")",
   @sh "STATE_ID=\(.state_id // "")",
-  @sh "SUMMARY_FILE=\(.summary_file // "")"
+  @sh "SUMMARY_FILE=\(.summary_file // "")",
+  @sh "CONTEXT_FILE=\(.context_file // "")",
+  @sh "REPO=\(.repo // "")",
+  @sh "BRANCH=\(.branch // "")",
+  @sh "PR_CONTEXT=\(.pr_context // "")",
+  @sh "RECENT_COMMITS=\(.recent_commits // "")"
 ' "$SPEC")"
 
 nlog() {
@@ -61,6 +66,40 @@ extract_summary() {
     | cut -c1-80
 }
 
+extract_context() {
+  local file="$1" out
+  out=$(jq -er '
+    if type == "object" then (.context // .subtitle // empty)
+    else empty end
+  ' "$file" 2>/dev/null || true)
+
+  printf '%s' "$out" \
+    | sed -E '
+        s/^[[:space:]]*[-"*`]+[[:space:]]*//;
+        s/^[[:space:]]*[Cc]ontext:[[:space:]]*//;
+        s/[[:space:]]*[."`]+$//;
+        s/[[:space:]]+/ /g;
+        s/^ //; s/ $//;' \
+    | cut -c1-48
+}
+
+context_is_useful() {
+  local value="$1" value_lc repo_lc branch_lc
+  value_lc=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr '-' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  repo_lc=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]' | tr '-' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  branch_lc=$(printf '%s' "$BRANCH" | tr '[:upper:]' '[:lower:]' | tr '-' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+
+  [ -n "$value_lc" ] || return 1
+  [ "$value_lc" = "$repo_lc" ] && return 1
+  [ -n "$branch_lc" ] && [ "$value_lc" = "$branch_lc" ] && return 1
+  case "$value_lc" in
+    main|master|dev|develop|mh\ netflix|fun\ bash\ automations)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 run_codex_summary() {
   NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
     -m gpt-5-nano \
@@ -68,16 +107,31 @@ run_codex_summary() {
     -c features.codex_hooks=false \
     -c model_reasoning_effort='"low"' \
     --output-last-message "$tmp" \
-    "Summarize the user task below for a running-task macOS notification.
+    "Generate concise macOS notification text for a running agent task.
 
-Output one short sentence fragment, 3-8 words, starting with a present participle.
+Output strict JSON with exactly these string fields:
+{\"context\":\"...\",\"summary\":\"...\"}
+
+context: 1-3 words for the workspace/topic, suitable for the notification subtitle. Prefer the domain or feature area over repo/branch names.
+summary: 3-8 words for the running task, suitable for the notification body, starting with a present participle.
+
+Use the repo, branch, cwd, task, open PR, and recent commits together. If the task asks about PRs, commits, or branch work and an open PR is provided, prefer the PR title as the source of context. If the branch is broad or not meaningful (examples: mh-netflix, main, master, dev), do not use the branch name as context. Do not use generic repo names like fun-bash-automations as context when a topic such as Agent notifications, Hook runtime, Stack tooling, or Push-gate leases is available.
+
 Examples:
-- Building chunk compression handoff
-- Reviewing notification hook behavior
-- Updating stacked PR tooling
+{\"context\":\"Agent notifications\",\"summary\":\"Refining notification status layout\"}
+{\"context\":\"Push-gate leases\",\"summary\":\"Reviewing current PR changes\"}
+{\"context\":\"Stack tooling\",\"summary\":\"Updating stacked PR commands\"}
+{\"context\":\"Hook runtime\",\"summary\":\"Debugging hook timeout behavior\"}
 
-Do not include quotes, JSON, markdown, file paths, branch names, or punctuation at the end.
+Do not include emoji, markdown, file paths, branch names, or punctuation in the field values.
+Except for the required JSON syntax, do not include commentary.
 
+Repo: $REPO
+Branch: $BRANCH
+CWD: $CWD
+Current subtitle: $SUBTITLE
+Open PR: $PR_CONTEXT
+Recent commits: $RECENT_COMMITS
 Task:
 $PROMPT" </dev/null >/dev/null 2>"$err"
 }
@@ -132,8 +186,10 @@ trap 'rm -f "$SPEC" "$tmp" "$err"' EXIT
 
 nlog "working summary start: prompt_len=${#PROMPT} cwd=$CWD codex=$(command -v codex) home=${HOME:-<none>}"
 rc=0
-run_with_timeout 12 || rc=$?
+run_with_timeout 20 || rc=$?
 summary="$(extract_summary "$tmp")"
+context="$(extract_context "$tmp")"
+context_is_useful "$context" || context=""
 out_len=$(wc -c < "$tmp" 2>/dev/null | tr -d ' ' || printf 0)
 err_tail=$(tr '\n' ' ' < "$err" 2>/dev/null | cut -c1-240)
 nlog "working summary codex rc=$rc out_len=$out_len err=${err_tail:-<none>}"
@@ -156,10 +212,13 @@ if [ -n "$SUMMARY_FILE" ]; then
   printf '%s' "$summary" > "$SUMMARY_FILE" 2>/dev/null || true
 fi
 
-display_subtitle="${SUBTITLE:-Active task}"
+display_subtitle="${context:-${SUBTITLE:-Active task}}"
+if [ -n "$CONTEXT_FILE" ] && [ -n "$context" ]; then
+  printf '%s' "$context" > "$CONTEXT_FILE" 2>/dev/null || true
+fi
 
-nlog "working summary update: $summary"
-resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "⏳ $summary" \
+nlog "working summary update: context=${display_subtitle:-<none>} summary=$summary"
+resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
   --ignore-dnd --actions Show --timeout 0 \
   ${GROUP:+--group "$GROUP"} \
   ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
