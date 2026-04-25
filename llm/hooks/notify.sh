@@ -121,6 +121,8 @@ notify_editor_scheme() {
 }
 
 NOTIFY_LOG="${NOTIFY_LOG:-/tmp/fba-notify.log}"
+DONE_STATUS="✅ Finished"
+INPUT_STATUS="❓ Input needed"
 
 nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$NOTIFY_LOG" 2>/dev/null || true
@@ -218,14 +220,42 @@ dedupe_notification_message() {
   subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
   if display_values_match "$message" "$subtitle" || display_values_match "$message" "$subtitle_tail"; then
     case "$event" in
-      UserPromptSubmit) printf 'In progress' ;;
-      Stop)             printf 'Finished' ;;
-      Notification)     printf 'Input needed' ;;
+      UserPromptSubmit) printf '⏳ %s' "$message" ;;
+      Stop)             printf '✅ %s' "$message" ;;
+      Notification)     printf '%s' "$INPUT_STATUS" ;;
       *)                printf '%s' "$message" ;;
     esac
     return
   fi
   printf '%s' "$message"
+}
+
+prefix_done_status() {
+  local message="$1"
+  case "$message" in
+    "$DONE_STATUS"*|"✅"*) printf '%s' "$message" ;;
+    *)                    printf '%s %s' "✅" "$message" ;;
+  esac
+}
+
+strip_status_prefix() {
+  normalize_message "$1" 140 \
+    | sed -E 's/^(⏳|✅|❓)[[:space:]]+//; s/^[Ii]n progress:[[:space:]]+//; s/^[Ff]inished:[[:space:]]+//'
+}
+
+dedupe_notification_subtitle() {
+  local subtitle="$1" message="$2" branch="$3" subtitle_tail message_text
+  subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
+  message_text="$(strip_status_prefix "$message")"
+  if display_values_match "$message_text" "$subtitle_tail"; then
+    if [ -n "$branch" ]; then
+      printf '%s' "$branch"
+    else
+      printf ''
+    fi
+    return
+  fi
+  printf '%s' "$subtitle"
 }
 
 dispatch_alerter() {
@@ -457,11 +487,11 @@ case "$EVENT" in
   UserPromptSubmit)
     TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
     write_notify_summary "$SUMMARY_FILE" "$TASK_SUMMARY"
-    MESSAGE="In progress"
+    MESSAGE="⏳ $TASK_SUMMARY"
     if [ -n "${BRANCH:-}" ]; then
-      SUBTITLE="${BRANCH} · ${TASK_SUMMARY}"
+      SUBTITLE="$BRANCH"
     else
-      SUBTITLE="$TASK_SUMMARY"
+      SUBTITLE="Active task"
     fi
     ;;
   Stop)
@@ -470,10 +500,10 @@ case "$EVENT" in
     [ -z "$RAW_MESSAGE" ] && RAW_MESSAGE="$(extract_transcript_message)"
     if stop_message_is_unhelpful "$RAW_MESSAGE"; then
       if [ -n "$TASK_SUMMARY" ]; then
-        RAW_MESSAGE="Finished: $TASK_SUMMARY"
+        RAW_MESSAGE="$TASK_SUMMARY"
         fallback_title="$TASK_SUMMARY"
       else
-        RAW_MESSAGE="Completed current request"
+        RAW_MESSAGE="Current request completed"
         fallback_title="Current request completed"
       fi
     fi
@@ -493,9 +523,9 @@ case "$EVENT" in
       | cut -c1-60)
     [ -z "$llm_title" ] && llm_title="Current request completed"
     if [ -n "${BRANCH:-}" ]; then
-      SUBTITLE="${BRANCH} · ${llm_title}"
+      SUBTITLE="$BRANCH"
     else
-      SUBTITLE="$llm_title"
+      SUBTITLE="Finished"
     fi
     ;;
   Notification)
@@ -528,6 +558,8 @@ else
   MESSAGE="$(normalize_message "$MESSAGE" 300)"
 fi
 MESSAGE="$(dedupe_notification_message "$EVENT" "$SUBTITLE" "$MESSAGE")"
+[ "$EVENT" = "Stop" ] && MESSAGE="$(prefix_done_status "$MESSAGE")"
+SUBTITLE="$(dedupe_notification_subtitle "$SUBTITLE" "$MESSAGE" "${BRANCH:-}")"
 
 case "$EVENT" in
   UserPromptSubmit) write_notify_state "$STATE_FILE" "$RUN_ID" ;;

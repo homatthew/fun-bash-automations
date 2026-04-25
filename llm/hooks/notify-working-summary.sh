@@ -156,13 +156,10 @@ if [ -n "$SUMMARY_FILE" ]; then
   printf '%s' "$summary" > "$SUMMARY_FILE" 2>/dev/null || true
 fi
 
-display_subtitle="$summary"
-if [ -n "$SUBTITLE" ]; then
-  display_subtitle="$SUBTITLE · $summary"
-fi
+display_subtitle="${SUBTITLE:-Active task}"
 
 nlog "working summary update: $summary"
-resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "In progress" \
+resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "⏳ $summary" \
   --ignore-dnd --actions Show --timeout 0 \
   ${GROUP:+--group "$GROUP"} \
   ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
