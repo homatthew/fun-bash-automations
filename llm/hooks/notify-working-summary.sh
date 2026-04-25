@@ -162,7 +162,7 @@ if [ -n "$SUBTITLE" ]; then
 fi
 
 nlog "working summary update: $summary"
-resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
+resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "In progress" \
   --ignore-dnd --actions Show --timeout 0 \
   ${GROUP:+--group "$GROUP"} \
   ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
