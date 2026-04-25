@@ -121,8 +121,10 @@ notify_editor_scheme() {
 }
 
 NOTIFY_LOG="${NOTIFY_LOG:-/tmp/fba-notify.log}"
-DONE_STATUS="✅ Finished"
-INPUT_STATUS="❓ Input needed"
+RUNNING_ICON="⏳"
+DONE_ICON="🏁"
+INPUT_ICON="❓"
+INPUT_STATUS="$INPUT_ICON Input needed"
 
 nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$NOTIFY_LOG" 2>/dev/null || true
@@ -220,22 +222,14 @@ dedupe_notification_message() {
   subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
   if display_values_match "$message" "$subtitle" || display_values_match "$message" "$subtitle_tail"; then
     case "$event" in
-      UserPromptSubmit) printf '⏳ %s' "$message" ;;
-      Stop)             printf '✅ %s' "$message" ;;
+      UserPromptSubmit) printf '%s' "$message" ;;
+      Stop)             printf '%s' "$message" ;;
       Notification)     printf '%s' "$INPUT_STATUS" ;;
       *)                printf '%s' "$message" ;;
     esac
     return
   fi
   printf '%s' "$message"
-}
-
-prefix_done_status() {
-  local message="$1"
-  case "$message" in
-    "$DONE_STATUS"*|"✅"*) printf '%s' "$message" ;;
-    *)                    printf '%s %s' "✅" "$message" ;;
-  esac
 }
 
 strip_status_prefix() {
@@ -323,6 +317,40 @@ dispatch_working_summary() {
     return 0
   fi
   nlog "launchctl working summarizer failed; falling back to nohup"
+  nohup /bin/bash "$summarizer" "$spec" >/dev/null 2>&1 &
+}
+
+dispatch_final_summary() {
+  local source_text="$1" task_summary="$2" title="$3" subtitle="$4" group="$5" sender="$6" open_url="$7" cwd="$8" state_file="$9" state_id="${10}" summary_file="${11:-}"
+  local summarizer spec label
+  command -v codex >/dev/null 2>&1 || return 0
+  summarizer="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-final-summary.sh"
+  if [ ! -x "$summarizer" ]; then
+    nlog "final summarizer missing: $summarizer"
+    return 0
+  fi
+  spec=$(mktemp -t fba-notify-final-summary 2>/dev/null) || return 0
+  jq -n \
+    --arg source_text "$source_text" \
+    --arg task_summary "$task_summary" \
+    --arg title "$title" \
+    --arg subtitle "$subtitle" \
+    --arg group "$group" \
+    --arg sender "$sender" \
+    --arg open_url "$open_url" \
+    --arg cwd "$cwd" \
+    --arg log "$NOTIFY_LOG" \
+    --arg state_file "$state_file" \
+    --arg state_id "$state_id" \
+    --arg summary_file "$summary_file" \
+    '{source_text:$source_text, task_summary:$task_summary, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file}' \
+    > "$spec"
+  label="com.matthewho.fba.notify.final.${RUNTIME:-agent}.$$.$RANDOM"
+  if launchctl submit -l "$label" -o /tmp/fba-notify-final.out -e /tmp/fba-notify-final.err -- /bin/bash "$summarizer" "$spec" >/dev/null 2>&1; then
+    nlog "final summarizer dispatched: label=$label"
+    return 0
+  fi
+  nlog "launchctl final summarizer failed; falling back to nohup"
   nohup /bin/bash "$summarizer" "$spec" >/dev/null 2>&1 &
 }
 
@@ -482,12 +510,15 @@ RUN_ID="${TURN_ID:-$SESSION_ID}"
 STATE_FILE="$(notify_state_file "$GROUP")"
 SUMMARY_FILE="$(notify_summary_file "$GROUP")"
 TASK_SUMMARY="$(read_notify_summary "$SUMMARY_FILE")"
+DISPLAY_TITLE="$REPO"
+FINAL_SUMMARY_SOURCE=""
 
 case "$EVENT" in
   UserPromptSubmit)
+    DISPLAY_TITLE="$RUNNING_ICON $REPO"
     TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
     write_notify_summary "$SUMMARY_FILE" "$TASK_SUMMARY"
-    MESSAGE="⏳ $TASK_SUMMARY"
+    MESSAGE="$TASK_SUMMARY"
     if [ -n "${BRANCH:-}" ]; then
       SUBTITLE="$BRANCH"
     else
@@ -495,9 +526,11 @@ case "$EVENT" in
     fi
     ;;
   Stop)
+    DISPLAY_TITLE="$DONE_ICON $REPO"
     RAW_MESSAGE="${LAST_ASSISTANT:-}"
     fallback_title=""
     [ -z "$RAW_MESSAGE" ] && RAW_MESSAGE="$(extract_transcript_message)"
+    FINAL_SUMMARY_SOURCE="$RAW_MESSAGE"
     if stop_message_is_unhelpful "$RAW_MESSAGE"; then
       if [ -n "$TASK_SUMMARY" ]; then
         RAW_MESSAGE="$TASK_SUMMARY"
@@ -529,6 +562,7 @@ case "$EVENT" in
     fi
     ;;
   Notification)
+    DISPLAY_TITLE="$INPUT_ICON $REPO"
     # Claude's payload only carries a generic "needs your attention" string.
     # Pull the last assistant message from the transcript so the banner shows
     # the actual question/context the user has to act on.
@@ -558,7 +592,6 @@ else
   MESSAGE="$(normalize_message "$MESSAGE" 300)"
 fi
 MESSAGE="$(dedupe_notification_message "$EVENT" "$SUBTITLE" "$MESSAGE")"
-[ "$EVENT" = "Stop" ] && MESSAGE="$(prefix_done_status "$MESSAGE")"
 SUBTITLE="$(dedupe_notification_subtitle "$SUBTITLE" "$MESSAGE" "${BRANCH:-}")"
 
 case "$EVENT" in
@@ -584,16 +617,17 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   [ "$EVENT" = "Notification" ] && _dry_action="Respond"
   [ "$EVENT" = "UserPromptSubmit" ] && _dry_sound=""
   printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
-    "$_backend" "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
+    "$_backend" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
   cleanup_and_exit
 fi
 
 _chosen_backend=$(pick_backend)
-_summary_open_url="$OPEN_URL"
+_async_open_url="$OPEN_URL"
 if [ "$_chosen_backend" = "vscode" ]; then
-  _summary_pids=$(ancestor_pids)
-  _summary_label=$(printf '%s' "$SUBTITLE" | cut -c1-80)
-  _summary_open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$_summary_pids")&event=userpromptsubmit&label=$(url_encode_path "$_summary_label")"
+  _async_pids=$(ancestor_pids)
+  _async_event=$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')
+  _async_label=$(printf '%s' "$SUBTITLE" | cut -c1-80)
+  _async_open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$_async_pids")&event=$_async_event&label=$(url_encode_path "$_async_label")"
 fi
 # Keep agent notifications persistent. The dispatcher is detached from the
 # hook timeout, and the group id replaces older notifications for the same
@@ -605,13 +639,15 @@ SOUND="Pop"
 [ "$EVENT" = "Notification" ] && ACTION_LABEL="Respond"
 nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
-  alerter)           backend_alerter           "$REPO" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
+  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
+  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
 
 if [ "$EVENT" = "UserPromptSubmit" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_working_summary "$PROMPT" "$REPO" "${BRANCH:-}" "$GROUP" "$SENDER_BUNDLE" "$_summary_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE"
+  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "${BRANCH:-}" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE"
+elif [ "$EVENT" = "Stop" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "final:$RUN_ID" "$SUMMARY_FILE"
 fi
 
 cleanup_and_exit

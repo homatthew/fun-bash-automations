@@ -10,6 +10,7 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 | `notify.sh` | UserPromptSubmit, Stop, Notification | macOS notification only. Used when Slack is disabled. |
 | `notify-dispatch.sh` | (helper) | Detached `alerter --json` runner. Owns click handling so hooks return quickly. |
 | `notify-working-summary.sh` | (helper) | Detached Codex summarizer for `UserPromptSubmit`; replaces the initial local task label with a shorter generated label only if the same task is still active. |
+| `notify-final-summary.sh` | (helper) | Detached Codex summarizer for `Stop`; replaces generic or verbose final text with a concise completion summary only if the same task is still final. |
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on `pg push` / push-gate lease approval. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
@@ -53,7 +54,7 @@ pick_backend()
 
 ## Event Semantics
 
-`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as repo title, a concise subtitle such as the branch, and a message like `⏳ <task summary>`. `Stop` messages use a `✅` prefix so active and finished notifications are visually distinct. A detached `notify-working-summary.sh` process asks Codex for a 3-8 word running-task summary and replaces the same grouped alert. That update is guarded by a `/tmp/fba-notify-state-*` marker so a late summary cannot overwrite a final `Stop` / `Notification` alert. The summary is also persisted in `/tmp/fba-notify-summary-*`, so `Stop` can reuse it when the runtime sends no useful final assistant text.
+`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as an emoji-prefixed repo title (`⏳ repo` while running, `🏁 repo` when done), a concise subtitle such as the branch, and a message containing the AI-generated task/result summary. A detached `notify-working-summary.sh` process asks Codex for a 3-8 word running-task summary and replaces the same grouped alert. A detached `notify-final-summary.sh` process does the same for `Stop`, so the final notification does not need to say `Finished` when a real result summary can be generated. Both updates are guarded by `/tmp/fba-notify-state-*` markers so late summaries cannot overwrite a newer task state. The latest summary is also persisted in `/tmp/fba-notify-summary-*`, so `Stop` can reuse it when the runtime sends no useful final assistant text.
 
 `Stop` and `Notification` are audible final states. They use the same group so they replace any active `Working` alert rather than stacking another notification.
 
