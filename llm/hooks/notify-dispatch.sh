@@ -24,7 +24,10 @@ eval "$(jq -r '
   @sh "ACTION_LABEL=\(.action_label // "Show")",
   @sh "SOUND=\(.sound // "Pop")",
   @sh "CWD=\(.cwd // "")",
-  @sh "LOG=\(.log // "/tmp/fba-notify.log")"
+  @sh "LOG=\(.log // "/tmp/fba-notify.log")",
+  @sh "STATE_FILE=\(.state_file // "")",
+  @sh "STATE_ID=\(.state_id // "")",
+  @sh "STICKY_AFTER_CLICK=\(.sticky_after_click // "0")"
 ' "$SPEC")"
 
 nlog() {
@@ -39,22 +42,36 @@ else
 fi
 [ -n "$SOUND" ] && extra_args+=(--sound "$SOUND")
 
-resp=$(alerter --title "$TITLE" --subtitle "$SUBTITLE" --message "$MESSAGE" \
-  --ignore-dnd \
-  "${extra_args[@]}" \
-  ${GROUP:+--group "$GROUP"} \
-  ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
+state_is_current() {
+  [ "$STICKY_AFTER_CLICK" = "1" ] || return 1
+  [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ] || return 1
+  [ "$(cat "$STATE_FILE" 2>/dev/null || true)" = "$STATE_ID" ]
+}
 
-nlog "alerter response: $resp"
-act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)
-nlog "alerter act=$act"
+while :; do
+  resp=$(alerter --title "$TITLE" --subtitle "$SUBTITLE" --message "$MESSAGE" \
+    --ignore-dnd \
+    "${extra_args[@]}" \
+    ${GROUP:+--group "$GROUP"} \
+    ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
 
-if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
-  nlog "alerter opening: $OPEN_URL"
-  open "$OPEN_URL" >/dev/null 2>&1 || true
-  if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
-    code "$CWD" >/dev/null 2>&1 || true
-    sleep 0.4
+  nlog "alerter response: $resp"
+  act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)
+  nlog "alerter act=$act"
+
+  if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
+    nlog "alerter opening: $OPEN_URL"
     open "$OPEN_URL" >/dev/null 2>&1 || true
+    if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
+      code "$CWD" >/dev/null 2>&1 || true
+      sleep 0.4
+      open "$OPEN_URL" >/dev/null 2>&1 || true
+    fi
+    if state_is_current; then
+      nlog "alerter sticky re-post: state=$STATE_ID"
+      sleep 0.6
+      continue
+    fi
   fi
-fi
+  break
+done

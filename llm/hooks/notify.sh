@@ -349,6 +349,9 @@ dispatch_alerter() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="$7" cwd="$8"
   local action_label="${9:-Show}"
   local sound="${10-Pop}"
+  local state_file="${11:-}"
+  local state_id="${12:-}"
+  local sticky_after_click="${13:-0}"
   local dispatcher spec label
   dispatcher="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-dispatch.sh"
   if [ ! -x "$dispatcher" ]; then
@@ -368,7 +371,10 @@ dispatch_alerter() {
     --arg sound "$sound" \
     --arg cwd "$cwd" \
     --arg log "$NOTIFY_LOG" \
-    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, action_label:$action_label, sound:$sound, cwd:$cwd, log:$log}' \
+    --arg state_file "$state_file" \
+    --arg state_id "$state_id" \
+    --arg sticky_after_click "$sticky_after_click" \
+    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, action_label:$action_label, sound:$sound, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, sticky_after_click:$sticky_after_click}' \
     > "$spec"
   label="com.matthewho.fba.notify.${RUNTIME:-agent}.$$.$RANDOM"
   if launchctl submit -l "$label" -o /tmp/fba-notify-dispatch.out -e /tmp/fba-notify-dispatch.err -- /bin/bash "$dispatcher" "$spec" >/dev/null 2>&1; then
@@ -476,6 +482,9 @@ backend_alerter() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="${7:-banner}"
   local action_label="${8:-Show}"
   local sound="${9-Pop}"
+  local state_file="${10:-}"
+  local state_id="${11:-}"
+  local sticky_after_click="${12:-0}"
   # Alert style is persistent. alerter only renders a sticky alert when
   # --actions is supplied; --timeout 0 means no auto-close.
   local extra_args=()
@@ -486,7 +495,7 @@ backend_alerter() {
   fi
   [ -n "$sound" ] && extra_args+=(--sound "$sound")
   nlog "alerter invoke: title=$title subtitle=$subtitle style=$style action=$action_label sound=${sound:-<none>} msg_len=${#message} sender=${sender:-<none>} open=${open_url:-<none>}"
-  if dispatch_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "${MAIN_REPO_PATH:-$CWD}" "$action_label" "$sound"; then
+  if dispatch_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "${MAIN_REPO_PATH:-$CWD}" "$action_label" "$sound" "$state_file" "$state_id" "$sticky_after_click"; then
     return
   fi
   (
@@ -531,6 +540,9 @@ backend_vscode() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" style="${6:-banner}"
   local action_label="${7:-Show}"
   local sound="${8-Pop}"
+  local state_file="${9:-}"
+  local state_id="${10:-}"
+  local sticky_after_click="${11:-0}"
   # Ring the terminal bell for audible notifications so the tab gets a bell
   # icon when not active. Quiet working notifications only update macOS state.
   [ -n "$sound" ] && (printf '\a' > /dev/tty) 2>/dev/null || true
@@ -541,7 +553,7 @@ backend_vscode() {
   local _label
   _label=$(printf '%s' "$subtitle" | cut -c1-80)
   local open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$pids")&event=$event_lc&label=$(url_encode_path "$_label")"
-  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "$action_label" "$sound"
+  backend_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "$action_label" "$sound" "$state_file" "$state_id" "$sticky_after_click"
 }
 
 SCRIPT_PATH="$0"
@@ -750,10 +762,12 @@ ACTION_LABEL="Show"
 SOUND="Pop"
 [ "$EVENT" = "UserPromptSubmit" ] && SOUND=""
 [ "$EVENT" = "Notification" ] && ACTION_LABEL="Respond"
+STICKY_AFTER_CLICK="0"
+[ "$EVENT" = "UserPromptSubmit" ] && STICKY_AFTER_CLICK="1"
 nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
-  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" ;;
+  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$RUN_ID" "$STICKY_AFTER_CLICK" ;;
+  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$RUN_ID" "$STICKY_AFTER_CLICK" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
 

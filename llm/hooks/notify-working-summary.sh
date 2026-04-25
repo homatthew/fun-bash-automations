@@ -218,17 +218,25 @@ if [ -n "$CONTEXT_FILE" ] && [ -n "$context" ]; then
 fi
 
 nlog "working summary update: context=${display_subtitle:-<none>} summary=$summary"
-resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
-  --ignore-dnd --actions Show --timeout 0 \
-  ${GROUP:+--group "$GROUP"} \
-  ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
-act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)
-nlog "working summary alerter act=$act"
-if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
-  open "$OPEN_URL" >/dev/null 2>&1 || true
-  if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
-    code "$CWD" >/dev/null 2>&1 || true
-    sleep 0.4
+while :; do
+  resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
+    --ignore-dnd --actions Show --timeout 0 \
+    ${GROUP:+--group "$GROUP"} \
+    ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
+  act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)
+  nlog "working summary alerter act=$act"
+  if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
     open "$OPEN_URL" >/dev/null 2>&1 || true
+    if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
+      code "$CWD" >/dev/null 2>&1 || true
+      sleep 0.4
+      open "$OPEN_URL" >/dev/null 2>&1 || true
+    fi
+    if state_is_current; then
+      nlog "working summary sticky re-post: state=$STATE_ID"
+      sleep 0.6
+      continue
+    fi
   fi
-fi
+  break
+done
