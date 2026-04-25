@@ -79,6 +79,12 @@ stack_shell_quote() {
   printf '%s' "$quoted"
 }
 
+stack_append_flag() {
+  local cmd="$1" flag="$2" value="$3"
+  [[ -z "$value" ]] && { printf '%s\n' "$cmd"; return 0; }
+  printf '%s %s %s\n' "$cmd" "$flag" "$(stack_shell_quote "$value")"
+}
+
 stack_ref_name() {
   printf 'refs/heads/%s\n' "$1"
 }
@@ -430,6 +436,83 @@ stack_render_json() {
 
   jq -n --arg base "$base" --arg prefix "$prefix" --argjson stacks "$roots_json" \
     '{base: $base, prefix: $prefix, stacks: $stacks}'
+}
+
+stack_pr_base_from_parent() {
+  local parent="$1"
+  case "$parent" in
+    refs/heads/*) printf '%s\n' "${parent#refs/heads/}" ;;
+    refs/remotes/*/*) printf '%s\n' "${parent#refs/remotes/*/}" ;;
+    */*)
+      if git show-ref --verify --quiet "refs/remotes/$parent"; then
+        printf '%s\n' "${parent#*/}"
+      else
+        printf '%s\n' "$parent"
+      fi
+      ;;
+    *) printf '%s\n' "$parent" ;;
+  esac
+}
+
+stack_push_rerun_command() {
+  local base_override="$1" prefix_override="$2"
+  local cmd="stack push"
+  cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
+  cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
+  printf '%s\n' "$cmd"
+}
+
+stack_push_print_agent_handoff() {
+  local ordered="$1" prs="$2" rerun_cmd="$3"
+  local depth name parent ahead behind
+  local pr pr_num pr_base pr_title pr_url create_base subject
+  local existing='[]' missing='[]'
+
+  while IFS=$'\t' read -r depth name parent ahead behind; do
+    [[ -z "$name" ]] && continue
+    pr=$(jq -c --arg k "$name" '.[$k] // null' <<<"$prs")
+    if [[ "$pr" == "null" ]]; then
+      create_base=$(stack_pr_base_from_parent "$parent")
+      subject=$(git log -1 --format='%s' "$name" 2>/dev/null || echo "$name")
+      missing=$(jq \
+        --arg branch "$name" \
+        --arg base "$create_base" \
+        --arg subject "$subject" \
+        '. + [{branch: $branch, base: $base, subject: $subject}]' <<<"$missing")
+      continue
+    fi
+
+    pr_num=$(jq -r '.number' <<<"$pr")
+    pr_base=$(jq -r '.baseRefName // ""' <<<"$pr")
+    pr_title=$(jq -r '.title // ""' <<<"$pr")
+    pr_url=$(jq -r '.url // ""' <<<"$pr")
+    existing=$(jq \
+      --arg branch "$name" \
+      --arg number "$pr_num" \
+      --arg base "$pr_base" \
+      --arg title "$pr_title" \
+      --arg url "$pr_url" \
+      '. + [{branch: $branch, number: $number, base: $base, title: $title, url: $url}]' <<<"$existing")
+  done <<<"$ordered"
+
+  local existing_count missing_count
+  existing_count=$(jq 'length' <<<"$existing")
+  missing_count=$(jq 'length' <<<"$missing")
+  (( existing_count > 0 || missing_count > 0 )) || return 0
+
+  echo
+  echo "Agent handoff:"
+  echo "  Re-run this stack: $rerun_cmd"
+
+  if (( existing_count > 0 )); then
+    echo "  Existing PRs to update/describe:"
+    jq -r '.[] | "  - #\(.number) \(.branch) (base \(.base)): \(.title)\n    update description: /update-pr-description \(.number)"' <<<"$existing"
+  fi
+
+  if (( missing_count > 0 )); then
+    echo "  Branches without PRs:"
+    jq -r '.[] | "  - \(.branch) -> base \(.base)\n    create draft PR via /commit-push-pr after push-gate approval\n    suggested title: \(.subject)"' <<<"$missing"
+  fi
 }
 
 # ------------------------------------------------------------------------
@@ -999,9 +1082,10 @@ stack_cmd_push() {
   dirty=$(git status --porcelain 2>/dev/null)
   [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
 
-  local base prefix parent_map prs
+  local base prefix parent_map prs rerun_cmd
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
+  rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
   stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run"
   prs=$(stack_fetch_prs)
@@ -1115,16 +1199,18 @@ stack_cmd_push() {
 
 [$idx/$total] $name prepared. To approve and continue:
   1. Run: pg -C $repo_root
-  2. Re-run: stack push
+  2. Re-run: $rerun_cmd
 
 (Stopping here — $pushed pushed, $skipped skipped before this branch.)
 EOM
+    stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd"
     return 0
   done <<<"$ordered"
 
   restore_branch
   echo
   echo "Done. Pushed $pushed, skipped $skipped, total $total."
+  stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd"
 }
 
 stack_usage() {
@@ -1149,7 +1235,9 @@ Commands:
     commits: if the pg lease is fresh, run `pg push --force-with-lease
     --assert-flow`; else
     run `pg prepare` and stop with instructions to run `pg`. Re-run after
-    approval to continue. Never bypasses push-gate.
+    approval to continue. Prints an agent handoff with PR numbers,
+    description-update targets, and no-PR branch creation targets. Never
+    bypasses push-gate.
 
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).

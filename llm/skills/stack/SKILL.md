@@ -89,6 +89,12 @@ existing push-gate lease is reported as stale.
   what/why/approach, prints "Run `pg -C <repo>` to approve, then re-run
   `stack push`", and exits 0. Idempotent: re-invoke after each approval.
 
+At the end of a push attempt, `stack push` prints an **Agent handoff** block.
+Use it as the checklist for the next agent action: existing PR numbers to
+refresh with `/update-pr-description`, no-PR branches with their target base,
+and the exact `stack push` command to re-run when a custom `--base` or
+`--prefix` was used.
+
 ## Rules for agents
 
 1. **Do not bypass `pg`.** `stack sync` only flags which leases go stale — it
