@@ -462,6 +462,33 @@ stack_push_rerun_command() {
   printf '%s\n' "$cmd"
 }
 
+stack_push_remote_ref() {
+  local branch="$1"
+  local remote_ref
+  remote_ref=$(git rev-parse --abbrev-ref --symbolic-full-name "${branch}@{upstream}" 2>/dev/null || echo "")
+  if [[ -n "$remote_ref" ]]; then
+    printf '%s\n' "$remote_ref"
+    return 0
+  fi
+
+  local remote
+  for remote in origin upstream; do
+    if git show-ref --verify --quiet "refs/remotes/${remote}/${branch}"; then
+      printf '%s/%s\n' "$remote" "$branch"
+      return 0
+    fi
+  done
+}
+
+stack_push_assert_flow() {
+  local branch="$1" pr_num="$2" rewrite_note="$3" create_base="${4:-}"
+  if [[ -n "$pr_num" ]]; then
+    printf 'update pr #%s\nbranch %s\n%s\nforce-with-lease' "$pr_num" "$branch" "$rewrite_note"
+  else
+    printf 'create stacked pr\nbranch %s\nbase %s\n%s\nforce-with-lease' "$branch" "$create_base" "$rewrite_note"
+  fi
+}
+
 stack_push_print_agent_handoff() {
   local ordered="$1" prs="$2" rerun_cmd="$3"
   local depth name parent ahead behind
@@ -1049,7 +1076,8 @@ stack_cmd_squash() {
 # stack push — orchestrate per-branch pg flow across the stack.
 #
 # For each branch (parents first):
-#   - Skip if no PR (MVP: agent does not create PRs from here).
+#   - Existing PR: update through pg push when unpushed commits exist.
+#   - No PR: push the branch through pg, then print draft-PR instructions.
 #   - Skip if remote tracks branch and there are no unpushed commits.
 #   - Checkout branch, then `pg check`:
 #       * lease fresh (allowed && anchor==HEAD):
@@ -1120,22 +1148,27 @@ stack_cmd_push() {
     [[ -z "$name" ]] && continue
     idx=$((idx + 1))
 
-    local pr pr_num
+    local pr pr_num create_pr_base
     pr=$(jq -c --arg k "$name" '.[$k] // null' <<<"$prs")
     if [[ "$pr" == "null" ]]; then
-      stack_warn "[$idx/$total] $name: no PR; skip"
-      skipped=$((skipped + 1))
-      continue
+      pr_num=""
+      create_pr_base=$(stack_pr_base_from_parent "$parent")
+    else
+      pr_num=$(jq -r '.number' <<<"$pr")
+      create_pr_base=""
     fi
-    pr_num=$(jq -r '.number' <<<"$pr")
 
     local remote_ref ahead_remote=""
-    remote_ref=$(git rev-parse --abbrev-ref --symbolic-full-name "${name}@{upstream}" 2>/dev/null || echo "")
+    remote_ref=$(stack_push_remote_ref "$name")
     if [[ -n "$remote_ref" ]]; then
       ahead_remote=$(git rev-list --count "${remote_ref}..${name}" 2>/dev/null || echo 0)
-      stack_debug "push branch=$name pr=#$pr_num upstream=$remote_ref ahead_upstream=$ahead_remote"
+      stack_debug "push branch=$name pr=${pr_num:-none} upstream=$remote_ref ahead_upstream=$ahead_remote"
       if [[ "$ahead_remote" == "0" ]]; then
-        echo "[$idx/$total] $name: up to date with $remote_ref (#$pr_num); skip"
+        if [[ -n "$pr_num" ]]; then
+          echo "[$idx/$total] $name: up to date with $remote_ref (#$pr_num); skip"
+        else
+          echo "[$idx/$total] $name: pushed branch exists at $remote_ref, but no PR yet; create draft PR with base $create_pr_base"
+        fi
         skipped=$((skipped + 1))
         continue
       fi
@@ -1150,19 +1183,29 @@ stack_cmd_push() {
     check_json=$(bash "$pg_helper" check "$name" 2>/dev/null || echo '{"allowed":false}')
     allowed=$(jq -r '.allowed // false' <<<"$check_json")
     anchor_matches=$(jq -r '.current.anchor_matches_head // false' <<<"$check_json")
-    stack_debug "push branch=$name pr=#$pr_num lease_allowed=$allowed anchor_matches_head=$anchor_matches"
+    stack_debug "push branch=$name pr=${pr_num:-none} lease_allowed=$allowed anchor_matches_head=$anchor_matches"
 
     if [[ "$allowed" == "true" && "$anchor_matches" == "true" ]]; then
       local assert_flow rewrite_note="no rewrite"
       if [[ -n "$remote_ref" ]] && ! git merge-base --is-ancestor "$remote_ref" "$name" 2>/dev/null; then
         rewrite_note="rewrite branch"
       fi
-      assert_flow=$(printf 'update pr #%s\nbranch %s\n%s\nforce-with-lease' "$pr_num" "$name" "$rewrite_note")
+      assert_flow=$(stack_push_assert_flow "$name" "$pr_num" "$rewrite_note" "$create_pr_base")
       if [[ "$dry_run" == "true" ]]; then
-        echo "[$idx/$total] $name: (dry-run) lease fresh; would: pg push --force-with-lease --assert-flow ..."
+        if [[ -n "$pr_num" ]]; then
+          echo "[$idx/$total] $name: (dry-run) lease fresh; would update #$pr_num with pg push --force-with-lease"
+        else
+          echo "[$idx/$total] $name: (dry-run) lease fresh; would push branch with pg push --force-with-lease --set-upstream, then create draft PR with base $create_pr_base"
+        fi
       else
-        echo "[$idx/$total] $name: pushing #$pr_num..."
-        if ! bash "$pg_helper" push --force-with-lease --assert-flow "$assert_flow"; then
+        if [[ -n "$pr_num" ]]; then
+          echo "[$idx/$total] $name: pushing #$pr_num..."
+        else
+          echo "[$idx/$total] $name: pushing branch for new stacked PR (base $create_pr_base)..."
+        fi
+        local -a pg_push_args=(push --force-with-lease --assert-flow "$assert_flow")
+        [[ -z "$pr_num" ]] && pg_push_args+=(--set-upstream)
+        if ! bash "$pg_helper" "${pg_push_args[@]}"; then
           restore_branch
           stack_fail "pg push failed for $name. Aborting."
         fi
@@ -1173,11 +1216,19 @@ stack_cmd_push() {
 
     # Lease missing or stale — prepare and stop.
     local what why approach base_for_log
-    what=$(jq -r '.title // ""' <<<"$pr")
+    if [[ "$pr" != "null" ]]; then
+      what=$(jq -r '.title // ""' <<<"$pr")
+    else
+      what=""
+    fi
     [[ -z "$what" || "$what" == "null" ]] \
       && what=$(git log -1 --format='%s' "$name" 2>/dev/null || echo "update $name")
-    why="see PR #$pr_num"
-    base_for_log="${remote_ref:-$base}"
+    if [[ -n "$pr_num" ]]; then
+      why="see PR #$pr_num"
+    else
+      why="create stacked PR based on $create_pr_base"
+    fi
+    base_for_log="${remote_ref:-$parent}"
     approach=$(git log "${base_for_log}..${name}" --format='%s' 2>/dev/null \
                 | head -5 | paste -sd ';' -)
     [[ -z "$approach" ]] && approach="straightforward"
@@ -1185,6 +1236,9 @@ stack_cmd_push() {
     if [[ "$dry_run" == "true" ]]; then
       echo "[$idx/$total] $name: (dry-run) lease missing/stale; would: pg prepare \\"
       echo "    --what '$what' --why '$why' --approach '$approach'"
+      if [[ -z "$pr_num" ]]; then
+        echo "    then push branch and create draft PR with base '$create_pr_base'"
+      fi
       continue
     fi
 
@@ -1231,13 +1285,12 @@ Commands:
     parent into one commit, then restack local descendants.
 
   push [--dry-run] [--base REF] [--prefix PREFIX]
-    Walk stack parents-first. For each branch with a PR and unpushed
-    commits: if the pg lease is fresh, run `pg push --force-with-lease
-    --assert-flow`; else
-    run `pg prepare` and stop with instructions to run `pg`. Re-run after
-    approval to continue. Prints an agent handoff with PR numbers,
-    description-update targets, and no-PR branch creation targets. Never
-    bypasses push-gate.
+    Walk stack parents-first. Existing PR branches update through
+    `pg push --force-with-lease`. Branches without PRs are still pushed
+    through push-gate when their lease is fresh, using --set-upstream, then
+    listed as draft-PR creation targets. If any branch needs approval, run
+    `pg prepare` and stop with instructions to run `pg`; re-run after
+    approval to continue. Never bypasses push-gate.
 
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).
