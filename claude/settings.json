@@ -51,6 +51,18 @@
         "matcher": ""
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/notify.sh",
+            "type": "command",
+            "timeout": 15
+          }
+        ],
+        "matcher": ""
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [

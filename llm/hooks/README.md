@@ -7,8 +7,9 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 
 | Script | Event(s) | What it does |
 |---|---|---|
-| `notify.sh` | Stop, Notification | macOS banner only. Used when Slack is disabled. |
+| `notify.sh` | UserPromptSubmit, Stop, Notification | macOS notification only. Used when Slack is disabled. |
 | `notify-dispatch.sh` | (helper) | Detached `alerter --json` runner. Owns click handling so hooks return quickly. |
+| `notify-working-summary.sh` | (helper) | Detached Codex summarizer for `UserPromptSubmit`; replaces the initial local task label with a shorter generated label only if the same task is still active. |
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on `pg push` / push-gate lease approval. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
@@ -27,7 +28,7 @@ Only one of `notify.sh` / `notify-slack.sh` is referenced from
 2. Scrape terminal focus context from the hook process tree into ancestor PIDs.
 3. Send the macOS notification through `alerter`, then route clicks to the forked VS Code extension.
 
-The main hook must not wait on `alerter --json`; that can keep the hook alive until timeout. Instead, `notify.sh` writes a small JSON job and starts `notify-dispatch.sh` through launchd. The detached helper waits for `alerter` activation, then opens the focus URI.
+The main hook must not wait on `alerter --json`; that can keep the hook alive until timeout. Instead, `notify.sh` writes a small JSON job and starts `notify-dispatch.sh` through launchd. The detached helper waits for `alerter` activation, then opens the focus URI. Agent notifications are persistent alert-style notifications: `UserPromptSubmit` creates a quiet task-summary alert, `Stop` replaces it with a `Show` alert, and `Notification` replaces it with a `Respond` alert. All alert notifications use `--timeout 0`.
 
 ## Backend Strategy
 
@@ -44,11 +45,17 @@ pick_backend()
 
 | Backend | Signature | Notes |
 |---|---|---|
-| `backend_vscode` | `(title, subtitle, message, group, sender)` | Rings the terminal bell, captures ancestor PIDs, then calls `backend_alerter` with a URL pointing at the forked extension's URI handler. |
-| `backend_alerter` | `(title, subtitle, message, group, sender, open_url)` | Dispatches `notify-dispatch.sh` via launchd; the detached helper uses `alerter --json`, then opens `open_url` on `contentsClicked` / `actionClicked`. |
+| `backend_vscode` | `(title, subtitle, message, group, sender, style, action_label, sound)` | Rings the terminal bell for audible notifications, captures ancestor PIDs, then calls `backend_alerter` with a URL pointing at the forked extension's URI handler. |
+| `backend_alerter` | `(title, subtitle, message, group, sender, open_url, style, action_label, sound)` | Dispatches `notify-dispatch.sh` via launchd; the detached helper uses `alerter --json`, then opens `open_url` on `contentsClicked` / `actionClicked`. |
 | `backend_suppressed` | – | no-op |
 
 `notify-slack.sh` predates the launchd-detached helper and may lag this shape. Do not copy behavior from it back into `notify.sh` without rechecking this section.
+
+## Event Semantics
+
+`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as repo title, branch-plus-task subtitle, and the same task summary as the message. A detached `notify-working-summary.sh` process may ask Codex for a 3-8 word running-task summary and replace the same grouped alert. That update is guarded by a `/tmp/fba-notify-state-*` marker so a late summary cannot overwrite a final `Stop` / `Notification` alert. The summary is also persisted in `/tmp/fba-notify-summary-*`, so `Stop` can reuse it when the runtime sends no useful final assistant text.
+
+`Stop` and `Notification` are audible final states. They use the same group so they replace any active `Working` alert rather than stacking another notification.
 
 ## VS Code coupling
 
