@@ -27,6 +27,18 @@ stack_warn() {
   echo "stack: $*" >&2
 }
 
+stack_debug_enabled() {
+  case "${STACK_DEBUG:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stack_debug() {
+  stack_debug_enabled || return 0
+  echo "stack: debug: $*" >&2
+}
+
 stack_helper_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
@@ -49,6 +61,18 @@ stack_repo_root() {
     || stack_fail "not inside a git repo"
 }
 
+stack_common_dir() {
+  local common repo_root
+  common=$(git rev-parse --git-common-dir)
+  case "$common" in
+    /*) printf '%s\n' "$common" ;;
+    *)
+      repo_root=$(stack_repo_root)
+      printf '%s\n' "$repo_root/$common"
+      ;;
+  esac
+}
+
 stack_shell_quote() {
   local quoted
   printf -v quoted '%q' "$1"
@@ -62,6 +86,10 @@ stack_ref_name() {
 stack_lookup_tip() {
   local branch="$1" tips="$2"
   awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' <<<"$tips"
+}
+
+stack_count_nonempty_lines() {
+  awk 'NF { n++ } END { print n + 0 }'
 }
 
 stack_fetch_base_remote() {
@@ -204,18 +232,28 @@ stack_fetch_prs() {
   jq 'map({(.headRefName): .}) | add // {}' <<<"$raw"
 }
 
-# Fetch push-gate leases for current repo root; index by branch_name.
+# Fetch push-gate leases for this repo or its main worktree; index by branch_name.
 # Silent-fail: if push-gate.sh missing or errors, emit {}.
 stack_fetch_leases() {
-  local helper repo_root
+  local helper repo_root main_repo_root common_dir
   helper="$(stack_helper_dir)/push-gate.sh"
   repo_root=$(stack_repo_root)
+  common_dir=$(stack_common_dir)
+  main_repo_root=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd || printf '%s\n' "$repo_root")
   [[ -f "$helper" ]] || { echo '{}'; return 0; }
   local raw
   raw=$(bash "$helper" leases --all --json 2>/dev/null || echo '[]')
   [[ -z "$raw" ]] && raw='[]'
-  jq --arg rr "$repo_root" \
-    '[.[] | select(.repo_root == $rr)] | map({(.branch_name): .}) | add // {}' \
+  if stack_debug_enabled; then
+    local total matched
+    total=$(jq 'length' <<<"$raw" 2>/dev/null || echo "?")
+    matched=$(jq --arg rr "$repo_root" --arg mr "$main_repo_root" \
+      '[.[] | select(.repo_root == $rr or .repo_root == $mr)] | length' \
+      <<<"$raw" 2>/dev/null || echo "?")
+    stack_debug "lease lookup repo_root=$repo_root main_repo_root=$main_repo_root total=$total matched=$matched"
+  fi
+  jq --arg rr "$repo_root" --arg mr "$main_repo_root" \
+    '[.[] | select(.repo_root == $rr or .repo_root == $mr)] | map({(.branch_name): .}) | add // {}' \
     <<<"$raw"
 }
 
@@ -417,6 +455,7 @@ stack_cmd_status() {
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map")"
   prs=$(stack_fetch_prs)
   leases=$(stack_fetch_leases)
 
@@ -452,6 +491,7 @@ stack_cmd_sync() {
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "sync base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run keep_scratch=$keep_scratch"
   prs=$(stack_fetch_prs)
   leases=$(stack_fetch_leases)
 
@@ -463,6 +503,7 @@ stack_cmd_sync() {
   # `--verify` suppresses the misleading "echo input on failure" of plain rev-parse.
   local pre_tips
   pre_tips=$(stack_branch_tips_from_parent_map "$parent_map")
+  stack_debug "pre-sync tips captured=$(stack_count_nonempty_lines <<<"$pre_tips")"
 
   # Always fetch upstream.
   stack_fetch_base_remote "$base"
@@ -489,6 +530,7 @@ stack_cmd_sync() {
   stack_sync_create_scratch "$repo_root" "$scratch_repo" "$current_branch" "$parent_map"
 
   local preflight_log="$scratch_root/preflight.log"
+  stack_debug "scratch_root=$scratch_root scratch_repo=$scratch_repo preflight_log=$preflight_log"
   echo "Preflighting sync in scratch..."
   set +e
   (
@@ -510,6 +552,7 @@ stack_cmd_sync() {
     printf '%s\t%s\n' "$b" "$(git -C "$scratch_repo" rev-parse --verify "$b" 2>/dev/null || echo '')"
   done)
   moved_tips=$(stack_sync_moved_tips "$pre_tips" "$scratch_tips")
+  stack_debug "scratch moved tips=$(stack_count_nonempty_lines <<<"$moved_tips")"
 
   if [[ -n "$moved_tips" ]]; then
     stack_sync_apply_refs "$scratch_repo" "$moved_tips"
@@ -555,17 +598,22 @@ stack_cmd_sync() {
 
 stack_sync_create_scratch() {
   local repo_root="$1" scratch_repo="$2" current_branch="$3" parent_map="$4"
+  stack_debug "initializing scratch clone from repo_root=$repo_root"
   git -c init.defaultBranch=main init "$scratch_repo" >/dev/null
   git -C "$scratch_repo" symbolic-ref HEAD refs/heads/__stack_scratch_head
 
-  local remote url
+  local remote url remote_count=0
   while read -r remote; do
     [[ -z "$remote" ]] && continue
     url=$(git -C "$repo_root" remote get-url "$remote" 2>/dev/null || true)
-    [[ -n "$url" ]] && git -C "$scratch_repo" remote add "$remote" "$url"
+    if [[ -n "$url" ]]; then
+      git -C "$scratch_repo" remote add "$remote" "$url"
+      remote_count=$((remote_count + 1))
+    fi
   done < <(git -C "$repo_root" remote)
 
   git -C "$scratch_repo" remote add stack-source "$repo_root"
+  stack_debug "scratch remotes copied=$remote_count plus stack-source"
   git -C "$scratch_repo" fetch --quiet stack-source \
     '+refs/heads/*:refs/heads/*' \
     '+refs/remotes/*:refs/remotes/*'
@@ -580,7 +628,10 @@ stack_sync_create_scratch() {
   if [[ -z "$checkout_branch" || "$checkout_branch" == "HEAD" ]]; then
     checkout_branch=$(awk -F'\t' 'NF { print $1; exit }' <<<"$parent_map")
   fi
-  [[ -n "$checkout_branch" ]] && git -C "$scratch_repo" checkout -q "$checkout_branch"
+  if [[ -n "$checkout_branch" ]]; then
+    stack_debug "scratch checkout=$checkout_branch"
+    git -C "$scratch_repo" checkout -q "$checkout_branch"
+  fi
 }
 
 stack_sync_run_preflight() {
@@ -604,7 +655,11 @@ stack_sync_moved_tips() {
 stack_sync_apply_refs() {
   local scratch_repo="$1" moved_tips="$2"
   local import_ns="refs/stack-sync/$RANDOM-$$"
+  local update_count
+  update_count=$(awk -F'\t' 'NF && $3 != "" { n++ } END { print n + 0 }' <<<"$moved_tips")
 
+  echo "Applying $update_count branch ref update(s) atomically..."
+  stack_debug "import namespace=$import_ns"
   git fetch --quiet "$scratch_repo" "+refs/heads/*:${import_ns}/*"
 
   local update_input
@@ -620,6 +675,8 @@ stack_sync_apply_refs() {
 
   if ! git update-ref --stdin >/dev/null <<<"$update_input"; then
     git for-each-ref --format='delete %(refname)' "$import_ns" | git update-ref --stdin >/dev/null || true
+    stack_warn "planned ref updates:"
+    awk -F'\t' 'NF && $3 != "" { printf "  %s %s -> %s\n", $1, $2, $3 }' <<<"$moved_tips" >&2
     stack_fail "real branch tips changed since scratch preflight; aborted without partial updates."
   fi
 
@@ -653,6 +710,8 @@ stack_sync_report_failure() {
 
   if [[ "$keep_scratch" == "true" ]]; then
     stack_sync_print_debug "$scratch_repo" "$script_path" "$base" "$prefix"
+  else
+    stack_warn "rerun with --keep-scratch to preserve the scratch clone and preflight log."
   fi
 
   stack_fail "scratch sync preflight failed (exit $rc). Real branch refs were not changed."
@@ -819,6 +878,7 @@ stack_cmd_squash() {
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "squash base=$base prefix=$prefix current=$current branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run"
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
   current_line=$(awk -F'\t' -v b="$current" '$2 == b { print; exit }' <<<"$ordered")
   [[ -n "$current_line" ]] || stack_fail "$current is not under stack prefix $prefix"
@@ -943,6 +1003,7 @@ stack_cmd_push() {
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run"
   prs=$(stack_fetch_prs)
 
   local ordered
@@ -988,6 +1049,7 @@ stack_cmd_push() {
     remote_ref=$(git rev-parse --abbrev-ref --symbolic-full-name "${name}@{upstream}" 2>/dev/null || echo "")
     if [[ -n "$remote_ref" ]]; then
       ahead_remote=$(git rev-list --count "${remote_ref}..${name}" 2>/dev/null || echo 0)
+      stack_debug "push branch=$name pr=#$pr_num upstream=$remote_ref ahead_upstream=$ahead_remote"
       if [[ "$ahead_remote" == "0" ]]; then
         echo "[$idx/$total] $name: up to date with $remote_ref (#$pr_num); skip"
         skipped=$((skipped + 1))
@@ -1004,6 +1066,7 @@ stack_cmd_push() {
     check_json=$(bash "$pg_helper" check "$name" 2>/dev/null || echo '{"allowed":false}')
     allowed=$(jq -r '.allowed // false' <<<"$check_json")
     anchor_matches=$(jq -r '.current.anchor_matches_head // false' <<<"$check_json")
+    stack_debug "push branch=$name pr=#$pr_num lease_allowed=$allowed anchor_matches_head=$anchor_matches"
 
     if [[ "$allowed" == "true" && "$anchor_matches" == "true" ]]; then
       local assert_flow rewrite_note="no rewrite"
@@ -1090,6 +1153,10 @@ Commands:
 
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).
+
+Debugging:
+  Set STACK_DEBUG=1 to print repo roots, branch counts, scratch paths,
+  lease-match counts, and push-gate decision breadcrumbs to stderr.
 EOF
 }
 

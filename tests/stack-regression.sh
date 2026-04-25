@@ -234,7 +234,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..17"
+echo "1..18"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -542,7 +542,31 @@ REPO="$OLD_REPO"
 echo "ok 16 - squash creates one commit and restacks descendants"
 
 # ------------------------------------------------------------------------
-# 17: help and skill docs match the supported V1 command surface.
+# 17: lease lookup works from linked worktrees that share git-common-dir.
+# ------------------------------------------------------------------------
+
+LINKED_WT="$TEST_TMP/linked-worktree"
+git -C "$REPO" worktree add --detach "$LINKED_WT" mho/feature-ui >/dev/null 2>&1
+LINKED_WT=$(cd "$LINKED_WT" && git rev-parse --show-toplevel)
+linked_out=$(
+  cd "$LINKED_WT"
+  PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --prefix mho/feature- 2>&1
+)
+expect_contains "$linked_out" "mho/feature-base"
+base_linked_line=$(echo "$linked_out" | grep "mho/feature-base" || true)
+expect_contains "$base_linked_line" "allowed"
+linked_debug_out=$(
+  cd "$LINKED_WT"
+  STACK_DEBUG=1 PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --prefix mho/feature- 2>&1
+)
+expect_contains "$linked_debug_out" "stack: debug: status base="
+expect_contains "$linked_debug_out" "stack: debug: lease lookup repo_root=$LINKED_WT"
+expect_contains "$linked_debug_out" "main_repo_root=$REPO"
+git -C "$REPO" worktree remove "$LINKED_WT" --force >/dev/null 2>&1
+echo "ok 17 - leases render from linked worktrees"
+
+# ------------------------------------------------------------------------
+# 18: help and skill docs match the supported V1 command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
@@ -550,9 +574,11 @@ expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX]"
+expect_contains "$help_out" "STACK_DEBUG=1"
 expect_not_contains "$help_out" "prune"
 skill_doc=$(cat "$ROOT/llm/skills/stack/SKILL.md")
 expect_contains "$skill_doc" "stack squash [--dry-run]"
 expect_contains "$skill_doc" "--keep-scratch"
+expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 17 - help and stack skill docs match supported commands"
+echo "ok 18 - help and stack skill docs match supported commands"

@@ -69,6 +69,11 @@ scratch clone is removed on success and failure. Use `--keep-scratch` to
 preserve it; the command prints the scratch path and a debug command to rerun
 the preflight.
 
+Set `STACK_DEBUG=1` when alpha-testing or investigating surprising behavior.
+Debug output goes to stderr and includes repo roots, branch counts, scratch
+paths, lease-match counts, planned ref updates on transaction failures, and
+push-gate decision breadcrumbs.
+
 `stack squash` acts on the currently checked-out branch. It determines that
 branch's stack parent, soft-resets the branch to that parent, commits one
 combined change using `-m`, the PR title, or the first commit subject, and then
