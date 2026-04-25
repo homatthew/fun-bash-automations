@@ -192,9 +192,9 @@ python diagram.py
 
 # Create Netflix gist
 GH_HOST=git.netflix.net gh gist create \
-  diagram.py \
-  architecture.png \
-  README.md \
+  01_diagram.py \
+  02_architecture.png \
+  03_README.md \
   --desc "Architecture diagram: [Memo Topic]" \
   --public
 ```
