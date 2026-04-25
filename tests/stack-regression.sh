@@ -281,9 +281,9 @@ echo "ok 4 - status --json shape is valid"
 # ------------------------------------------------------------------------
 # 5. status accepts explicit --base and --prefix
 # ------------------------------------------------------------------------
-explicit_out=$(run_stack status --base origin/main --prefix mho/ 2>&1)
+explicit_out=$(run_stack status --base origin/main --prefix mho/feature- 2>&1)
 expect_contains "$explicit_out" "Base: origin/main"
-expect_contains "$explicit_out" "Prefix: mho/"
+expect_contains "$explicit_out" "Prefix: mho/feature-"
 expect_contains "$explicit_out" "mho/feature-base"
 echo "ok 5 - status honors explicit --base and --prefix"
 
