@@ -359,7 +359,7 @@ echo "ok 9 - sync cascades squash-merged parent then invokes branchless once"
 
 # ------------------------------------------------------------------------
 # 10: stack push happy path — all branches with PRs + fresh leases get pushed,
-#    no-PR branch skipped silently.
+#    no-PR branch skipped with agent handoff.
 # ------------------------------------------------------------------------
 
 # After test 8's cascade, feature-base is a sibling of main; mho/feature-ui
@@ -379,6 +379,11 @@ push_out=$(run_stack push 2>&1)
 expect_contains "$push_out" "Done."
 # feature-ui has no PR (only #42 + #43 in STACK_TEST_PR_JSON) → skipped.
 expect_contains "$push_out" "mho/feature-ui: no PR"
+expect_contains "$push_out" "Agent handoff:"
+expect_contains "$push_out" "#42 mho/feature-base"
+expect_contains "$push_out" "update description: /update-pr-description 42"
+expect_contains "$push_out" "mho/feature-ui -> base mho/feature-api"
+expect_contains "$push_out" "create draft PR via /commit-push-pr after push-gate approval"
 push_calls=$(grep -c "^push " "$PG_LOG" || true)
 [[ "$push_calls" == "2" ]] \
   || fail "expected 2 pg push calls (base + api), got $push_calls: $(cat "$PG_LOG")"
@@ -402,11 +407,13 @@ git -C "$REPO" checkout main >/dev/null 2>&1
 # feature-api first → expect stop on feature-api.
 unset STACK_TEST_PG_CHECK_mho_feature_base STACK_TEST_PG_CHECK_mho_feature_api
 export STACK_TEST_PG_CHECK_DEFAULT='{"allowed":false}'
-stop_out=$(run_stack push 2>&1)
+stop_out=$(run_stack push --prefix mho/feature- 2>&1)
 
 expect_contains "$stop_out" "needs approval, preparing brief"
 expect_contains "$stop_out" "Run: pg -C"
-expect_contains "$stop_out" "Re-run: stack push"
+expect_contains "$stop_out" "Re-run: stack push --prefix mho/feature-"
+expect_contains "$stop_out" "Agent handoff:"
+expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature-"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "1" ]] \
   || fail "expected exactly 1 pg prepare call (stop on first), got $prep_calls: $(cat "$PG_LOG")"
