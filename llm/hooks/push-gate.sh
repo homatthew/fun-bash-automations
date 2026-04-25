@@ -709,7 +709,8 @@ $(git branch --show-current 2>/dev/null)"
   printf '%s\n' "$commits" \
     | grep -oE '\b[a-z][a-z0-9-]*-[a-z0-9]{2,}\b' \
     | grep -v -E '^(git|no|yes|pr)-' \
-    | awk '!seen[$0]++'
+    | awk '!seen[$0]++' \
+    || true
 }
 
 # Fetch bead metadata as a readable block. Empty if bd is unavailable

@@ -13,6 +13,7 @@ harnesses.
 - `../codex/config.toml` portable Codex config template
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
 - `../codex/hooks.json` portable Codex hooks template
+- `../bin/stack` local stacked-PR CLI wrapper backed by `hooks/stack.sh`
 - `command-guard-policy.md` shared command safety policy
 
 ## Canonical Editing Rules

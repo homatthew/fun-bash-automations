@@ -16,7 +16,7 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
 | `slack-push-event.sh` | (off by default) | Slack variant of notify-push-event; disabled pending explicit opt-in. |
 | `push-gate.sh` | (CLI impl) | Backs the `pg` / `push-gate` shell function. Not a hook. |
-| `stack.sh` | (CLI impl) | Backs `bin/stack` — local-first stacked-PR view (`status`) and cascade rebase (`sync`). Not a hook. |
+| `stack.sh` | (CLI impl) | Backs `bin/stack` — local-first stacked-PR view (`status`), scratch-preflighted restack (`sync`), current-branch cleanup (`squash`), and push-gate push orchestration (`push`). Not a hook. |
 
 Only one of `notify.sh` / `notify-slack.sh` is referenced from
 `settings.json` at a time — don't route both at once.

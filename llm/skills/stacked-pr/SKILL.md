@@ -102,6 +102,13 @@ In the base PR description, add:
 
 ## Maintaining the Stack
 
+> **Faster path for the common case:** `stack sync` (see the `stack` skill)
+> fetches the base remote, preflights PR-state adoption and
+> `git-branchless sync --pull` in a scratch clone, then atomically applies the
+> resulting local branch tips if the preflight succeeds. Use the manual
+> `git rebase` flow below only when `stack sync` reports a conflict you have
+> to resolve, or when `git-branchless` is unavailable.
+
 When you update a parent branch, rebase children to pick up changes:
 
 ```bash
@@ -120,6 +127,12 @@ pg push --assert-flow $'update pr #<child>\nbranch mho/feature-api\nrebase onto 
 Always use `--force-with-lease` (never `--force`) — it fails safely if the remote has diverged.
 
 ## After Parent Merges
+
+> **Faster path:** `stack sync` handles squash-merged parents through GitHub
+> PR-state adoption plus `git-branchless` patch-id detection in a scratch
+> clone — no manual `git rebase --onto` needed when preflight succeeds. You
+> still have to run `gh pr edit --base main` to re-target the child PR
+> (`stack sync` does not touch GitHub PR base).
 
 When a parent PR merges into main, re-target the child:
 
@@ -154,6 +167,9 @@ If the diff includes parent changes, the `--base` is wrong — fix with `gh pr e
 - Do all work locally first. Push only after the user approves a durable branch lease.
 - Always create PRs with `--base <parent-branch>`, not `--base main` (except the first)
 - Use `git rebase <parent>` to sync, never merge
+- Prefer `stack sync` for routine local restacks; use manual rebases only for conflict resolution or unsupported cases
+- Use `stack squash` to collapse noisy incremental commits before refreshing branch leases
+- Use `stack push` for existing stacked PRs with fresh push-gate leases
 - Use `--force-with-lease` to push rebased branches, but always create a replacement lease first
 - Include dependency annotations in PR descriptions
 - Verify `gh pr diff` shows only incremental changes

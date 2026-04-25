@@ -5,6 +5,8 @@ Table of contents:
 
 1. Rebase All branches:
    1. rebases all local branches to the most recent commit on origin/{master or main}
+2. Stack:
+   1. local stacked-PR workflow CLI via `bin/stack`
 
 Setup:
 1. VS Code
