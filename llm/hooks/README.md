@@ -29,7 +29,7 @@ Only one of `notify.sh` / `notify-slack.sh` is referenced from
 2. Scrape terminal focus context from the hook process tree into ancestor PIDs.
 3. Send the macOS notification through `alerter`, then route clicks to the forked VS Code extension.
 
-The main hook must not wait on `alerter --json`; that can keep the hook alive until timeout. Instead, `notify.sh` writes a small JSON job and starts `notify-dispatch.sh` through launchd. The detached helper waits for `alerter` activation, then opens the focus URI. Agent notifications are persistent alert-style notifications: `UserPromptSubmit` creates a quiet task-summary alert, `Stop` replaces it with a `Show` alert, and `Notification` replaces it with a `Respond` alert. All alert notifications use `--timeout 0`.
+The main hook must not wait on `alerter --json`; that can keep the hook alive until timeout. Instead, `notify.sh` writes a small JSON job and starts `notify-dispatch.sh` through launchd. The detached helper waits for `alerter` activation, then opens the focus URI. Agent notifications are persistent alert-style notifications: `UserPromptSubmit` creates a quiet task-summary alert, `Stop` replaces it with a `Show` alert, and `Notification` replaces it with a `Respond` alert. All alert notifications use `--timeout 0`. Running notifications also re-post themselves after `Show` is clicked if the task's `/tmp/fba-notify-state-*` marker still says that run is active; this makes the alert act like a persistent focus link while work is still running without resurrecting final notifications.
 
 ## Backend Strategy
 
