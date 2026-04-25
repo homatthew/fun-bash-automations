@@ -206,6 +206,28 @@ stop_message_is_unhelpful() {
   return 1
 }
 
+display_values_match() {
+  local left right
+  left=$(normalize_message "$1" 120 | tr '[:upper:]' '[:lower:]')
+  right=$(normalize_message "$2" 120 | tr '[:upper:]' '[:lower:]')
+  [ -n "$left" ] && [ "$left" = "$right" ]
+}
+
+dedupe_notification_message() {
+  local event="$1" subtitle="$2" message="$3" subtitle_tail
+  subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
+  if display_values_match "$message" "$subtitle" || display_values_match "$message" "$subtitle_tail"; then
+    case "$event" in
+      UserPromptSubmit) printf 'In progress' ;;
+      Stop)             printf 'Finished' ;;
+      Notification)     printf 'Input needed' ;;
+      *)                printf '%s' "$message" ;;
+    esac
+    return
+  fi
+  printf '%s' "$message"
+}
+
 dispatch_alerter() {
   local title="$1" subtitle="$2" message="$3" group="$4" sender="$5" open_url="$6" style="$7" cwd="$8"
   local action_label="${9:-Show}"
@@ -435,7 +457,7 @@ case "$EVENT" in
   UserPromptSubmit)
     TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
     write_notify_summary "$SUMMARY_FILE" "$TASK_SUMMARY"
-    MESSAGE="$TASK_SUMMARY"
+    MESSAGE="In progress"
     if [ -n "${BRANCH:-}" ]; then
       SUBTITLE="${BRANCH} · ${TASK_SUMMARY}"
     else
@@ -505,6 +527,7 @@ elif [ "$EVENT" = "UserPromptSubmit" ]; then
 else
   MESSAGE="$(normalize_message "$MESSAGE" 300)"
 fi
+MESSAGE="$(dedupe_notification_message "$EVENT" "$SUBTITLE" "$MESSAGE")"
 
 case "$EVENT" in
   UserPromptSubmit) write_notify_state "$STATE_FILE" "$RUN_ID" ;;
