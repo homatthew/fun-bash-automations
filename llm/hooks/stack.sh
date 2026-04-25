@@ -150,8 +150,8 @@ stack_prefix() {
 # Enumerate candidate feature branches (one per line: "name\tsha").
 stack_enumerate_branches() {
   local prefix="$1"
-  local refpath="refs/heads/${prefix}"
-  git for-each-ref --format='%(refname:short)	%(objectname)' "$refpath" 2>/dev/null
+  git for-each-ref --format='%(refname:short)	%(objectname)' refs/heads 2>/dev/null \
+    | awk -F'\t' -v prefix="$prefix" 'index($1, prefix) == 1'
 }
 
 # Build parent map. Input: prefix, base_ref. Output lines: "child\tparent\tahead\tbehind".
