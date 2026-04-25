@@ -19,6 +19,9 @@ approve each lease, then resumes on re-invocation.
 - User asks "what's the state of my stack?" — run `stack status`. Don't loop
   through `git log`, `gh pr list`, `pg leases` yourself; `stack status`
   already composes them into one table (and `--json` for scripting).
+- User asks about a specific PR stack — run `stack status --pr <N> --children`.
+  This uses GitHub PR `baseRefName` as the stack DAG and warns if local branch
+  ancestry disagrees.
 - After a parent PR lands or main moves — run `stack sync`. It creates a
   throwaway scratch clone, handles both patch-id-detectable squashes and
   multi-commit squashes (PR-state cascade via `gh` first, then
@@ -27,7 +30,8 @@ approve each lease, then resumes on re-invocation.
 - User says "fetch and rebase my stack" / "catch up on main" — `stack sync`.
 - User wants to clean up the current PR before pushing — run `stack squash`.
   It squashes the current branch's commits relative to its stack parent, then
-  restacks local descendants.
+  restacks selected descendants. When local ancestry is known wrong, prefer
+  `stack squash --pr <N> --onto-pr-base`.
 - User wants to push the whole stack — run `stack push`. Walks parents
   first, runs `pg push` where leases are fresh, runs `pg prepare` and
   stops where they are not. Re-run after the user approves to continue.
@@ -47,10 +51,10 @@ approve each lease, then resumes on re-invocation.
 ## Commands
 
 ```
-stack status [--json] [--base REF] [--prefix PREFIX]
+stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-stack squash [--dry-run] [-m "subject"] [--base REF] [--prefix PREFIX]
-stack push [--dry-run] [--base REF] [--prefix PREFIX]
+stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
+stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 ```
 
 Base ref auto-detected from `upstream/main` or `origin/main`. Branch
@@ -80,6 +84,15 @@ branch's stack parent, soft-resets the branch to that parent, commits one
 combined change using `-m`, the PR title, or the first commit subject, and then
 rebases local descendants onto the new parent tips. Any moved branch with an
 existing push-gate lease is reported as stale.
+
+Use `--branch BRANCH` or `--pr N` to target a branch without checking it out
+first. Use `--onto REF` for an explicit squash base, or `--onto-pr-base` to
+derive the base from the PR's GitHub `baseRefName`.
+
+With `--pr N --children`, `stack status` and `stack push` scope to the GitHub PR
+DAG rooted at PR `N`. This prevents unrelated same-prefix branches from being
+processed and emits topology mismatch warnings when local ancestry disagrees
+with GitHub PR bases.
 
 `stack push` walks the stack parents-first. For each branch:
 - No PR → still goes through `pg check`; if the lease is fresh, pushes the
