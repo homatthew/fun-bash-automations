@@ -234,7 +234,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..18"
+echo "1..20"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -578,19 +578,92 @@ git -C "$REPO" worktree remove "$LINKED_WT" --force >/dev/null 2>&1
 echo "ok 17 - leases render from linked worktrees"
 
 # ------------------------------------------------------------------------
-# 18: help and skill docs match the supported V1 command surface.
+# 18: --pr --children scopes to the GitHub PR DAG and warns when local
+#     ancestry disagrees.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/redundant-parent >/dev/null 2>&1
+  printf 'redundant\n' >redundant.txt
+  git add redundant.txt
+  git commit -m "redundant parent" >/dev/null
+
+  git checkout -b mho/pr266 >/dev/null 2>&1
+  printf 'pr266\n' >pr266.txt
+  git add pr266.txt
+  git commit -m "pr 266 change" >/dev/null
+
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/pr267 >/dev/null 2>&1
+  printf 'pr267\n' >pr267.txt
+  git add pr267.txt
+  git commit -m "pr 267 child change" >/dev/null
+
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/unrelated >/dev/null 2>&1
+  printf 'unrelated\n' >unrelated.txt
+  git add unrelated.txt
+  git commit -m "unrelated change" >/dev/null
+)
+export STACK_TEST_PR_JSON
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":266,"headRefName":"mho/pr266","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/266","title":"pr 266"},
+  {"number":267,"headRefName":"mho/pr267","baseRefName":"mho/pr266","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/267","title":"pr 267"},
+  {"number":271,"headRefName":"mho/unrelated","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/271","title":"unrelated"}
+]')
+
+scoped_status=$(run_stack status --pr 266 --children 2>&1)
+expect_contains "$scoped_status" "Topology mismatch: PR #266 base is main, but local nearest parent is mho/redundant-parent"
+expect_contains "$scoped_status" "Topology mismatch: PR #267 base is mho/pr266"
+expect_contains "$scoped_status" "mho/pr266"
+expect_contains "$scoped_status" "mho/pr267"
+expect_not_contains "$scoped_status" "mho/unrelated"
+
+scoped_push=$(run_stack push --dry-run --pr 266 --children 2>&1)
+expect_contains "$scoped_push" "[1/2] mho/pr266"
+expect_contains "$scoped_push" "[2/2] mho/pr267"
+expect_contains "$scoped_push" "Re-run this stack: stack push --pr 266 --children"
+expect_not_contains "$scoped_push" "mho/unrelated"
+echo "ok 18 - PR-scoped DAG filters unrelated branches and warns on local mismatches"
+
+# ------------------------------------------------------------------------
+# 19: squash can use an explicit PR base instead of the detected local parent.
+# ------------------------------------------------------------------------
+
+git -C "$REPO" checkout mho/pr266 >/dev/null 2>&1
+scoped_squash=$(run_stack squash --dry-run --pr 266 --onto-pr-base -m "Fix Cassandra memory sizing and resource counts" 2>&1)
+expect_contains "$scoped_squash" "Squashing 2 commits on mho/pr266 relative to origin/main"
+expect_not_contains "$scoped_squash" "relative to mho/redundant-parent"
+REPO="$OLD_REPO"
+echo "ok 19 - squash --pr --onto-pr-base ignores redundant local parent"
+
+# Restore default fake PR data for the final help/doc test.
+export STACK_TEST_PR_JSON
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":42,"headRefName":"mho/feature-base","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}],"url":"https://x/42","title":"base"},
+  {"number":43,"headRefName":"mho/feature-api","baseRefName":"mho/feature-base","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}],"url":"https://x/43","title":"api"}
+]')
+
+# ------------------------------------------------------------------------
+# 20: help and skill docs match the supported V1 command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
-expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX]"
+expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
-expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--base REF] [--prefix PREFIX]"
-expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX]"
+expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
+expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "STACK_DEBUG=1"
 expect_not_contains "$help_out" "prune"
 skill_doc=$(cat "$ROOT/llm/skills/stack/SKILL.md")
 expect_contains "$skill_doc" "stack squash [--dry-run]"
+expect_contains "$skill_doc" "--onto-pr-base"
 expect_contains "$skill_doc" "--keep-scratch"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 18 - help and stack skill docs match supported commands"
+echo "ok 20 - help and stack skill docs match supported commands"

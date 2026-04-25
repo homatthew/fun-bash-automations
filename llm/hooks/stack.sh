@@ -2,10 +2,10 @@
 # stack: local-first stacked-PR tooling.
 #
 # Subcommands:
-#   status [--json] [--base REF] [--prefix PREFIX]
+#   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-#   squash [--dry-run] [-m SUBJECT] [--base REF] [--prefix PREFIX]
-#   push   [--dry-run] [--base REF] [--prefix PREFIX]
+#   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
+#   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #
 # Data sources merged into one view:
 #   1. git topology        (for-each-ref + merge-base)
@@ -309,17 +309,19 @@ stack_lease_summary() {
 stack_order_tree() {
   local base="$1"
   awk -F'\t' -v base="$base" '
-    { parent[$1]=$2; ahead[$1]=$3; behind[$1]=$4; names[NR]=$1 }
+    { parent[$1]=$2; ahead[$1]=$3; behind[$1]=$4; names[NR]=$1; exists[$1]=1 }
     END {
       # Build children map.
       for (i=1; i<=NR; i++) {
         n=names[i]; p=parent[n]
         kids[p]=kids[p] " " n
       }
-      # DFS starting from each root (parent == base).
+      # DFS starting from each root. In scoped PR views, a branch parent
+      # may be outside the selected subset; treat that branch as a display root
+      # while preserving the real parent column.
       for (i=1; i<=NR; i++) {
         n=names[i]
-        if (parent[n] == base) walk(n, 0)
+        if (parent[n] == base || !(parent[n] in exists)) walk(n, 0)
       }
     }
     function walk(n, d,   split_out, j, k) {
@@ -454,11 +456,134 @@ stack_pr_base_from_parent() {
   esac
 }
 
+stack_short_base_name() {
+  local base="$1"
+  printf '%s\n' "${base#*/}"
+}
+
+stack_local_ref_exists() {
+  local ref="$1"
+  git show-ref --verify --quiet "refs/heads/$ref"
+}
+
+stack_resolve_pr_parent() {
+  local pr_base="$1" base="$2"
+  local short_base
+  short_base=$(stack_short_base_name "$base")
+  if [[ "$pr_base" == "$short_base" || "$pr_base" == "$base" ]]; then
+    printf '%s\n' "$base"
+  elif stack_local_ref_exists "$pr_base"; then
+    printf '%s\n' "$pr_base"
+  else
+    printf '%s\n' "$base"
+  fi
+}
+
+stack_resolve_pr_base_ref() {
+  local pr_base="$1" base="$2"
+  local short_base remote
+  short_base=$(stack_short_base_name "$base")
+  if [[ "$pr_base" == "$short_base" || "$pr_base" == "$base" ]]; then
+    printf '%s\n' "$base"
+    return 0
+  fi
+  if git show-ref --verify --quiet "refs/heads/$pr_base"; then
+    printf '%s\n' "$pr_base"
+    return 0
+  fi
+  for remote in upstream origin; do
+    if git show-ref --verify --quiet "refs/remotes/$remote/$pr_base"; then
+      printf '%s/%s\n' "$remote" "$pr_base"
+      return 0
+    fi
+  done
+  printf '%s\n' "$pr_base"
+}
+
+stack_pr_branch_by_number() {
+  local prs="$1" pr_number="$2"
+  jq -r --argjson n "$pr_number" '
+    to_entries[] | select((.value.number // null) == $n) | .key
+  ' <<<"$prs" | head -1
+}
+
+stack_pr_json_by_branch() {
+  local prs="$1" branch="$2"
+  jq -c --arg k "$branch" '.[$k] // null' <<<"$prs"
+}
+
+stack_resolve_parent_map_from_prs() {
+  local local_parent_map="$1" prs="$2" base="$3"
+  local branch local_parent ahead behind pr pr_base parent
+  while IFS=$'\t' read -r branch local_parent ahead behind; do
+    [[ -z "$branch" ]] && continue
+    pr=$(stack_pr_json_by_branch "$prs" "$branch")
+    if [[ "$pr" != "null" ]]; then
+      pr_base=$(jq -r '.baseRefName // ""' <<<"$pr")
+      parent=$(stack_resolve_pr_parent "$pr_base" "$base")
+    else
+      parent="$local_parent"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$branch" "$parent" "$ahead" "$behind"
+  done <<<"$local_parent_map"
+}
+
+stack_filter_parent_map_for_pr() {
+  local parent_map="$1" prs="$2" pr_number="$3" include_children="$4"
+  local root
+  root=$(stack_pr_branch_by_number "$prs" "$pr_number")
+  [[ -n "$root" ]] || stack_fail "open PR not found in stack data: #$pr_number"
+
+  if [[ "$include_children" != "true" ]]; then
+    awk -F'\t' -v root="$root" '$1 == root' <<<"$parent_map"
+    return 0
+  fi
+
+  awk -F'\t' -v root="$root" '
+    { line[$1]=$0; parent[$1]=$2; names[NR]=$1 }
+    END {
+      if (root in line) print line[root]
+      changed=1
+      while (changed) {
+        changed=0
+        for (i=1; i<=NR; i++) {
+          n=names[i]
+          if (printed[n]) continue
+          p=parent[n]
+          if (p == root || printed[p]) {
+            print line[n]
+            printed[n]=1
+            changed=1
+          }
+        }
+      }
+    }
+  ' <<<"$parent_map"
+}
+
+stack_warn_topology_mismatches() {
+  local scoped_map="$1" local_parent_map="$2" prs="$3" base="$4"
+  local branch parent ahead behind pr pr_num pr_base pr_parent local_parent
+  while IFS=$'\t' read -r branch parent ahead behind; do
+    [[ -z "$branch" ]] && continue
+    pr=$(stack_pr_json_by_branch "$prs" "$branch")
+    [[ "$pr" == "null" ]] && continue
+    pr_num=$(jq -r '.number // ""' <<<"$pr")
+    pr_base=$(jq -r '.baseRefName // ""' <<<"$pr")
+    pr_parent=$(stack_resolve_pr_parent "$pr_base" "$base")
+    local_parent=$(awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' <<<"$local_parent_map")
+    [[ -z "$local_parent" || "$local_parent" == "$pr_parent" ]] && continue
+    stack_warn "Topology mismatch: PR #$pr_num base is $pr_base, but local nearest parent is $local_parent. Using PR base $pr_parent."
+  done <<<"$scoped_map"
+}
+
 stack_push_rerun_command() {
-  local base_override="$1" prefix_override="$2"
+  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="${4:-false}"
   local cmd="stack push"
   cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
   cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
+  cmd=$(stack_append_flag "$cmd" "--pr" "$pr_filter")
+  [[ "$include_children" == "true" ]] && cmd="$cmd --children"
   printf '%s\n' "$cmd"
 }
 
@@ -548,12 +673,14 @@ stack_push_print_agent_handoff() {
 
 stack_cmd_status() {
   local format="table"
-  local base_override="" prefix_override=""
+  local base_override="" prefix_override="" pr_filter="" include_children="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json)   format="json"; shift ;;
       --base)   base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
+      --children) include_children="true"; shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown status flag: $1" ;;
     esac
@@ -561,12 +688,17 @@ stack_cmd_status() {
   stack_require jq
   stack_repo_root >/dev/null
 
-  local base prefix parent_map prs leases
+  local base prefix local_parent_map parent_map prs leases
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
-  parent_map=$(stack_build_parent_map "$prefix" "$base")
-  stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map")"
+  local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") pr=${pr_filter:-none} children=$include_children"
   prs=$(stack_fetch_prs)
+  parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+  if [[ -n "$pr_filter" ]]; then
+    parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$pr_filter" "$include_children")
+  fi
+  stack_warn_topology_mismatches "$parent_map" "$local_parent_map" "$prs" "$base"
   leases=$(stack_fetch_leases)
 
   if [[ "$format" == "json" ]]; then
@@ -961,12 +1093,16 @@ stack_cmd_adopt_merged_inner() {
 # stack squash — collapse the current branch's incremental commits into one
 # commit relative to its stack parent, then restack local descendants.
 stack_cmd_squash() {
-  local dry_run="false" subject=""
+  local dry_run="false" subject="" branch_override="" onto_override="" onto_pr_base="false" pr_filter=""
   local base_override="" prefix_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) dry_run="true"; shift ;;
       -m) subject="${2:-}"; [[ -n "$subject" ]] || stack_fail "-m requires a subject"; shift 2 ;;
+      --branch) branch_override="${2:-}"; [[ -n "$branch_override" ]] || stack_fail "--branch requires a branch"; shift 2 ;;
+      --onto)   onto_override="${2:-}"; [[ -n "$onto_override" ]] || stack_fail "--onto requires a ref"; shift 2 ;;
+      --onto-pr-base) onto_pr_base="true"; shift ;;
+      --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
       --base)   base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
       -h|--help) stack_usage; return 0 ;;
@@ -982,17 +1118,39 @@ stack_cmd_squash() {
 
   local current
   current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-  [[ -n "$current" && "$current" != "HEAD" ]] || stack_fail "stack squash requires a checked-out branch"
+  if [[ -n "$pr_filter" ]]; then
+    local prs_for_branch
+    prs_for_branch=$(stack_fetch_prs)
+    branch_override=$(stack_pr_branch_by_number "$prs_for_branch" "$pr_filter")
+    [[ -n "$branch_override" ]] || stack_fail "open PR not found in stack data: #$pr_filter"
+  fi
+  if [[ -n "$branch_override" ]]; then
+    current="$branch_override"
+  fi
+  [[ -n "$current" && "$current" != "HEAD" ]] || stack_fail "stack squash requires a checked-out branch or --branch/--pr"
 
-  local base prefix parent_map ordered current_line parent commit_count
+  local base prefix local_parent_map parent_map ordered current_line parent commit_count prs
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
-  parent_map=$(stack_build_parent_map "$prefix" "$base")
-  stack_debug "squash base=$base prefix=$prefix current=$current branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run"
+  local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+  prs=$(stack_fetch_prs)
+  parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+  stack_debug "squash base=$base prefix=$prefix current=$current branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run pr=${pr_filter:-none}"
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
   current_line=$(awk -F'\t' -v b="$current" '$2 == b { print; exit }' <<<"$ordered")
   [[ -n "$current_line" ]] || stack_fail "$current is not under stack prefix $prefix"
   parent=$(awk -F'\t' '{print $3}' <<<"$current_line")
+  if [[ "$onto_pr_base" == "true" ]]; then
+    local pr pr_base
+    pr=$(stack_pr_json_by_branch "$prs" "$current")
+    [[ "$pr" != "null" ]] || stack_fail "--onto-pr-base requires $current to have an open PR"
+    pr_base=$(jq -r '.baseRefName // ""' <<<"$pr")
+    parent=$(stack_resolve_pr_base_ref "$pr_base" "$base")
+  fi
+  if [[ -n "$onto_override" ]]; then
+    parent="$onto_override"
+  fi
+  git rev-parse --verify "$parent" >/dev/null 2>&1 || stack_fail "squash base not found: $parent"
 
   commit_count=$(git rev-list --count "$parent..$current" 2>/dev/null || echo 0)
   if (( commit_count == 0 )); then
@@ -1005,8 +1163,7 @@ stack_cmd_squash() {
   fi
 
   if [[ -z "$subject" ]]; then
-    local prs pr
-    prs=$(stack_fetch_prs)
+    local pr
     pr=$(jq -c --arg k "$current" '.[$k] // null' <<<"$prs")
     if [[ "$pr" != "null" ]]; then
       subject=$(jq -r '.title // ""' <<<"$pr")
@@ -1087,12 +1244,14 @@ stack_cmd_squash() {
 # Never bypasses push-gate. Hard-fails on a dirty working tree.
 stack_cmd_push() {
   local dry_run="false"
-  local base_override="" prefix_override=""
+  local base_override="" prefix_override="" pr_filter="" include_children="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) dry_run="true"; shift ;;
       --base)   base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
+      --children) include_children="true"; shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown push flag: $1" ;;
     esac
@@ -1110,13 +1269,18 @@ stack_cmd_push() {
   dirty=$(git status --porcelain 2>/dev/null)
   [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
 
-  local base prefix parent_map prs rerun_cmd
+  local base prefix local_parent_map parent_map prs rerun_cmd
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
-  rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override")
-  parent_map=$(stack_build_parent_map "$prefix" "$base")
-  stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run"
+  rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$include_children")
+  local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+  stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") dry_run=$dry_run pr=${pr_filter:-none} children=$include_children"
   prs=$(stack_fetch_prs)
+  parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+  if [[ -n "$pr_filter" ]]; then
+    parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$pr_filter" "$include_children")
+  fi
+  stack_warn_topology_mismatches "$parent_map" "$local_parent_map" "$prs" "$base"
 
   local ordered
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
@@ -1272,19 +1436,23 @@ stack_usage() {
 Usage: stack <command> [options]
 
 Commands:
-  status [--json] [--base REF] [--prefix PREFIX]
+  status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
     Show one-table view merging git topology, gh PR state, and pg leases.
+    With --pr N, scope the view to that PR; --children follows GitHub PR
+    baseRefName children instead of broad local branch prefix.
 
   sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
     Fetch the base remote, preflight cascade-rebase in a throwaway scratch
     clone, then atomically apply branch ref updates if preflight succeeds.
     Combines a PR-state pass with git-branchless patch-id detection.
 
-  squash [--dry-run] [-m SUBJECT] [--base REF] [--prefix PREFIX]
+  squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]
+         [--pr N] [--base REF] [--prefix PREFIX]
     Squash the current branch's incremental commits relative to its stack
-    parent into one commit, then restack local descendants.
+    parent into one commit, then restack selected descendants. Use --onto or
+    --onto-pr-base when local ancestry disagrees with PR topology.
 
-  push [--dry-run] [--base REF] [--prefix PREFIX]
+  push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
     Walk stack parents-first. Existing PR branches update through
     `pg push --force-with-lease`. Branches without PRs are still pushed
     through push-gate when their lease is fresh, using --set-upstream, then
