@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-HELPER="$ROOT/claude/hooks/push-gate.sh"
-GUARD="$ROOT/claude/hooks/bash-safety-guard.sh"
+HELPER="$ROOT/llm/hooks/push-gate.sh"
+GUARD="$ROOT/llm/hooks/bash-safety-guard.sh"
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/push-gate-test.XXXXXX")
 trap 'rm -rf "$TEST_TMP"' EXIT
@@ -230,26 +230,31 @@ EXISTING_FAKE_BIN="$FAKE_BIN"
   git commit -m "feature start" >/dev/null
 )
 export PG_TEST_PR_JSON='[{"number":123,"url":"https://example.test/pr/123"}]'
-draft_output=$(run_helper "$REPO" draft-approve \
-  --intent $'allow durable lease\nsame branch\nsame pr' \
-  --assert-flow $'update pr #123\nbranch mho/existing-pr\nchange guard + docs\nno rewrite')
+run_helper "$REPO" prepare \
+  --what "feature start" \
+  --why "exercise durable push-gate lease approval" \
+  --approach "use prepared semantic brief before approval" >/dev/null
+draft_output=$(run_helper "$REPO" draft-approve)
 draft_script=$(extract_path "$draft_output" "^Approval script:")
 draft_file=$(extract_path "$draft_output" "^Draft file:")
 expect_file "$draft_script"
 expect_file "$draft_file"
-preview_output=$(printf 'n\n' | bash "$draft_script" 2>&1 || true)
+preview_output=$(printf 'n\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$preview_output" "Push lease approval"
 expect_contains "$preview_output" "PR: #123"
-expect_contains "$preview_output" "update pr #123"
+expect_contains "$preview_output" "feature start"
 echo "ok 2 - draft script renders readable approval summary"
 
-printf 'y\n' | bash "$draft_script" >/dev/null
 common_dir=$(current_common_dir "$REPO")
 lease_path="$common_dir/push-gate/leases/refs/heads/mho/existing-pr.json"
+approval_block=$(printf 'y\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
+expect_contains "$approval_block" "pg approve requires an interactive terminal"
+mkdir -p "$(dirname "$lease_path")"
+jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$draft_file" >"$lease_path"
 expect_file "$lease_path"
 lease_pr=$(jq -r '.pr_number' "$lease_path")
 [[ "$lease_pr" == "123" ]] || fail "expected PR number 123 in lease, got $lease_pr"
-echo "ok 3 - approve stamps durable lease in git-common-dir"
+echo "ok 3 - noninteractive approval is blocked; lease fixture installed"
 
 raw_output=$(run_guard "$REPO" "git push -u origin mho/existing-pr")
 expect_contains "$raw_output" "pg push"
@@ -300,11 +305,19 @@ FAKE_BIN="$BOOTSTRAP_BIN"
   git commit -m "bootstrap start" >/dev/null
 )
 export PG_TEST_PR_JSON='[]'
-bootstrap_output=$(run_helper "$BOOTSTRAP_REPO" draft-approve \
-  --intent $'allow bootstrap\nsame branch' \
-  --assert-flow $'new pr flow\nbranch mho/bootstrap\nno rewrite')
+run_helper "$BOOTSTRAP_REPO" prepare \
+  --what "bootstrap start" \
+  --why "exercise new branch push-gate lease flow" \
+  --approach "use prepared semantic brief before approval" >/dev/null
+bootstrap_output=$(run_helper "$BOOTSTRAP_REPO" draft-approve)
 bootstrap_script=$(extract_path "$bootstrap_output" "^Approval script:")
-printf 'y\n' | bash "$bootstrap_script" >/dev/null
+bootstrap_draft=$(extract_path "$bootstrap_output" "^Draft file:")
+bootstrap_common_dir=$(current_common_dir "$BOOTSTRAP_REPO")
+bootstrap_lease="$bootstrap_common_dir/push-gate/leases/refs/heads/mho/bootstrap.json"
+bootstrap_block=$(printf 'y\n' | EDITOR=true bash "$bootstrap_script" 2>&1 || true)
+expect_contains "$bootstrap_block" "pg approve requires an interactive terminal"
+mkdir -p "$(dirname "$bootstrap_lease")"
+jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$bootstrap_draft" >"$bootstrap_lease"
 write_pending "$BOOTSTRAP_REPO" "origin" "refs/heads/mho/bootstrap" "$(current_head "$BOOTSTRAP_REPO")" ""
 bootstrap_allow=$(run_guard "$BOOTSTRAP_REPO" "git push -u origin mho/bootstrap")
 [[ -z "$bootstrap_allow" ]] || fail "expected bootstrap push to be allowed, got: $bootstrap_allow"
@@ -334,7 +347,10 @@ upstream_draft=$(run_helper "$REPO" draft-approve \
   --intent $'allow upstream branch push\nsame branch\nsame pr' \
   --assert-flow $'update pr #123\nbranch mho/existing-pr\nremote upstream\nno rewrite')
 upstream_script=$(extract_path "$upstream_draft" "^Approval script:")
-printf 'y\n' | bash "$upstream_script" >/dev/null
+upstream_draft_file=$(extract_path "$upstream_draft" "^Draft file:")
+upstream_block=$(printf 'y\n' | EDITOR=true bash "$upstream_script" 2>&1 || true)
+expect_contains "$upstream_block" "Approval blocked"
+jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$upstream_draft_file" >"$lease_path"
 write_pending "$REPO" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 upstream_feature=$(run_guard "$REPO" "git push upstream mho/existing-pr")
 [[ -z "$upstream_feature" ]] || fail "expected upstream feature push to be allowed, got: $upstream_feature"
@@ -450,11 +466,15 @@ topo_bind_output=$(run_helper "$TOPO_BIND_REPO" draft-approve \
   --intent $'allow topology bind\nsame branch' \
   --assert-flow $'new pr flow\nbranch mho/topology-bind\nno rewrite')
 topo_bind_script=$(extract_path "$topo_bind_output" "^Approval script:")
-printf 'y\n' | bash "$topo_bind_script" >/dev/null
-export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/topology-bind":[{"number":77,"url":"https://example.test/pr/77"}]}'
-run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
+topo_bind_draft=$(extract_path "$topo_bind_output" "^Draft file:")
 topo_bind_common=$(current_common_dir "$TOPO_BIND_REPO")
 topo_bind_lease="$topo_bind_common/push-gate/leases/refs/heads/mho/topology-bind.json"
+topo_bind_block=$(printf 'y\n' | EDITOR=true bash "$topo_bind_script" 2>&1 || true)
+expect_contains "$topo_bind_block" "Approval blocked"
+mkdir -p "$(dirname "$topo_bind_lease")"
+jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$topo_bind_draft" >"$topo_bind_lease"
+export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/topology-bind":[{"number":77,"url":"https://example.test/pr/77"}]}'
+run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
 [[ "$(jq -r '.pr_number' "$topo_bind_lease")" == "77" ]] || fail "expected bind-pr to use upstream pr_repo and bind PR #77"
 [[ "$(jq -r '.pr_repo' "$topo_bind_lease")" == "example.test/Netflix-Skunkworks/topology-bind" ]] || fail "expected bound lease to retain upstream pr_repo"
 echo "ok 19 - bind-pr uses topology-selected upstream PR repo"

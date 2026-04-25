@@ -7,6 +7,14 @@ description: "Analyze branch topology, map commits to PRs, and selectively push 
 
 > **When to use:** After finishing implementation, when you want to review the state of the world before pushing. Analyzes commit DAG, maps branches to PRs, and guides sequential branch pushes with durable `push-gate` leases plus fresh `pg push` assertions.
 
+> **Quick state snapshot:** Before walking through the manual DAG/PR/lease
+> queries below, run `stack status` (see the `stack` skill). It composes
+> `git for-each-ref` topology, `gh pr list`, and `pg leases --json` into one
+> table — covering most of Step 1 and Step 2 mechanically. Fall back to the
+> manual queries below for cases `stack` doesn't cover, such as orphaned
+> pushed branches, review-request state, or stale PRs beyond the local stack
+> topology. For non-`mho/` branch names, pass `--prefix`.
+
 Remote topology defaults:
 - PR lookup/binding prefers the `upstream` repo when an `upstream` remote exists.
 - Push remote stays on the branch's tracked remote when present.

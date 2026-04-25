@@ -132,6 +132,13 @@ Choose the right finishing skill:
 - Multiple branches or unclear remote state: `/push-review`
 - True stacked diff chain: `/stacked-pr`
 
+For stacks specifically, run `stack status` (see the `stack` skill) before
+choosing a finishing skill — it's the fastest way to see git/PR/lease state
+in one table. Run `stack sync` first if any descendant is behind its parent
+or main has advanced, `stack squash` if the current branch has noisy
+incremental commits, and `stack push` for existing stacked PRs once the
+leases are fresh.
+
 Default to draft PRs unless the user says otherwise.
 
 ## Output contract
