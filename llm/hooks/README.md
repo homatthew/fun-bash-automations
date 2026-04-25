@@ -53,7 +53,7 @@ pick_backend()
 
 ## Event Semantics
 
-`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as repo title, branch-plus-task subtitle, and a distinct state message such as `In progress` so the summary is not duplicated. A detached `notify-working-summary.sh` process may ask Codex for a 3-8 word running-task summary and replace the same grouped alert. That update is guarded by a `/tmp/fba-notify-state-*` marker so a late summary cannot overwrite a final `Stop` / `Notification` alert. The summary is also persisted in `/tmp/fba-notify-summary-*`, so `Stop` can reuse it when the runtime sends no useful final assistant text.
+`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as repo title, a concise subtitle such as the branch, and a message like `⏳ <task summary>`. `Stop` messages use a `✅` prefix so active and finished notifications are visually distinct. A detached `notify-working-summary.sh` process asks Codex for a 3-8 word running-task summary and replaces the same grouped alert. That update is guarded by a `/tmp/fba-notify-state-*` marker so a late summary cannot overwrite a final `Stop` / `Notification` alert. The summary is also persisted in `/tmp/fba-notify-summary-*`, so `Stop` can reuse it when the runtime sends no useful final assistant text.
 
 `Stop` and `Notification` are audible final states. They use the same group so they replace any active `Working` alert rather than stacking another notification.
 
