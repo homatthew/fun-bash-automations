@@ -390,7 +390,7 @@ cwt() {
     fi
 
     cd "$path" || return $?
-    codex "${@:2}"
+    command codex --dangerously-bypass-approvals-and-sandbox "${@:2}"
 }
 
 # pgr - run pg against another repo without cd.
