@@ -238,6 +238,35 @@ stack_fetch_prs() {
   jq 'map({(.headRefName): .}) | add // {}' <<<"$raw"
 }
 
+stack_fetch_prs_for_scope() {
+  local pr_filter="${1:-}"
+  command -v gh >/dev/null 2>&1 || { echo '{}'; return 0; }
+  if [[ -z "$pr_filter" ]]; then
+    stack_fetch_prs
+    return 0
+  fi
+
+  local raw prs has_pr view_json
+  raw=$(gh pr list --state open --limit 200 \
+          --json number,title,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup,url \
+          2>/dev/null || echo '[]')
+  [[ -z "$raw" ]] && raw='[]'
+  prs=$(jq 'map({(.headRefName): .}) | add // {}' <<<"$raw")
+  has_pr=$(jq -r --argjson n "$pr_filter" 'any(.[]; (.number // null) == $n)' <<<"$prs")
+  if [[ "$has_pr" == "true" ]]; then
+    printf '%s\n' "$prs"
+    return 0
+  fi
+
+  view_json=$(gh pr view "$pr_filter" \
+    --json number,title,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup,url \
+    2>/dev/null || echo '')
+  if [[ -n "$view_json" ]]; then
+    prs=$(jq --argjson pr "$view_json" '. + {($pr.headRefName): $pr}' <<<"$prs")
+  fi
+  printf '%s\n' "$prs"
+}
+
 # Fetch push-gate leases for this repo or its main worktree; index by branch_name.
 # Silent-fail: if push-gate.sh missing or errors, emit {}.
 stack_fetch_leases() {
@@ -530,7 +559,7 @@ stack_resolve_parent_map_from_prs() {
 
 stack_filter_parent_map_for_pr() {
   local parent_map="$1" prs="$2" pr_number="$3" include_children="$4"
-  local root
+  local root pr_branches
   root=$(stack_pr_branch_by_number "$prs" "$pr_number")
   [[ -n "$root" ]] || stack_fail "open PR not found in stack data: #$pr_number"
 
@@ -539,16 +568,22 @@ stack_filter_parent_map_for_pr() {
     return 0
   fi
 
-  awk -F'\t' -v root="$root" '
+  pr_branches=$(jq -r 'keys | join(" ")' <<<"$prs")
+  awk -F'\t' -v root="$root" -v pr_branches="$pr_branches" '
+    BEGIN {
+      split(pr_branches, pr_branch_lines, " ")
+      for (i in pr_branch_lines) if (pr_branch_lines[i] != "") has_pr[pr_branch_lines[i]]=1
+    }
     { line[$1]=$0; parent[$1]=$2; names[NR]=$1 }
     END {
-      if (root in line) print line[root]
+      if (root in line) { print line[root]; printed[root]=1 }
       changed=1
       while (changed) {
         changed=0
         for (i=1; i<=NR; i++) {
           n=names[i]
           if (printed[n]) continue
+          if ((n in has_pr) == 0) continue
           p=parent[n]
           if (p == root || printed[p]) {
             print line[n]
@@ -693,7 +728,7 @@ stack_cmd_status() {
   prefix=$(stack_prefix "$prefix_override")
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
   stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") pr=${pr_filter:-none} children=$include_children"
-  prs=$(stack_fetch_prs)
+  prs=$(stack_fetch_prs_for_scope "$pr_filter")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
   if [[ -n "$pr_filter" ]]; then
     parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$pr_filter" "$include_children")
@@ -1120,7 +1155,7 @@ stack_cmd_squash() {
   current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
   if [[ -n "$pr_filter" ]]; then
     local prs_for_branch
-    prs_for_branch=$(stack_fetch_prs)
+    prs_for_branch=$(stack_fetch_prs_for_scope "$pr_filter")
     branch_override=$(stack_pr_branch_by_number "$prs_for_branch" "$pr_filter")
     [[ -n "$branch_override" ]] || stack_fail "open PR not found in stack data: #$pr_filter"
   fi
@@ -1133,7 +1168,7 @@ stack_cmd_squash() {
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
-  prs=$(stack_fetch_prs)
+  prs=$(stack_fetch_prs_for_scope "$pr_filter")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
   stack_debug "squash base=$base prefix=$prefix current=$current branches=$(stack_count_nonempty_lines <<<"$parent_map") dry_run=$dry_run pr=${pr_filter:-none}"
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
@@ -1275,7 +1310,7 @@ stack_cmd_push() {
   rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$include_children")
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
   stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") dry_run=$dry_run pr=${pr_filter:-none} children=$include_children"
-  prs=$(stack_fetch_prs)
+  prs=$(stack_fetch_prs_for_scope "$pr_filter")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
   if [[ -n "$pr_filter" ]]; then
     parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$pr_filter" "$include_children")
@@ -1392,7 +1427,11 @@ stack_cmd_push() {
     else
       why="create stacked PR based on $create_pr_base"
     fi
-    base_for_log="${remote_ref:-$parent}"
+    if [[ -n "$pr_num" ]]; then
+      base_for_log="$parent"
+    else
+      base_for_log="${remote_ref:-$parent}"
+    fi
     approach=$(git log "${base_for_log}..${name}" --format='%s' 2>/dev/null \
                 | head -5 | paste -sd ';' -)
     [[ -z "$approach" ]] && approach="straightforward"

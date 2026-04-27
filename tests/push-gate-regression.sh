@@ -214,7 +214,7 @@ extract_path() {
   echo "$output" | awk -v prefix="$prefix" '$0 ~ prefix {print $NF}'
 }
 
-echo "1..19"
+echo "1..20"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -449,6 +449,37 @@ topo_track_draft=$(extract_path "$topo_track_output" "^Draft file:")
 [[ "$(jq -r '.remote' "$topo_track_draft")" == "origin" ]] || fail "expected tracked branch to keep origin remote"
 echo "ok 18 - tracked branch keeps existing remote instead of auto-flipping to upstream"
 
+IFS='|' read -r PR_BASE_REPO PR_BASE_BIN PR_BASE_ORIGIN <<<"$(make_repo pr-base-scope)"
+FAKE_BIN="$PR_BASE_BIN"
+(
+  cd "$PR_BASE_REPO"
+  git checkout -b mho/pr-base >/dev/null
+  printf 'old pr\n' >pr-base.txt
+  git add pr-base.txt
+  git commit -m "old pr work" >/dev/null
+  git push -u origin mho/pr-base >/dev/null
+
+  git checkout main >/dev/null
+  printf 'landed\n' >landed.txt
+  git add landed.txt
+  git commit -m "landed main work" >/dev/null
+  git push origin main >/dev/null
+
+  git checkout mho/pr-base >/dev/null
+  git rebase origin/main >/dev/null
+  printf 'new pr\n' >>pr-base.txt
+  git add pr-base.txt
+  git commit -m "new pr work" >/dev/null
+)
+export PG_TEST_PR_JSON='[{"number":181,"url":"https://example.test/pr/181","baseRefName":"main"}]'
+pr_base_output=$(run_helper "$PR_BASE_REPO" draft-approve \
+  --intent $'update pr #181\nsame branch\nno unrelated changes' \
+  --assert-flow $'update pr #181\nbranch mho/pr-base\nno rewrite')
+pr_base_draft=$(extract_path "$pr_base_output" "^Draft file:")
+[[ "$(jq -r '.approved_scope.base_ref' "$pr_base_draft")" == "refs/remotes/origin/main" ]] \
+  || fail "expected PR approval scope to use PR base origin/main, got $(jq -r '.approved_scope.base_ref' "$pr_base_draft")"
+echo "ok 19 - existing PR approval scope uses GitHub PR base instead of tracking branch"
+
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"
 (
@@ -477,4 +508,4 @@ export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/
 run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
 [[ "$(jq -r '.pr_number' "$topo_bind_lease")" == "77" ]] || fail "expected bind-pr to use upstream pr_repo and bind PR #77"
 [[ "$(jq -r '.pr_repo' "$topo_bind_lease")" == "example.test/Netflix-Skunkworks/topology-bind" ]] || fail "expected bound lease to retain upstream pr_repo"
-echo "ok 19 - bind-pr uses topology-selected upstream PR repo"
+echo "ok 20 - bind-pr uses topology-selected upstream PR repo"

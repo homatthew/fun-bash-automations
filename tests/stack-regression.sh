@@ -598,6 +598,11 @@ REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
   git add pr266.txt
   git commit -m "pr 266 change" >/dev/null
 
+  git checkout -b mho/no-pr-child >/dev/null 2>&1
+  printf 'no pr child\n' >no-pr-child.txt
+  git add no-pr-child.txt
+  git commit -m "no-pr child change" >/dev/null
+
   git checkout main >/dev/null 2>&1
   git checkout -b mho/pr267 >/dev/null 2>&1
   printf 'pr267\n' >pr267.txt
@@ -622,12 +627,14 @@ expect_contains "$scoped_status" "Topology mismatch: PR #266 base is main, but l
 expect_contains "$scoped_status" "Topology mismatch: PR #267 base is mho/pr266"
 expect_contains "$scoped_status" "mho/pr266"
 expect_contains "$scoped_status" "mho/pr267"
+expect_not_contains "$scoped_status" "mho/no-pr-child"
 expect_not_contains "$scoped_status" "mho/unrelated"
 
 scoped_push=$(run_stack push --dry-run --pr 266 --children 2>&1)
 expect_contains "$scoped_push" "[1/2] mho/pr266"
 expect_contains "$scoped_push" "[2/2] mho/pr267"
 expect_contains "$scoped_push" "Re-run this stack: stack push --pr 266 --children"
+expect_not_contains "$scoped_push" "mho/no-pr-child"
 expect_not_contains "$scoped_push" "mho/unrelated"
 echo "ok 18 - PR-scoped DAG filters unrelated branches and warns on local mismatches"
 
