@@ -386,7 +386,12 @@ pg_upstream_ref() {
 }
 
 pg_default_base_ref_snapshot() {
-  local upstream remote
+  local pr_base upstream remote
+  pr_base=$(pg_pr_base_ref_snapshot)
+  if [[ -n "$pr_base" ]]; then
+    echo "$pr_base"
+    return 0
+  fi
   upstream=$(pg_upstream_ref)
   if [[ -n "$upstream" ]]; then
     echo "$upstream"
@@ -404,14 +409,60 @@ pg_default_base_ref_snapshot() {
   echo ""
 }
 
+pg_resolve_pr_base_ref() {
+  local base_name="$1" remote="${2:-}"
+  [[ -n "$base_name" ]] || return 1
+  local candidates=()
+  if [[ -n "$remote" ]]; then
+    candidates+=("refs/remotes/$remote/$base_name" "$remote/$base_name")
+  fi
+  candidates+=(
+    "$base_name"
+    "refs/heads/$base_name"
+    "refs/remotes/upstream/$base_name"
+    "refs/remotes/origin/$base_name"
+  )
+
+  local ref
+  for ref in "${candidates[@]}"; do
+    if git rev-parse --verify "$ref" >/dev/null 2>&1; then
+      echo "$ref"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pg_pr_base_ref_snapshot() {
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  local branch pr_repo raw base_name remote resolved
+  branch=$(pg_branch_name 2>/dev/null || true)
+  [[ -n "$branch" ]] || return 1
+  pr_repo=$(pg_default_pr_repo 2>/dev/null || true)
+  if [[ -n "$pr_repo" ]]; then
+    raw=$(gh pr list --repo "$pr_repo" --head "$branch" --state open --json number,url,baseRefName 2>/dev/null || true)
+  else
+    raw=$(gh pr list --head "$branch" --state open --json number,url,baseRefName 2>/dev/null || true)
+  fi
+  [[ -n "$raw" ]] || return 1
+  base_name=$(jq -r '.[0].baseRefName // empty' <<<"$raw" 2>/dev/null || true)
+  [[ -n "$base_name" ]] || return 1
+  remote=$(pg_default_remote "$branch" 2>/dev/null || true)
+  resolved=$(pg_resolve_pr_base_ref "$base_name" "$remote" 2>/dev/null || true)
+  [[ -n "$resolved" ]] || return 1
+  echo "$resolved"
+}
+
 pg_find_pr_json() {
   local branch="$1"
   local pr_repo="${2:-}"
   local raw
   if [[ -n "$pr_repo" ]]; then
-    raw=$(gh pr list --repo "$pr_repo" --head "$branch" --state open --json number,url 2>/dev/null || true)
+    raw=$(gh pr list --repo "$pr_repo" --head "$branch" --state open --json number,url,baseRefName 2>/dev/null || true)
   else
-    raw=$(gh pr list --head "$branch" --state open --json number,url 2>/dev/null || true)
+    raw=$(gh pr list --head "$branch" --state open --json number,url,baseRefName 2>/dev/null || true)
   fi
   if [[ -z "$raw" ]]; then
     echo "{}"
