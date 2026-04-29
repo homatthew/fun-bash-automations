@@ -234,7 +234,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..20"
+echo "1..24"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -245,6 +245,7 @@ expect_contains "$out" "mho/feature-api"
 expect_contains "$out" "mho/feature-ui"
 expect_contains "$out" "#42"
 expect_contains "$out" "#43"
+expect_contains "$out" "Next step:"
 echo "ok 1 - status renders 3-branch stack with PR numbers"
 
 # ------------------------------------------------------------------------
@@ -270,6 +271,7 @@ echo "ok 3 - CI rollup summarized to PASS / PENDING"
 # 4. status --json is valid and has 3 branches in one stack
 # ------------------------------------------------------------------------
 json_out=$(run_stack status --json 2>&1)
+expect_not_contains "$json_out" "Next step:"
 n_stacks=$(echo "$json_out" | jq '.stacks | length')
 [[ "$n_stacks" == "1" ]] || fail "expected 1 stack, got $n_stacks"
 n_branches=$(echo "$json_out" | jq '.stacks[0].branches | length')
@@ -291,16 +293,19 @@ echo "ok 5 - status honors explicit --base and --prefix"
 # 6. sync --dry-run does NOT invoke git-branchless
 # ------------------------------------------------------------------------
 : >"$BRANCHLESS_LOG"
-run_stack sync --dry-run >/dev/null 2>&1
+sync_dry_out=$(run_stack sync --dry-run 2>&1)
 [[ ! -s "$BRANCHLESS_LOG" ]] || fail "dry-run should NOT call git-branchless, got: $(cat "$BRANCHLESS_LOG")"
+expect_contains "$sync_dry_out" "Next step:"
+expect_contains "$sync_dry_out" "Run the preflight and apply refs: stack sync"
 echo "ok 6 - sync --dry-run skips git-branchless"
 
 # ------------------------------------------------------------------------
 # 7. sync invokes git-branchless sync --pull
 # ------------------------------------------------------------------------
 : >"$BRANCHLESS_LOG"
-run_stack sync >/dev/null 2>&1
+sync_normal_out=$(run_stack sync 2>&1)
 grep -q "sync --pull" "$BRANCHLESS_LOG" || fail "expected git-branchless sync --pull, got: $(cat "$BRANCHLESS_LOG")"
+expect_contains "$sync_normal_out" "Next step:"
 echo "ok 7 - sync invokes git-branchless sync --pull"
 
 # ------------------------------------------------------------------------
@@ -382,6 +387,8 @@ expect_contains "$push_out" "Done."
 # fresh lease lets stack push publish the branch for later PR creation.
 expect_contains "$push_out" "mho/feature-ui: pushing branch for new stacked PR"
 expect_contains "$push_out" "Agent handoff:"
+expect_contains "$push_out" "Next step:"
+expect_contains "$push_out" "Phase: needs PR description update"
 expect_contains "$push_out" "#42 mho/feature-base"
 expect_contains "$push_out" "update description: /update-pr-description 42"
 expect_contains "$push_out" "mho/feature-ui -> base mho/feature-api"
@@ -415,9 +422,11 @@ export STACK_TEST_PG_CHECK_DEFAULT='{"allowed":false}'
 stop_out=$(run_stack push --prefix mho/feature- 2>&1)
 
 expect_contains "$stop_out" "needs approval, preparing brief"
-expect_contains "$stop_out" "Run: pg -C"
-expect_contains "$stop_out" "Re-run: stack push --prefix mho/feature-"
+expect_contains "$stop_out" "Next step:"
+expect_contains "$stop_out" "Human approval: pg -C"
+expect_contains "$stop_out" "Agent re-run: stack push --prefix mho/feature-"
 expect_contains "$stop_out" "Agent handoff:"
+expect_contains "$stop_out" "Phase: needs approval"
 expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature-"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "1" ]] \
@@ -532,14 +541,21 @@ echo "ok 15 - --keep-scratch preserves clone and prints debug command"
 # ------------------------------------------------------------------------
 
 OLD_REPO="$REPO"
+OLD_LEASES_JSON="$STACK_TEST_LEASES_JSON"
 REPO=$(make_stacked_repo)
 REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
 api_before=$(git -C "$REPO" rev-parse mho/feature-api)
 ui_before=$(git -C "$REPO" rev-parse mho/feature-ui)
+STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$api_before" '[
+  {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":$anchor,"pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
+]')
 git -C "$REPO" checkout mho/feature-base >/dev/null 2>&1
 
 squash_out=$(run_stack squash -m "squashed base" 2>&1)
 expect_contains "$squash_out" "Squashing 2 commits"
+expect_contains "$squash_out" "Next step:"
+expect_contains "$squash_out" "Stale push-gate leases: mho/feature-api"
+expect_contains "$squash_out" "approve/push with: stack push"
 base_count=$(git -C "$REPO" rev-list --count origin/main..mho/feature-base)
 [[ "$base_count" == "1" ]] || fail "expected feature-base to have one incremental commit, got $base_count"
 subject=$(git -C "$REPO" log -1 --format='%s' mho/feature-base)
@@ -550,6 +566,7 @@ git -C "$REPO" merge-base --is-ancestor mho/feature-base mho/feature-api \
   || fail "feature-api is not descendant of squashed feature-base"
 git -C "$REPO" merge-base --is-ancestor mho/feature-api mho/feature-ui \
   || fail "feature-ui is not descendant of restacked feature-api"
+STACK_TEST_LEASES_JSON="$OLD_LEASES_JSON"
 REPO="$OLD_REPO"
 echo "ok 16 - squash creates one commit and restacks descendants"
 
@@ -624,15 +641,25 @@ STACK_TEST_PR_JSON=$(jq -c -n '[
 
 scoped_status=$(run_stack status --pr 266 --children 2>&1)
 expect_contains "$scoped_status" "Topology mismatch: PR #266 base is main, but local nearest parent is mho/redundant-parent"
+expect_contains "$scoped_status" "GitHub PR base wins; local ancestry is stale/diagnostic"
 expect_contains "$scoped_status" "Topology mismatch: PR #267 base is mho/pr266"
 expect_contains "$scoped_status" "mho/pr266"
 expect_contains "$scoped_status" "mho/pr267"
+expect_contains "$scoped_status" "Next step:"
+expect_contains "$scoped_status" "stack checkout --pr 266"
+expect_contains "$scoped_status" "stack squash --pr 266 --onto-pr-base"
+expect_contains "$scoped_status" "stack push --pr 266 --children"
+expect_not_contains "$scoped_status" "stack push --dry-run"
 expect_not_contains "$scoped_status" "mho/no-pr-child"
 expect_not_contains "$scoped_status" "mho/unrelated"
 
 scoped_push=$(run_stack push --dry-run --pr 266 --children 2>&1)
+expect_contains "$scoped_push" "Push order:"
 expect_contains "$scoped_push" "[1/2] mho/pr266"
 expect_contains "$scoped_push" "[2/2] mho/pr267"
+expect_contains "$scoped_push" "Next step:"
+expect_contains "$scoped_push" "First live push action: stack push --pr 266 --children will prepare mho/pr266"
+expect_contains "$scoped_push" "Downstream approvals wait: mho/pr267"
 expect_contains "$scoped_push" "Re-run this stack: stack push --pr 266 --children"
 expect_not_contains "$scoped_push" "mho/no-pr-child"
 expect_not_contains "$scoped_push" "mho/unrelated"
@@ -645,9 +672,94 @@ echo "ok 18 - PR-scoped DAG filters unrelated branches and warns on local mismat
 git -C "$REPO" checkout mho/pr266 >/dev/null 2>&1
 scoped_squash=$(run_stack squash --dry-run --pr 266 --onto-pr-base -m "Fix Cassandra memory sizing and resource counts" 2>&1)
 expect_contains "$scoped_squash" "Squashing 2 commits on mho/pr266 relative to origin/main"
+expect_contains "$scoped_squash" "Next step:"
 expect_not_contains "$scoped_squash" "relative to mho/redundant-parent"
 REPO="$OLD_REPO"
 echo "ok 19 - squash --pr --onto-pr-base ignores redundant local parent"
+
+# ------------------------------------------------------------------------
+# 20: checkout --pr resolves an open PR to its local branch and prints the
+#     middle-stack edit workflow.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/pr266 >/dev/null 2>&1
+  printf 'pr266\n' >pr266.txt
+  git add pr266.txt
+  git commit -m "pr 266 change" >/dev/null
+
+  git checkout -b mho/pr267 >/dev/null 2>&1
+  printf 'pr267\n' >pr267.txt
+  git add pr267.txt
+  git commit -m "pr 267 child change" >/dev/null
+
+  git checkout main >/dev/null 2>&1
+)
+export STACK_TEST_PR_JSON
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":266,"headRefName":"mho/pr266","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/266","title":"pr 266"},
+  {"number":267,"headRefName":"mho/pr267","baseRefName":"mho/pr266","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/267","title":"pr 267"}
+]')
+
+checkout_out=$(run_stack checkout --pr 266 2>&1)
+current_branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD)
+[[ "$current_branch" == "mho/pr266" ]] || fail "expected checkout to move to mho/pr266, got $current_branch"
+expect_contains "$checkout_out" "Checked out PR #266: mho/pr266"
+expect_contains "$checkout_out" "=== Stack context ==="
+expect_contains "$checkout_out" "mho/pr267"
+expect_contains "$checkout_out" "Next step:"
+expect_contains "$checkout_out" "Commit changes: git add <files> && git commit -m \"<subject>\""
+expect_contains "$checkout_out" "stack squash --pr 266 --onto-pr-base"
+expect_contains "$checkout_out" "stack push --dry-run --pr 266 --children"
+expect_contains "$checkout_out" "stack push --pr 266 --children"
+echo "ok 20 - checkout --pr switches to PR branch and prints edit workflow"
+
+# ------------------------------------------------------------------------
+# 21: checkout --pr refuses dirty worktrees.
+# ------------------------------------------------------------------------
+
+printf 'dirty\n' >"$REPO/dirty.tmp"
+set +e
+dirty_checkout_out=$(run_stack checkout --pr 266 2>&1)
+dirty_checkout_rc=$?
+set -e
+[[ "$dirty_checkout_rc" != "0" ]] || fail "expected dirty checkout refusal"
+expect_contains "$dirty_checkout_out" "working tree dirty"
+rm -f "$REPO/dirty.tmp"
+echo "ok 21 - checkout --pr refuses dirty worktrees"
+
+# ------------------------------------------------------------------------
+# 22: checkout --pr fails clearly when the PR is missing.
+# ------------------------------------------------------------------------
+
+set +e
+missing_pr_out=$(run_stack checkout --pr 999 2>&1)
+missing_pr_rc=$?
+set -e
+[[ "$missing_pr_rc" != "0" ]] || fail "expected missing PR failure"
+expect_contains "$missing_pr_out" "open PR not found in stack data: #999"
+echo "ok 22 - checkout --pr reports missing PRs"
+
+# ------------------------------------------------------------------------
+# 23: checkout --pr fails clearly when the PR branch is not local.
+# ------------------------------------------------------------------------
+
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":299,"headRefName":"mho/missing-local","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/299","title":"missing local"}
+]')
+set +e
+missing_branch_out=$(run_stack checkout --pr 299 2>&1)
+missing_branch_rc=$?
+set -e
+[[ "$missing_branch_rc" != "0" ]] || fail "expected missing local branch failure"
+expect_contains "$missing_branch_out" "PR #299 branch not found locally: mho/missing-local"
+REPO="$OLD_REPO"
+echo "ok 23 - checkout --pr reports missing local branches"
 
 # Restore default fake PR data for the final help/doc test.
 export STACK_TEST_PR_JSON
@@ -657,20 +769,28 @@ STACK_TEST_PR_JSON=$(jq -c -n '[
 ]')
 
 # ------------------------------------------------------------------------
-# 20: help and skill docs match the supported V1 command surface.
+# 24: help and skill docs match the supported command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
 expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
+expect_contains "$help_out" "checkout --pr N [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "STACK_DEBUG=1"
+expect_contains "$help_out" "Every human-readable command prints Next step:"
 expect_not_contains "$help_out" "prune"
 skill_doc=$(cat "$ROOT/llm/skills/stack/SKILL.md")
 expect_contains "$skill_doc" "stack squash [--dry-run]"
 expect_contains "$skill_doc" "--onto-pr-base"
 expect_contains "$skill_doc" "--keep-scratch"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
+expect_contains "$skill_doc" "Next step:"
+expect_contains "$skill_doc" "stack checkout --pr <N>"
+stack_doc=$(cat "$ROOT/llm/stack/README.md")
+expect_contains "$stack_doc" "GitHub PR base wins"
+expect_contains "$stack_doc" "Next step:"
+expect_contains "$stack_doc" "stack checkout --pr <N>"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 20 - help and stack skill docs match supported commands"
+echo "ok 24 - help and stack skill docs match supported commands"

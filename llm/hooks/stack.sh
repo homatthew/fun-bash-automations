@@ -3,6 +3,7 @@
 #
 # Subcommands:
 #   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+#   checkout --pr N [--base REF] [--prefix PREFIX]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 #   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
@@ -83,6 +84,33 @@ stack_append_flag() {
   local cmd="$1" flag="$2" value="$3"
   [[ -z "$value" ]] && { printf '%s\n' "$cmd"; return 0; }
   printf '%s %s %s\n' "$cmd" "$flag" "$(stack_shell_quote "$value")"
+}
+
+stack_print_next_step() {
+  echo
+  echo "Next step:"
+  local line
+  for line in "$@"; do
+    printf '  %s\n' "$line"
+  done
+}
+
+stack_status_rerun_command() {
+  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="${4:-false}"
+  local cmd="stack status"
+  cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
+  cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
+  cmd=$(stack_append_flag "$cmd" "--pr" "$pr_filter")
+  [[ "$include_children" == "true" ]] && cmd="$cmd --children"
+  printf '%s\n' "$cmd"
+}
+
+stack_sync_rerun_command() {
+  local base_override="$1" prefix_override="$2"
+  local cmd="stack sync"
+  cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
+  cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
+  printf '%s\n' "$cmd"
 }
 
 stack_ref_name() {
@@ -596,7 +624,7 @@ stack_filter_parent_map_for_pr() {
   ' <<<"$parent_map"
 }
 
-stack_warn_topology_mismatches() {
+stack_topology_mismatch_lines() {
   local scoped_map="$1" local_parent_map="$2" prs="$3" base="$4"
   local branch parent ahead behind pr pr_num pr_base pr_parent local_parent
   while IFS=$'\t' read -r branch parent ahead behind; do
@@ -608,8 +636,18 @@ stack_warn_topology_mismatches() {
     pr_parent=$(stack_resolve_pr_parent "$pr_base" "$base")
     local_parent=$(awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' <<<"$local_parent_map")
     [[ -z "$local_parent" || "$local_parent" == "$pr_parent" ]] && continue
-    stack_warn "Topology mismatch: PR #$pr_num base is $pr_base, but local nearest parent is $local_parent. Using PR base $pr_parent."
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pr_num" "$branch" "$pr_base" "$pr_parent" "$local_parent"
   done <<<"$scoped_map"
+}
+
+stack_warn_topology_mismatches() {
+  local scoped_map="$1" local_parent_map="$2" prs="$3" base="$4"
+  local mismatches pr_num branch pr_base pr_parent local_parent
+  mismatches=$(stack_topology_mismatch_lines "$scoped_map" "$local_parent_map" "$prs" "$base")
+  while IFS=$'\t' read -r pr_num branch pr_base pr_parent local_parent; do
+    [[ -z "$branch" ]] && continue
+    stack_warn "Topology mismatch: PR #$pr_num base is $pr_base, but local nearest parent is $local_parent. GitHub PR base wins; local ancestry is stale/diagnostic. Using PR base $pr_parent."
+  done <<<"$mismatches"
 }
 
 stack_push_rerun_command() {
@@ -650,7 +688,7 @@ stack_push_assert_flow() {
 }
 
 stack_push_print_agent_handoff() {
-  local ordered="$1" prs="$2" rerun_cmd="$3"
+  local ordered="$1" prs="$2" rerun_cmd="$3" phase="${4:-ready to push}"
   local depth name parent ahead behind
   local pr pr_num pr_base pr_title pr_url create_base subject
   local existing='[]' missing='[]'
@@ -685,21 +723,72 @@ stack_push_print_agent_handoff() {
   local existing_count missing_count
   existing_count=$(jq 'length' <<<"$existing")
   missing_count=$(jq 'length' <<<"$missing")
-  (( existing_count > 0 || missing_count > 0 )) || return 0
 
   echo
   echo "Agent handoff:"
+  echo "  Phase: $phase"
   echo "  Re-run this stack: $rerun_cmd"
 
   if (( existing_count > 0 )); then
     echo "  Existing PRs to update/describe:"
-    jq -r '.[] | "  - #\(.number) \(.branch) (base \(.base)): \(.title)\n    update description: /update-pr-description \(.number)"' <<<"$existing"
+    jq -r '.[] | "  - #\(.number) \(.branch) (description base \(.base)): \(.title)\n    update description: /update-pr-description \(.number)"' <<<"$existing"
   fi
 
   if (( missing_count > 0 )); then
     echo "  Branches without PRs:"
     jq -r '.[] | "  - \(.branch) -> base \(.base)\n    create draft PR via /commit-push-pr after push-gate approval\n    suggested title: \(.subject)"' <<<"$missing"
   fi
+}
+
+stack_print_status_next_step() {
+  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="$4"
+  local parent_map="$5" local_parent_map="$6" prs="$7" base="$8" prefix="$9"
+  local ordered mismatches push_cmd status_cmd sync_cmd
+  ordered=$(echo "$parent_map" | stack_order_tree "$base")
+  if [[ -z "$ordered" ]]; then
+    stack_print_next_step "No stacked branches found under $prefix. Nothing to push."
+    return 0
+  fi
+
+  mismatches=$(stack_topology_mismatch_lines "$parent_map" "$local_parent_map" "$prs" "$base")
+  if [[ -n "$pr_filter" ]]; then
+    push_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "true")
+    status_cmd=$(stack_status_rerun_command "$base_override" "$prefix_override" "$pr_filter" "true")
+    if [[ "$include_children" != "true" ]]; then
+      stack_print_next_step \
+        "Use the PR-scoped stack view: $status_cmd" \
+        "Then push only that PR stack: $push_cmd"
+      return 0
+    fi
+    if [[ -n "$mismatches" ]]; then
+      stack_print_next_step \
+        "GitHub PR base wins; local ancestry is stale/diagnostic." \
+        "For middle-stack edits, first check out the PR branch: stack checkout --pr $pr_filter" \
+        "If this PR needs cleanup, run: stack squash --pr $pr_filter --onto-pr-base" \
+        "Otherwise push only this PR stack: $push_cmd"
+      return 0
+    fi
+    stack_print_next_step \
+      "For middle-stack edits, first check out the PR branch: stack checkout --pr $pr_filter" \
+      "Push only this PR stack: $push_cmd"
+    return 0
+  fi
+
+  sync_cmd=$(stack_sync_rerun_command "$base_override" "$prefix_override")
+  push_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "" "false")
+  if awk -F'\t' 'NF && ($4 + 0) > 0 { found=1 } END { exit(found ? 0 : 1) }' <<<"$parent_map"; then
+    stack_print_next_step \
+      "Base has commits not in at least one branch; preflight a restack: $sync_cmd" \
+      "After sync and tests pass, run: $push_cmd"
+    return 0
+  fi
+  if [[ -n "$mismatches" ]]; then
+    stack_print_next_step \
+      "GitHub PR bases are authoritative. Use PR-scoped commands for affected PRs before broad push." \
+      "Example: stack status --pr <N> --children"
+    return 0
+  fi
+  stack_print_next_step "Run a dry-run push to see approvals and order: $push_cmd --dry-run"
 }
 
 # ------------------------------------------------------------------------
@@ -740,7 +829,59 @@ stack_cmd_status() {
     stack_render_json "$base" "$prefix" "$parent_map" "$prs" "$leases"
   else
     stack_render_table "$base" "$prefix" "$parent_map" "$prs" "$leases"
+    stack_print_status_next_step \
+      "$base_override" "$prefix_override" "$pr_filter" "$include_children" \
+      "$parent_map" "$local_parent_map" "$prs" "$base" "$prefix"
   fi
+}
+
+stack_cmd_checkout() {
+  local pr_filter="" base_override="" prefix_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
+      --base)   base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown checkout flag: $1" ;;
+    esac
+  done
+  [[ -n "$pr_filter" ]] || stack_fail "stack checkout requires --pr N"
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local dirty
+  dirty=$(git status --porcelain 2>/dev/null)
+  [[ -z "$dirty" ]] || stack_fail "working tree dirty. Commit or stash before stack checkout."
+
+  local base prefix local_parent_map parent_map prs branch
+  base=$(stack_upstream_ref "$base_override")
+  prefix=$(stack_prefix "$prefix_override")
+  prs=$(stack_fetch_prs_for_scope "$pr_filter")
+  branch=$(stack_pr_branch_by_number "$prs" "$pr_filter")
+  [[ -n "$branch" ]] || stack_fail "open PR not found in stack data: #$pr_filter"
+  stack_local_ref_exists "$branch" \
+    || stack_fail "PR #$pr_filter branch not found locally: $branch. Fetch or create the local branch first."
+
+  git checkout "$branch" >/dev/null 2>&1 \
+    || stack_fail "checkout failed: $branch"
+
+  local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+  parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+  parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$pr_filter" "true")
+  stack_warn_topology_mismatches "$parent_map" "$local_parent_map" "$prs" "$base"
+
+  echo "Checked out PR #$pr_filter: $branch"
+  echo
+  echo "=== Stack context ==="
+  stack_render_table "$base" "$prefix" "$parent_map" "$prs" "$(stack_fetch_leases)"
+  stack_print_next_step \
+    "Edit files on $branch." \
+    "Commit changes: git add <files> && git commit -m \"<subject>\"" \
+    "Squash this PR against its GitHub base: stack squash --pr $pr_filter --onto-pr-base" \
+    "Run affected tests." \
+    "Dry-run push: stack push --dry-run --pr $pr_filter --children" \
+    "Live push: stack push --pr $pr_filter --children"
 }
 
 stack_cmd_sync() {
@@ -789,6 +930,9 @@ stack_cmd_sync() {
     echo "(dry-run) Would create a scratch clone and preflight stack sync"
     echo "(dry-run) Would run PR-state adoption in scratch"
     echo "(dry-run) Would invoke: git-branchless sync --pull"
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Run the preflight and apply refs: $(stack_sync_rerun_command "$base_override" "$prefix_override")"
     return 0
   fi
 
@@ -845,20 +989,23 @@ stack_cmd_sync() {
 
   # Flag branches whose tip moved — their leases will need re-approval.
   echo
-  local moved=0
+  local moved=0 moved_branches="" stale_branches=""
   while IFS=$'\t' read -r b old_sha new_sha; do
     [[ -z "$b" ]] && continue
     if [[ -z "$new_sha" && -n "$old_sha" ]]; then
       echo "  branch removed: $b (was $old_sha)"
       moved=$((moved + 1))
+      moved_branches="${moved_branches}${moved_branches:+, }$b"
       continue
     fi
     if [[ -n "$old_sha" && -n "$new_sha" && "$old_sha" != "$new_sha" ]]; then
       moved=$((moved + 1))
+      moved_branches="${moved_branches}${moved_branches:+, }$b"
       local lease
       lease=$(jq -c --arg k "$b" '.[$k] // null' <<<"$leases")
       if [[ "$lease" != "null" ]]; then
         stack_warn "lease stale: $b tip moved ($old_sha -> $new_sha). Re-run \`pg\` to refresh."
+        stale_branches="${stale_branches}${stale_branches:+, }$b"
       else
         echo "  tip moved: $b ($old_sha -> $new_sha)"
       fi
@@ -866,6 +1013,22 @@ stack_cmd_sync() {
   done <<<"$moved_tips"
   if (( moved == 0 )); then
     echo "No branches moved."
+    stack_print_next_step \
+      "Refs unchanged." \
+      "Confirm current state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
+      "Then dry-run push if needed: $(stack_push_rerun_command "$base_override" "$prefix_override" "" "false") --dry-run"
+  else
+    local lease_line
+    if [[ -n "$stale_branches" ]]; then
+      lease_line="Stale push-gate leases: $stale_branches"
+    else
+      lease_line="No existing push-gate leases became stale."
+    fi
+    stack_print_next_step \
+      "Refs changed: $moved_branches" \
+      "$lease_line" \
+      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
+      "When ready, dry-run push: $(stack_push_rerun_command "$base_override" "$prefix_override" "" "false") --dry-run"
   fi
 
   if [[ "$keep_scratch" == "true" ]]; then
@@ -1164,9 +1327,11 @@ stack_cmd_squash() {
   fi
   [[ -n "$current" && "$current" != "HEAD" ]] || stack_fail "stack squash requires a checked-out branch or --branch/--pr"
 
-  local base prefix local_parent_map parent_map ordered current_line parent commit_count prs
+  local base prefix local_parent_map parent_map ordered current_line parent commit_count prs push_children
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
+  push_children="false"
+  [[ -n "$pr_filter" ]] && push_children="true"
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
   prs=$(stack_fetch_prs_for_scope "$pr_filter")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
@@ -1190,10 +1355,16 @@ stack_cmd_squash() {
   commit_count=$(git rev-list --count "$parent..$current" 2>/dev/null || echo 0)
   if (( commit_count == 0 )); then
     echo "$current has no incremental commits relative to $parent."
+    stack_print_next_step \
+      "No squash needed." \
+      "Inspect state: $(stack_status_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$push_children")"
     return 0
   fi
   if (( commit_count == 1 )); then
     echo "$current already has one incremental commit relative to $parent."
+    stack_print_next_step \
+      "No squash needed." \
+      "Push when ready: $(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$push_children")"
     return 0
   fi
 
@@ -1222,6 +1393,9 @@ stack_cmd_squash() {
       echo "(dry-run) Would restack descendants:"
       awk -F'\t' '{print "  " $2 " onto " $3}' <<<"$descendants"
     fi
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Run the same squash command without --dry-run, then push: $(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$push_children")"
     return 0
   fi
 
@@ -1245,7 +1419,7 @@ stack_cmd_squash() {
 
   git checkout "$current" >/dev/null 2>&1 || true
 
-  local leases moved=0
+  local leases moved=0 moved_branches="" stale_branches=""
   leases=$(stack_fetch_leases)
   local b old_sha new_sha lease
   while IFS=$'\t' read -r b old_sha; do
@@ -1253,9 +1427,11 @@ stack_cmd_squash() {
     new_sha=$(git rev-parse --verify "$b" 2>/dev/null || echo "")
     [[ "$old_sha" == "$new_sha" ]] && continue
     moved=$((moved + 1))
+    moved_branches="${moved_branches}${moved_branches:+, }$b"
     lease=$(jq -c --arg k "$b" '.[$k] // null' <<<"$leases")
     if [[ "$lease" != "null" ]]; then
       stack_warn "lease stale: $b tip moved ($old_sha -> $new_sha). Re-run \`pg\` to refresh."
+      stale_branches="${stale_branches}${stale_branches:+, }$b"
     else
       echo "  tip moved: $b ($old_sha -> $new_sha)"
     fi
@@ -1263,6 +1439,22 @@ stack_cmd_squash() {
 
   [[ "$old_current_tip" != "$(git rev-parse --verify "$current")" ]] || stack_fail "squash did not move $current"
   (( moved > 0 )) || echo "No branches moved."
+  if (( moved > 0 )); then
+    local lease_line
+    if [[ -n "$stale_branches" ]]; then
+      lease_line="Stale push-gate leases: $stale_branches"
+    else
+      lease_line="No existing push-gate leases became stale."
+    fi
+    stack_print_next_step \
+      "Restacked branches: $moved_branches" \
+      "$lease_line" \
+      "Run affected tests, then approve/push with: $(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$push_children")"
+  else
+    stack_print_next_step \
+      "Squash completed." \
+      "Run affected tests, then approve/push with: $(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$push_children")"
+  fi
 }
 
 # stack push — orchestrate per-branch pg flow across the stack.
@@ -1321,6 +1513,7 @@ stack_cmd_push() {
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
   if [[ -z "$ordered" ]]; then
     echo "No stacked branches under $prefix."
+    stack_print_next_step "No push needed for this scope."
     return 0
   fi
 
@@ -1329,6 +1522,24 @@ stack_cmd_push() {
     [[ -z "$n" ]] && continue
     total=$((total + 1))
   done <<<"$ordered"
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo "Push order:"
+    local order_idx=0 order_pr order_pr_num order_base
+    while IFS=$'\t' read -r d n p a b; do
+      [[ -z "$n" ]] && continue
+      order_idx=$((order_idx + 1))
+      order_pr=$(jq -c --arg k "$n" '.[$k] // null' <<<"$prs")
+      if [[ "$order_pr" == "null" ]]; then
+        order_base=$(stack_pr_base_from_parent "$p")
+        printf '  %d. %s (new PR base %s)\n' "$order_idx" "$n" "$order_base"
+      else
+        order_pr_num=$(jq -r '.number' <<<"$order_pr")
+        printf '  %d. %s (#%s)\n' "$order_idx" "$n" "$order_pr_num"
+      fi
+    done <<<"$ordered"
+    echo
+  fi
 
   local saved_branch repo_root
   saved_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
@@ -1341,11 +1552,14 @@ stack_cmd_push() {
     fi
   }
 
-  local idx=0 pushed=0 skipped=0
+  local idx=0 pushed=0 skipped=0 first_approval_name="" first_approval_idx=0 delayed_after_first=""
   local depth name parent ahead behind
   while IFS=$'\t' read -r depth name parent ahead behind; do
     [[ -z "$name" ]] && continue
     idx=$((idx + 1))
+    if [[ "$dry_run" == "true" && -n "$first_approval_name" ]]; then
+      delayed_after_first="${delayed_after_first}${delayed_after_first:+, }$name"
+    fi
 
     local pr pr_num create_pr_base
     pr=$(jq -c --arg k "$name" '.[$k] // null' <<<"$prs")
@@ -1442,6 +1656,10 @@ stack_cmd_push() {
       if [[ -z "$pr_num" ]]; then
         echo "    then push branch and create draft PR with base '$create_pr_base'"
       fi
+      if [[ -z "$first_approval_name" ]]; then
+        first_approval_name="$name"
+        first_approval_idx="$idx"
+      fi
       continue
     fi
 
@@ -1454,20 +1672,47 @@ stack_cmd_push() {
     restore_branch
     cat <<EOM
 
-[$idx/$total] $name prepared. To approve and continue:
-  1. Run: pg -C $repo_root
-  2. Re-run: $rerun_cmd
+[$idx/$total] $name prepared.
+
+Next step:
+  Human approval: pg -C $repo_root
+  Agent re-run: $rerun_cmd
 
 (Stopping here — $pushed pushed, $skipped skipped before this branch.)
 EOM
-    stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd"
+    stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd" "needs approval"
     return 0
   done <<<"$ordered"
 
   restore_branch
   echo
   echo "Done. Pushed $pushed, skipped $skipped, total $total."
-  stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd"
+  if [[ "$dry_run" == "true" ]]; then
+    if [[ -n "$first_approval_name" ]]; then
+      local delayed_line
+      if [[ -n "$delayed_after_first" ]]; then
+        delayed_line="Downstream approvals wait: $delayed_after_first. Push-gate leases are per branch tip, so approve one changed tip at a time."
+      else
+        delayed_line="No downstream approvals are reached before the first approval."
+      fi
+      stack_print_next_step \
+        "First live push action: $rerun_cmd will prepare $first_approval_name at position $first_approval_idx/$total." \
+        "Then human approval: pg -C $repo_root" \
+        "Then agent re-run: $rerun_cmd" \
+        "$delayed_line"
+      stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd" "ready to push"
+    else
+      stack_print_next_step \
+        "No blocking approvals found in dry-run." \
+        "Run live push: $rerun_cmd"
+      stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd" "ready to push"
+    fi
+  else
+    stack_print_next_step \
+      "Push loop complete." \
+      "Update PR descriptions for changed PRs, using each PR's GitHub base."
+    stack_push_print_agent_handoff "$ordered" "$prs" "$rerun_cmd" "needs PR description update"
+  fi
 }
 
 stack_usage() {
@@ -1478,7 +1723,13 @@ Commands:
   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
     Show one-table view merging git topology, gh PR state, and pg leases.
     With --pr N, scope the view to that PR; --children follows GitHub PR
-    baseRefName children instead of broad local branch prefix.
+    baseRefName children instead of broad local branch prefix. Human output
+    ends with a guided Next step block; --json stays machine-readable.
+
+  checkout --pr N [--base REF] [--prefix PREFIX]
+    Check out the local branch for an open PR, refusing dirty worktrees, then
+    print the scoped stack context and exact edit -> commit -> squash -> test
+    -> push workflow for middle-stack edits.
 
   sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
     Fetch the base remote, preflight cascade-rebase in a throwaway scratch
@@ -1502,6 +1753,15 @@ Commands:
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).
 
+Guided workflow:
+  Prefer PR-scoped commands when a PR number is known:
+    stack status --pr N --children
+    stack checkout --pr N
+    stack push --pr N --children
+  Every human-readable command prints Next step: with the safe command or
+  human approval action to run next. Topology warnings mean GitHub PR
+  baseRefName wins; local ancestry is stale/diagnostic.
+
 Debugging:
   Set STACK_DEBUG=1 to print repo roots, branch counts, scratch paths,
   lease-match counts, and push-gate decision breadcrumbs to stderr.
@@ -1514,6 +1774,7 @@ stack_main() {
   shift
   case "$cmd" in
     status)        stack_cmd_status "$@" ;;
+    checkout)      stack_cmd_checkout "$@" ;;
     sync)          stack_cmd_sync "$@" ;;
     squash)        stack_cmd_squash "$@" ;;
     push)          stack_cmd_push "$@" ;;
