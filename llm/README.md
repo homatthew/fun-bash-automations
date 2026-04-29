@@ -14,6 +14,7 @@ harnesses.
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
 - `../codex/hooks.json` portable Codex hooks template
 - `../bin/stack` local stacked-PR CLI wrapper backed by `hooks/stack.sh`
+- `stack/README.md` canonical guide for the guided `stack` next-step workflow
 - `command-guard-policy.md` shared command safety policy
 
 ## Canonical Editing Rules

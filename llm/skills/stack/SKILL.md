@@ -5,11 +5,13 @@ description: Local-first stacked-PR CLI. Use `stack status` instead of hand-roll
 
 # stack
 
-Local-first stacked-PR tooling. Merges `git`, `gh`, and `pg` into one view
+Local-first stacked-PR tooling. Merges `git`, `gh`, CI, and `pg` into one view
 (`stack status`), preflights cascade-rebases in a scratch clone after upstream
 advances or a parent squash-merges (`stack sync`), squashes noisy incremental
 branch commits (`stack squash`), and orchestrates the per-branch `pg prepare`
-/ `pg push` loop across the whole stack (`stack push`).
+/ `pg push` loop across the whole stack (`stack push`). Human-readable output
+is guided: every command ends with a `Next step:` block that states the safe
+command or human approval action to run next.
 
 `stack push` never bypasses `pg` — it stops and waits for the human to
 approve each lease, then resumes on re-invocation.
@@ -21,7 +23,12 @@ approve each lease, then resumes on re-invocation.
   already composes them into one table (and `--json` for scripting).
 - User asks about a specific PR stack — run `stack status --pr <N> --children`.
   This uses GitHub PR `baseRefName` as the stack DAG and warns if local branch
-  ancestry disagrees.
+  ancestry disagrees. GitHub PR `baseRefName` is authoritative for PR-scoped
+  stacks; local ancestry is diagnostic/stale.
+- User needs to edit a PR in the middle of a stack — run `stack checkout --pr <N>`.
+  It resolves the open PR to a local branch, refuses dirty worktrees, checks out
+  that branch, prints the scoped stack context, and shows the exact
+  edit/commit/squash/test/push flow.
 - After a parent PR lands or main moves — run `stack sync`. It creates a
   throwaway scratch clone, handles both patch-id-detectable squashes and
   multi-commit squashes (PR-state cascade via `gh` first, then
@@ -52,6 +59,7 @@ approve each lease, then resumes on re-invocation.
 
 ```
 stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
@@ -94,6 +102,23 @@ DAG rooted at PR `N`. This prevents unrelated same-prefix branches from being
 processed and emits topology mismatch warnings when local ancestry disagrees
 with GitHub PR bases.
 
+When a user names a PR, default to:
+
+```
+stack status --pr <N> --children
+stack checkout --pr <N>       # when editing this PR
+stack push --pr <N> --children
+```
+
+Broad `stack push` is still supported, but it can include unrelated local stacks
+that share the configured prefix.
+
+`stack checkout --pr N` is intentionally simple. It does not absorb/fixup
+changes or infer edit intent; it only checks out the PR branch and prints the
+rails:
+`edit -> git add && git commit -> stack squash --pr N --onto-pr-base -> tests
+-> stack push --dry-run --pr N --children -> stack push --pr N --children`.
+
 `stack push` walks the stack parents-first. For each branch:
 - No PR → still goes through `pg check`; if the lease is fresh, pushes the
   branch with `pg push --force-with-lease --set-upstream`, then lists the
@@ -106,10 +131,15 @@ with GitHub PR bases.
   `stack push`", and exits 0. Idempotent: re-invoke after each approval.
 
 At the end of a push attempt, `stack push` prints an **Agent handoff** block.
-Use it as the checklist for the next agent action: existing PR numbers to
-refresh with `/update-pr-description`, no-PR branches with their target base,
-and the exact `stack push` command to re-run when a custom `--base` or
-`--prefix` was used.
+Use it as the checklist for the next agent action. It includes a phase
+(`needs approval`, `ready to push`, `needs restack`, `needs PR description
+update`, or `done`), existing PR numbers to refresh with
+`/update-pr-description`, no-PR branches with their target base, and the exact
+`stack push` command to re-run when a custom `--base`, `--prefix`, or PR scope
+was used. PR description bases follow GitHub semantics: the root PR compares
+against its base branch and each child PR compares against its parent branch.
+
+The canonical long-form guide is `llm/stack/README.md`.
 
 ## Rules for agents
 
