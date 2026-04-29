@@ -6,6 +6,8 @@
 #   checkout --pr N [--base REF] [--prefix PREFIX]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+#   trunk  materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+#   trunk  status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 #   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #
@@ -133,6 +135,10 @@ stack_ref_name() {
 stack_lookup_tip() {
   local branch="$1" tips="$2"
   awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' <<<"$tips"
+}
+
+stack_zero_oid() {
+  printf '0000000000000000000000000000000000000000\n'
 }
 
 stack_count_nonempty_lines() {
@@ -1261,6 +1267,336 @@ stack_insert_report_failure() {
   stack_fail "scratch insert preflight failed (exit $rc). Real branch refs were not changed."
 }
 
+stack_trunk_manifest_path() {
+  local name="$1" manifest_override="${2:-}"
+  if [[ -n "$manifest_override" ]]; then
+    printf '%s\n' "$manifest_override"
+    return 0
+  fi
+  [[ -n "$name" ]] || stack_fail "stack trunk requires --name NAME or --manifest PATH"
+  printf '.stack/%s.json\n' "$name"
+}
+
+stack_trunk_load_manifest() {
+  local manifest="$1"
+  [[ -f "$manifest" ]] || stack_fail "stack trunk manifest not found: $manifest"
+  jq -e '
+    (.version == 1)
+    and (.name | type == "string" and length > 0)
+    and (.base | type == "string" and length > 0)
+    and (.trunk | type == "string" and length > 0)
+    and (.items | type == "array" and length > 0)
+    and all(.items[]; (.id | type == "string" and length > 0) and (.branch | type == "string" and length > 0))
+  ' "$manifest" >/dev/null \
+    || stack_fail "invalid stack trunk manifest: $manifest"
+  cat "$manifest"
+}
+
+stack_trunk_manifest_field() {
+  local manifest_json="$1" field="$2"
+  jq -r --arg f "$field" '.[$f] // ""' <<<"$manifest_json"
+}
+
+stack_trunk_item_lines() {
+  local manifest_json="$1"
+  jq -r '.items[] | [.id, .branch, ((.pr // "-") | tostring), (.base // "-")] | @tsv' <<<"$manifest_json"
+}
+
+stack_trunk_branch_tips() {
+  local manifest_json="$1"
+  local trunk id branch pr item_base
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  printf '%s\t%s\n' "$trunk" "$(git rev-parse --verify "$trunk" 2>/dev/null || stack_zero_oid)"
+  while IFS=$'\t' read -r id branch pr item_base; do
+    [[ -z "$branch" ]] && continue
+    printf '%s\t%s\n' "$branch" "$(git rev-parse --verify "$branch" 2>/dev/null || echo '')"
+  done < <(stack_trunk_item_lines "$manifest_json")
+}
+
+stack_trunk_resolve_item_bases() {
+  local manifest_json="$1" parent_map="$2" manifest_base="$3"
+  local id branch pr item_base patch_base patch_base_sha
+  while IFS=$'\t' read -r id branch pr item_base; do
+    [[ -z "$branch" ]] && continue
+    [[ "$pr" == "-" ]] && pr=""
+    [[ "$item_base" == "-" ]] && item_base=""
+    git rev-parse --verify "$branch" >/dev/null 2>&1 \
+      || stack_fail "stack trunk item branch not found: $branch"
+    patch_base="$item_base"
+    if [[ -z "$patch_base" ]]; then
+      patch_base=$(stack_parent_from_map "$branch" "$parent_map")
+    fi
+    [[ -n "$patch_base" ]] || patch_base="$manifest_base"
+    git rev-parse --verify "$patch_base" >/dev/null 2>&1 \
+      || stack_fail "patch base for $branch not found: $patch_base"
+    patch_base_sha=$(git rev-parse --verify "$patch_base")
+    printf '%s\t%s\t%s\t%s\n' "$id" "$branch" "${pr:-"-"}" "$patch_base_sha"
+  done < <(stack_trunk_item_lines "$manifest_json")
+}
+
+stack_trunk_print_plan() {
+  local manifest_json="$1" item_bases="$2" base_override="${3:-}"
+  local manifest_name manifest_base trunk resolved_base
+  manifest_name=$(stack_trunk_manifest_field "$manifest_json" "name")
+  manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  resolved_base=$(stack_upstream_ref "${base_override:-$manifest_base}")
+
+  echo "Stack trunk: $manifest_name"
+  echo "  Base:  $resolved_base"
+  echo "  Trunk: $trunk"
+  echo
+  echo "Materialization order:"
+  local idx=0 id branch pr patch_base count pr_label
+  while IFS=$'\t' read -r id branch pr patch_base; do
+    [[ -z "$branch" ]] && continue
+    [[ "$pr" == "-" ]] && pr=""
+    idx=$((idx + 1))
+    count=$(git rev-list --count "$patch_base..$branch" 2>/dev/null || echo 0)
+    pr_label=""
+    [[ -n "$pr" ]] && pr_label=" (#$pr)"
+    printf '  %d. %s%s -> %s (%s commit(s) from %s)\n' "$idx" "$id" "$pr_label" "$branch" "$count" "$patch_base"
+  done <<<"$item_bases"
+}
+
+stack_trunk_apply_item_in_scratch() {
+  local id="$1" branch="$2" patch_base="$3"
+  local count commit
+  count=$(git rev-list --count "$patch_base..$branch" 2>/dev/null || echo 0)
+  echo "  item $id: $branch ($count commit(s) from $patch_base)"
+  while read -r commit; do
+    [[ -z "$commit" ]] && continue
+    if ! git cherry-pick "$commit" >/dev/null 2>&1; then
+      git cherry-pick --abort >/dev/null 2>&1 || true
+      stack_fail "cherry-pick failed for $branch commit ${commit:0:8}"
+    fi
+  done < <(git rev-list --reverse "$patch_base..$branch")
+  git update-ref "refs/heads/$branch" HEAD
+}
+
+stack_trunk_run_materialize_preflight() {
+  local manifest_json="$1" item_bases="$2" base_override="${3:-}"
+  local manifest_base trunk resolved_base id branch pr patch_base
+  manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  resolved_base=$(stack_upstream_ref "${base_override:-$manifest_base}")
+
+  git checkout -q -B "$trunk" "$resolved_base"
+  while IFS=$'\t' read -r id branch pr patch_base; do
+    [[ -z "$branch" ]] && continue
+    stack_trunk_apply_item_in_scratch "$id" "$branch" "$patch_base"
+  done <<<"$item_bases"
+  git update-ref "refs/heads/$trunk" HEAD
+}
+
+stack_trunk_report_failure() {
+  local scratch_repo="$1" rc="$2" keep_scratch="$3"
+  local conflicts status_short
+  conflicts=$(git -C "$scratch_repo" diff --name-only --diff-filter=U 2>/dev/null || true)
+  status_short=$(git -C "$scratch_repo" status --short 2>/dev/null || true)
+  if [[ -n "$conflicts" ]]; then
+    stack_warn "stack trunk scratch conflict files:"
+    sed 's/^/  /' <<<"$conflicts" >&2
+  elif [[ -n "$status_short" ]]; then
+    stack_warn "stack trunk scratch left changes:"
+    sed 's/^/  /' <<<"$status_short" >&2
+  fi
+  if [[ "$keep_scratch" == "true" ]]; then
+    echo
+    echo "Scratch kept: $scratch_repo"
+  else
+    stack_warn "rerun with --keep-scratch to preserve the scratch clone and preflight log."
+  fi
+  stack_fail "stack trunk materialize preflight failed (exit $rc). Real branch refs were not changed."
+}
+
+stack_cmd_trunk_materialize() {
+  local name="" manifest_override="" dry_run="false" keep_scratch="false" base_override="" prefix_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
+      --manifest) manifest_override="${2:-}"; [[ -n "$manifest_override" ]] || stack_fail "--manifest requires a path"; shift 2 ;;
+      --dry-run) dry_run="true"; shift ;;
+      --keep-scratch) keep_scratch="true"; shift ;;
+      --base) base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk materialize flag: $1" ;;
+    esac
+  done
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local dirty
+  dirty=$(git status --porcelain 2>/dev/null)
+  [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
+
+  local manifest manifest_json manifest_base base prefix parent_map item_bases pre_tips trunk
+  manifest=$(stack_trunk_manifest_path "$name" "$manifest_override")
+  manifest_json=$(stack_trunk_load_manifest "$manifest")
+  manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
+  base=$(stack_upstream_ref "${base_override:-$manifest_base}")
+  prefix=$(stack_prefix "$prefix_override")
+  parent_map=$(stack_build_parent_map "$prefix" "$base")
+  item_bases=$(stack_trunk_resolve_item_bases "$manifest_json" "$parent_map" "$base")
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  stack_trunk_print_plan "$manifest_json" "$item_bases" "${base_override:-$manifest_base}"
+
+  if [[ "$dry_run" == "true" ]]; then
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Build the private trunk and branch pointers: stack trunk materialize --manifest $(stack_shell_quote "$manifest")"
+    return 0
+  fi
+
+  pre_tips=$(stack_trunk_branch_tips "$manifest_json")
+
+  local repo_root current_branch scratch_root scratch_repo preflight_log
+  repo_root=$(stack_repo_root)
+  current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  scratch_root=$(mktemp -d "${TMPDIR:-/tmp}/stack-trunk.XXXXXX")
+  scratch_repo="$scratch_root/repo"
+
+  STACK_TRUNK_CLEANUP_ROOT="$scratch_root"
+  STACK_TRUNK_KEEP_SCRATCH="$keep_scratch"
+  trap 'if [[ "${STACK_TRUNK_KEEP_SCRATCH:-}" != "true" && -n "${STACK_TRUNK_CLEANUP_ROOT:-}" ]]; then rm -rf "$STACK_TRUNK_CLEANUP_ROOT"; fi' EXIT
+
+  echo
+  echo "Creating scratch clone: $scratch_repo"
+  stack_sync_create_scratch "$repo_root" "$scratch_repo" "$current_branch" "$parent_map"
+
+  preflight_log="$scratch_root/preflight.log"
+  echo "Preflighting private trunk materialization in scratch..."
+  set +e
+  (
+    cd "$scratch_repo"
+    stack_trunk_run_materialize_preflight "$manifest_json" "$item_bases" "${base_override:-$manifest_base}"
+  ) >"$preflight_log" 2>&1
+  local preflight_rc=$?
+  set -e
+  sed 's/^/  /' "$preflight_log"
+
+  if (( preflight_rc != 0 )); then
+    stack_trunk_report_failure "$scratch_repo" "$preflight_rc" "$keep_scratch"
+    return 1
+  fi
+
+  local scratch_tips moved_tips
+  scratch_tips=$(awk -F'\t' '{print $1}' <<<"$pre_tips" | while read -r b; do
+    [[ -z "$b" ]] && continue
+    printf '%s\t%s\n' "$b" "$(git -C "$scratch_repo" rev-parse --verify "$b" 2>/dev/null || echo '')"
+  done)
+  moved_tips=$(stack_sync_moved_tips "$pre_tips" "$scratch_tips")
+  if [[ -n "$moved_tips" ]]; then
+    stack_sync_apply_refs "$scratch_repo" "$moved_tips"
+  fi
+
+  local leases moved=0 moved_branches="" stale_branches="" b old_sha new_sha lease
+  leases=$(stack_fetch_leases)
+  echo
+  while IFS=$'\t' read -r b old_sha new_sha; do
+    [[ -z "$b" ]] && continue
+    [[ "$old_sha" == "$new_sha" ]] && continue
+    moved=$((moved + 1))
+    moved_branches="${moved_branches}${moved_branches:+, }$b"
+    lease=$(jq -c --arg k "$b" '.[$k] // null' <<<"$leases")
+    if [[ "$lease" != "null" && "$b" != "$trunk" ]]; then
+      stack_warn "lease stale: $b tip moved ($old_sha -> $new_sha). Re-run \`pg\` to refresh."
+      stale_branches="${stale_branches}${stale_branches:+, }$b"
+    else
+      echo "  tip moved: $b ($old_sha -> $new_sha)"
+    fi
+  done <<<"$moved_tips"
+
+  if (( moved == 0 )); then
+    echo "No refs moved."
+    stack_print_next_step "Private trunk already materialized."
+  else
+    local lease_line
+    if [[ -n "$stale_branches" ]]; then
+      lease_line="Stale push-gate leases: $stale_branches"
+    else
+      lease_line="No existing push-gate leases became stale."
+    fi
+    stack_print_next_step \
+      "Materialized private trunk: $trunk" \
+      "Moved refs: $moved_branches" \
+      "$lease_line" \
+      "Run affected tests, then inspect: stack trunk status --manifest $(stack_shell_quote "$manifest")"
+  fi
+
+  if [[ "$keep_scratch" == "true" ]]; then
+    echo
+    echo "Scratch kept: $scratch_repo"
+  fi
+}
+
+stack_cmd_trunk_status() {
+  local name="" manifest_override="" format="table" base_override="" prefix_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
+      --manifest) manifest_override="${2:-}"; [[ -n "$manifest_override" ]] || stack_fail "--manifest requires a path"; shift 2 ;;
+      --json) format="json"; shift ;;
+      --base) base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk status flag: $1" ;;
+    esac
+  done
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local manifest manifest_json manifest_base base prefix parent_map item_bases trunk
+  manifest=$(stack_trunk_manifest_path "$name" "$manifest_override")
+  manifest_json=$(stack_trunk_load_manifest "$manifest")
+  manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
+  base=$(stack_upstream_ref "${base_override:-$manifest_base}")
+  prefix=$(stack_prefix "$prefix_override")
+  parent_map=$(stack_build_parent_map "$prefix" "$base")
+  item_bases=$(stack_trunk_resolve_item_bases "$manifest_json" "$parent_map" "$base")
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+
+  if [[ "$format" == "json" ]]; then
+    local items='[]' id branch pr patch_base head trunk_head
+    trunk_head=$(git rev-parse --verify "$trunk" 2>/dev/null || echo "")
+  while IFS=$'\t' read -r id branch pr patch_base; do
+    [[ -z "$branch" ]] && continue
+    [[ "$pr" == "-" ]] && pr=""
+    head=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
+      items=$(jq --arg id "$id" --arg branch "$branch" --arg pr "$pr" --arg patch_base "$patch_base" --arg head "$head" \
+        '. + [{id:$id, branch:$branch, pr:$pr, patch_base:$patch_base, head:$head}]' <<<"$items")
+    done <<<"$item_bases"
+    jq -n --argjson manifest "$manifest_json" --arg base "$base" --arg trunk_head "$trunk_head" --argjson items "$items" \
+      '{manifest:$manifest, resolved_base:$base, trunk_head:$trunk_head, items:$items}'
+    return 0
+  fi
+
+  stack_trunk_print_plan "$manifest_json" "$item_bases" "${base_override:-$manifest_base}"
+  echo
+  printf '%-22s %-36s %s\n' "Pointer" "Branch" "Head"
+  printf '%-22s %-36s %s\n' "-------" "------" "----"
+  printf '%-22s %-36s %s\n' "trunk" "$trunk" "$(git rev-parse --short "$trunk" 2>/dev/null || echo "missing")"
+  local id branch pr patch_base
+  while IFS=$'\t' read -r id branch pr patch_base; do
+    [[ -z "$branch" ]] && continue
+    printf '%-22s %-36s %s\n' "$id" "$branch" "$(git rev-parse --short "$branch" 2>/dev/null || echo "missing")"
+  done <<<"$item_bases"
+  stack_print_next_step "Materialize changes: stack trunk materialize --manifest $(stack_shell_quote "$manifest")"
+}
+
+stack_cmd_trunk() {
+  local sub="${1:-}"
+  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: status or materialize"
+  shift
+  case "$sub" in
+    status) stack_cmd_trunk_status "$@" ;;
+    materialize) stack_cmd_trunk_materialize "$@" ;;
+    -h|--help|help) stack_usage ;;
+    *) stack_fail "unknown trunk subcommand: $sub" ;;
+  esac
+}
+
 # Rebase one branch (and its descendants) off old parent tip onto new parent.
 # Recursive depth-first walk over children_blob (lines: "parent\tchild").
 # Sets STACK_ADOPT_REBASES to the number of rebases performed in the subtree.
@@ -2092,6 +2428,14 @@ Commands:
     atomically. --after uses local ancestry; --after-pr scopes descendants by
     GitHub PR baseRefName.
 
+  trunk status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
+  trunk materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch]
+                   [--base REF] [--prefix PREFIX]
+    Use a per-stack private trunk manifest as the source of truth. Materialize
+    builds the trunk in scratch by replaying item branches in manifest order,
+    then atomically moves the trunk ref and each item branch pointer to the
+    corresponding trunk commit. The private trunk is not main.
+
   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]
          [--pr N] [--base REF] [--prefix PREFIX]
     Squash the current branch's incremental commits relative to its stack
@@ -2133,6 +2477,7 @@ stack_main() {
     checkout)      stack_cmd_checkout "$@" ;;
     sync)          stack_cmd_sync "$@" ;;
     insert)        stack_cmd_insert "$@" ;;
+    trunk)         stack_cmd_trunk "$@" ;;
     squash)        stack_cmd_squash "$@" ;;
     push)          stack_cmd_push "$@" ;;
     __sync-preflight)

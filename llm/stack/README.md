@@ -24,6 +24,12 @@ stack push --pr <N> --children
 Broad `stack push` remains supported, but it can include unrelated same-prefix
 local stacks. Use it only when that broad scope is intentional.
 
+For manifest-driven stacks, the stack can own a private trunk. This trunk is a
+normal local branch for one stack, not `main`. The manifest declares item order,
+the private trunk ref, and the pointer branches. `stack trunk materialize` builds
+that trunk in scratch and hard-points each branch to its corresponding commit on
+the trunk.
+
 ## Standard Loop
 
 1. Inspect the stack:
@@ -57,41 +63,52 @@ local stacks. Use it only when that broad scope is intentional.
    This restacks PR children selected by GitHub `baseRefName`. It does not
    retarget GitHub PR bases; create or retarget PRs separately after refs move.
 
-6. Run the affected tests after refs move.
+6. For a codified private-trunk stack, edit the manifest order instead and
+   materialize it:
 
-7. Dry-run the push to see exact ordering and the first approval:
+   ```bash
+   stack trunk status --manifest .stack/<name>.json
+   stack trunk materialize --manifest .stack/<name>.json
+   ```
+
+   The private trunk becomes the generated stack integration branch; each PR
+   branch is moved to the commit it owns on that trunk.
+
+7. Run the affected tests after refs move.
+
+8. Dry-run the push to see exact ordering and the first approval:
 
    ```bash
    stack push --dry-run --pr <N> --children
    ```
 
-8. Run the live push:
+9. Run the live push:
 
    ```bash
    stack push --pr <N> --children
    ```
 
-9. If `stack push` prepares a branch, the human runs the printed approval
+10. If `stack push` prepares a branch, the human runs the printed approval
    command:
 
    ```bash
    pg -C <repo>
    ```
 
-10. Re-run the exact `stack push ...` command printed under `Next step:`.
+11. Re-run the exact `stack push ...` command printed under `Next step:`.
 
-11. Update PR descriptions. The root PR description should compare against its
+12. Update PR descriptions. The root PR description should compare against its
    GitHub base; each child PR description should compare against its parent
    branch.
 
 ## Safety Model
 
-Push-gate leases are per branch tip. If `stack sync`, `stack insert`, or
-`stack squash` rewrites a branch and its descendants, every moved branch with an
-existing lease is stale and needs separate human approval. There is no batch
-approval and no agent bypass. `stack push` prepares one branch, stops, prints
-`pg -C <repo>`, and waits for the human before continuing on the next
-invocation.
+Push-gate leases are per branch tip. If `stack sync`, `stack insert`,
+`stack trunk materialize`, or `stack squash` rewrites a branch and its
+descendants, every moved branch with an existing lease is stale and needs
+separate human approval. There is no batch approval and no agent bypass.
+`stack push` prepares one branch, stops, prints `pg -C <repo>`, and waits for
+the human before continuing on the next invocation.
 
 ## Command Behavior
 
@@ -119,6 +136,15 @@ and atomically import moved refs with old-tip verification. `--dry-run` prints
 planned rebases without moving refs. The command reports stale push-gate leases
 but does not change GitHub PR bases.
 
+`stack trunk materialize --manifest <path>` reads a JSON manifest with
+`version`, `name`, `base`, `trunk`, and `items`. It builds the private trunk in
+a scratch clone by replaying item branches in manifest order, then atomically
+moves the trunk ref and each item branch pointer to the corresponding commit on
+that trunk. This is the declarative stack mode: change the manifest order, run
+one materialization, then test and push. `stack trunk status` prints the
+manifest order, inferred patch bases, trunk ref, and pointer heads. PR bases are
+validated or retargeted separately; materialization only moves local refs.
+
 `stack squash` collapses a branch's incremental commits into one commit and
 restacks descendants. Use `--pr <N> --onto-pr-base` when GitHub says a PR's base
 differs from local ancestry. Its next step lists moved descendants, stale
@@ -136,6 +162,8 @@ or stale lease after `pg prepare`.
 - New middle branch: `stack insert --branch <new> --after-pr <N>` can place a
   branch between an open PR and its PR children without manually rebasing each
   child branch.
+- Private stack trunk: `stack trunk materialize --manifest <path>` can rebuild a
+  stack-specific trunk and move branch pointers after changing manifest order.
 - Redundant local parent branch: PR-scoped status/push still follow GitHub
   `baseRefName`; local ancestry only triggers a warning.
 - Unrelated same-prefix branches: use `--pr <N> --children` to exclude them.
