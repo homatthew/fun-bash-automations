@@ -8,7 +8,8 @@ description: Local-first stacked-PR CLI. Use `stack status` instead of hand-roll
 Local-first stacked-PR tooling. Merges `git`, `gh`, CI, and `pg` into one view
 (`stack status`), preflights cascade-rebases in a scratch clone after upstream
 advances or a parent squash-merges (`stack sync`), inserts a new branch into an
-existing stack with descendant restacks (`stack insert`), squashes noisy
+existing stack with descendant restacks (`stack insert`), materializes declared
+stacks onto per-stack private trunks (`stack trunk materialize`), squashes noisy
 incremental branch commits (`stack squash`), and orchestrates the per-branch
 `pg prepare` / `pg push` loop across the whole stack (`stack push`).
 Human-readable output is guided: every command ends with a `Next step:` block
@@ -42,6 +43,10 @@ approve each lease, then resumes on re-invocation.
   rebases in scratch, then imports moved refs atomically.
 - User needs to insert a local branch into a purely local stack — run
   `stack insert --branch <new-branch> --after <branch>`.
+- User has a codified stack manifest and wants the stack's private trunk to be
+  the source of truth — run `stack trunk status --manifest <path>` and then
+  `stack trunk materialize --manifest <path>`. The private trunk is not `main`;
+  branch pointers move to commits on that stack-specific trunk.
 - User wants to clean up the current PR before pushing — run `stack squash`.
   It squashes the current branch's commits relative to its stack parent, then
   restacks selected descendants. When local ancestry is known wrong, prefer
@@ -69,6 +74,8 @@ stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack trunk status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
+stack trunk materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 ```
@@ -105,6 +112,15 @@ old-tip verification. `--dry-run` prints the planned rebases without creating a
 scratch clone or moving refs. Any moved branch with an existing push-gate lease
 is reported as stale. The command does not change GitHub PR bases; retarget or
 create PRs separately when the inserted branch becomes the new review base.
+
+`stack trunk materialize` reads a manifest, builds that stack's private trunk in
+a scratch clone, replays item branches in manifest order, and then atomically
+moves the trunk ref plus each item branch pointer to the corresponding commit on
+the trunk. This is the declarative form of restacking: change the manifest
+order, then materialize once. The private trunk is per stack and is never
+`main`. `stack trunk status` shows the manifest order, inferred patch bases,
+trunk ref, and pointer branch heads. PR base changes are handled separately;
+this command only moves local refs and reports stale push-gate leases.
 
 `stack squash` acts on the currently checked-out branch. It determines that
 branch's stack parent, soft-resets the branch to that parent, commits one

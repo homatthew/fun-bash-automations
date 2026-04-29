@@ -234,7 +234,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..28"
+echo "1..31"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -931,6 +931,169 @@ git -C "$REPO" merge-base --is-ancestor mho/pr-insert mho/pr267 \
 REPO="$OLD_REPO"
 echo "ok 27 - insert --after-pr restacks PR children but excludes no-PR local children"
 
+# ------------------------------------------------------------------------
+# 28: trunk materialize --dry-run reads a private stack manifest and does
+#     not create or move refs.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  mkdir -p .stack
+  jq -n '{
+    version: 1,
+    name: "demo",
+    base: "origin/main",
+    trunk: "mho/demo.trunk",
+    items: [
+      {id: "base", branch: "mho/feature-base"},
+      {id: "api", branch: "mho/feature-api"},
+      {id: "ui", branch: "mho/feature-ui"}
+    ]
+  }' >.stack/demo.json
+  git add .stack/demo.json
+  git commit -m "add stack manifest" >/dev/null
+)
+base_before=$(git -C "$REPO" rev-parse mho/feature-base)
+api_before=$(git -C "$REPO" rev-parse mho/feature-api)
+ui_before=$(git -C "$REPO" rev-parse mho/feature-ui)
+
+trunk_dry=$(run_stack trunk materialize --dry-run --manifest .stack/demo.json 2>&1)
+expect_contains "$trunk_dry" "Stack trunk: demo"
+expect_contains "$trunk_dry" "Trunk: mho/demo.trunk"
+expect_contains "$trunk_dry" "Refs unchanged in dry-run"
+git -C "$REPO" rev-parse --verify mho/demo.trunk >/dev/null 2>&1 \
+  && fail "dry-run should not create private trunk"
+[[ "$(git -C "$REPO" rev-parse mho/feature-base)" == "$base_before" ]] || fail "dry-run moved feature-base"
+[[ "$(git -C "$REPO" rev-parse mho/feature-api)" == "$api_before" ]] || fail "dry-run moved feature-api"
+[[ "$(git -C "$REPO" rev-parse mho/feature-ui)" == "$ui_before" ]] || fail "dry-run moved feature-ui"
+REPO="$OLD_REPO"
+echo "ok 28 - trunk materialize --dry-run leaves refs unchanged"
+
+# ------------------------------------------------------------------------
+# 29: trunk materialize constructs a private trunk and hard-points each stack
+#     branch to its corresponding commit, including a manifest insertion.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+OLD_LEASES_JSON="$STACK_TEST_LEASES_JSON"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout mho/feature-base >/dev/null 2>&1
+  git checkout -b mho/feature-insert --no-track >/dev/null 2>&1
+  printf 'insert\n' >insert.txt
+  git add insert.txt
+  git commit -m "insert middle feature" >/dev/null
+
+  git checkout main >/dev/null 2>&1
+  mkdir -p .stack
+  jq -n '{
+    version: 1,
+    name: "demo",
+    base: "origin/main",
+    trunk: "mho/demo.trunk",
+    items: [
+      {id: "base", branch: "mho/feature-base"},
+      {id: "insert", branch: "mho/feature-insert"},
+      {id: "api", branch: "mho/feature-api"},
+      {id: "ui", branch: "mho/feature-ui"}
+    ]
+  }' >.stack/demo.json
+  git add .stack/demo.json
+  git commit -m "add stack manifest" >/dev/null
+)
+api_before=$(git -C "$REPO" rev-parse mho/feature-api)
+STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$api_before" '[
+  {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":$anchor,"pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
+]')
+
+trunk_live=$(run_stack trunk materialize --manifest .stack/demo.json 2>&1)
+expect_contains "$trunk_live" "Preflighting private trunk materialization in scratch"
+expect_contains "$trunk_live" "Materialized private trunk: mho/demo.trunk"
+expect_contains "$trunk_live" "Stale push-gate leases: mho/feature-api"
+git -C "$REPO" merge-base --is-ancestor mho/feature-base mho/feature-insert \
+  || fail "insert branch is not descendant of feature-base"
+git -C "$REPO" merge-base --is-ancestor mho/feature-insert mho/feature-api \
+  || fail "feature-api is not descendant of inserted branch"
+git -C "$REPO" merge-base --is-ancestor mho/feature-api mho/feature-ui \
+  || fail "feature-ui is not descendant of feature-api"
+[[ "$(git -C "$REPO" rev-parse mho/feature-ui)" == "$(git -C "$REPO" rev-parse mho/demo.trunk)" ]] \
+  || fail "private trunk should point to final stack commit"
+trunk_status=$(run_stack trunk status --manifest .stack/demo.json 2>&1)
+expect_contains "$trunk_status" "Pointer"
+expect_contains "$trunk_status" "mho/demo.trunk"
+STACK_TEST_LEASES_JSON="$OLD_LEASES_JSON"
+REPO="$OLD_REPO"
+echo "ok 29 - trunk materialize builds private trunk and pointer branches"
+
+# ------------------------------------------------------------------------
+# 30: trunk materialize conflict preflight leaves all real refs unchanged.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/trunk-after --no-track >/dev/null 2>&1
+  printf 'after\n' >after.txt
+  git add after.txt
+  git commit -m "trunk after" >/dev/null
+
+  git checkout -b mho/trunk-child --no-track >/dev/null 2>&1
+  printf 'child\n' >conflict.txt
+  git add conflict.txt
+  git commit -m "trunk child" >/dev/null
+
+  git checkout mho/trunk-after >/dev/null 2>&1
+  git checkout -b mho/trunk-insert --no-track >/dev/null 2>&1
+  printf 'insert\n' >conflict.txt
+  git add conflict.txt
+  git commit -m "trunk insert" >/dev/null
+
+  git checkout main >/dev/null 2>&1
+  mkdir -p .stack
+  jq -n '{
+    version: 1,
+    name: "conflict",
+    base: "origin/main",
+    trunk: "mho/conflict.trunk",
+    items: [
+      {id: "after", branch: "mho/trunk-after"},
+      {id: "insert", branch: "mho/trunk-insert"},
+      {id: "child", branch: "mho/trunk-child"}
+    ]
+  }' >.stack/conflict.json
+  git add .stack/conflict.json
+  git commit -m "add conflict stack manifest" >/dev/null
+)
+after_before=$(git -C "$REPO" rev-parse mho/trunk-after)
+insert_before=$(git -C "$REPO" rev-parse mho/trunk-insert)
+child_before=$(git -C "$REPO" rev-parse mho/trunk-child)
+
+set +e
+trunk_conflict=$(run_stack trunk materialize --manifest .stack/conflict.json 2>&1)
+trunk_conflict_rc=$?
+set -e
+[[ "$trunk_conflict_rc" != "0" ]] || fail "expected trunk materialize conflict"
+expect_contains "$trunk_conflict" "stack trunk materialize preflight failed"
+expect_contains "$trunk_conflict" "Real branch refs were not changed"
+[[ "$(git -C "$REPO" rev-parse mho/trunk-after)" == "$after_before" ]] || fail "trunk conflict moved after branch"
+[[ "$(git -C "$REPO" rev-parse mho/trunk-insert)" == "$insert_before" ]] || fail "trunk conflict moved insert branch"
+[[ "$(git -C "$REPO" rev-parse mho/trunk-child)" == "$child_before" ]] || fail "trunk conflict moved child branch"
+git -C "$REPO" rev-parse --verify mho/conflict.trunk >/dev/null 2>&1 \
+  && fail "failed trunk materialize should not create private trunk"
+scratch_left=$(find "$TEST_TMP" -maxdepth 1 -type d -name 'stack-trunk.*' | wc -l | tr -d ' ')
+[[ "$scratch_left" == "0" ]] || fail "trunk scratch dirs should be removed after failed preflight: $scratch_left"
+REPO="$OLD_REPO"
+echo "ok 30 - trunk materialize conflict leaves refs unchanged and cleans scratch"
+
 # Restore default fake PR data for the final help/doc test.
 export STACK_TEST_PR_JSON
 STACK_TEST_PR_JSON=$(jq -c -n '[
@@ -939,7 +1102,7 @@ STACK_TEST_PR_JSON=$(jq -c -n '[
 ]')
 
 # ------------------------------------------------------------------------
-# 28: help and skill docs match the supported command surface.
+# 31: help and skill docs match the supported command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
@@ -947,6 +1110,7 @@ expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX] [--p
 expect_contains "$help_out" "checkout --pr N [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "insert --branch BRANCH (--after BRANCH|--after-pr N)"
+expect_contains "$help_out" "trunk materialize --name NAME|--manifest PATH"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "STACK_DEBUG=1"
@@ -957,13 +1121,15 @@ expect_contains "$skill_doc" "stack squash [--dry-run]"
 expect_contains "$skill_doc" "--onto-pr-base"
 expect_contains "$skill_doc" "--keep-scratch"
 expect_contains "$skill_doc" "stack insert --branch"
+expect_contains "$skill_doc" "stack trunk materialize"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_contains "$skill_doc" "Next step:"
 expect_contains "$skill_doc" "stack checkout --pr <N>"
 stack_doc=$(cat "$ROOT/llm/stack/README.md")
 expect_contains "$stack_doc" "GitHub PR base wins"
 expect_contains "$stack_doc" "stack insert --branch"
+expect_contains "$stack_doc" "private trunk"
 expect_contains "$stack_doc" "Next step:"
 expect_contains "$stack_doc" "stack checkout --pr <N>"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 28 - help and stack skill docs match supported commands"
+echo "ok 31 - help and stack skill docs match supported commands"
