@@ -1685,6 +1685,10 @@ EOF
     "$_pg_what" "$_pg_why" "$_pg_approach" "$_pg_scope" "$_pg_risks")
   [[ -n "$assert_flow" ]] || assert_flow=$(pg_default_assert_flow "$branch_name" "$pr_number" "$_pg_bead_block" \
     "$_pg_what" "$_pg_why" "$_pg_approach" "$_pg_scope" "$_pg_risks")
+  # Strip trailing whitespace per line so yq can emit literal block scalars
+  # (YAML | style cannot represent trailing whitespace and falls back to "...").
+  intent=$(printf '%s' "$intent" | sed 's/[[:space:]]*$//')
+  assert_flow=$(printf '%s' "$assert_flow" | sed 's/[[:space:]]*$//')
 
   # Build approved_scope. Auto-detect then let explicit flags override.
   # --no-scope disables semantic approval (falls back to single-push anchor-exact).
@@ -1821,7 +1825,7 @@ if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
       echo "# Save + quit to continue, :cq or empty file to abort."
       echo "#"
       [ -n "\$CONTEXT_BLOCK" ] && printf '%s\n' "\$CONTEXT_BLOCK"
-      yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml
+      yq -P eval '(.user_intent, .agent_assertion_template) style="literal"' "\$DRAFT_FILE" --output-format=yaml
     } > "\$YAML_FILE"
 
     cp "\$YAML_FILE" "\$YAML_FILE.bak"
