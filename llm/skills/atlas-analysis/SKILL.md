@@ -28,11 +28,19 @@ This covers:
 - Layer separation (KV vs Cassandra coordination vs storage)
 - Decomposition (ops/sec vs size/op vs total)
 - Query reference (system, Cassandra, DGW KV queries with all tags)
+- **DoW matching** — never compare phase means with different DoW composition
+- **AWS DTO billing** via Trino CEA tables (real $/day, not Atlas extrapolation)
+- **Cassandra convergence model** — TTL + gc_grace = lag per change
+- **Total namespace throughput** (writes + reads combined) as headline metric
 - Common mistakes to avoid
 
 ## Template Scripts
 
 ```bash
+# Revert + roll-forward analysis (phase-to-phase, DoW-balanced, billing-confirmed)
+# Most recent and complete template. Use this for new analyses.
+cat ~/repos/antigravity-core/scripts/pagestore_revert_analysis.py
+
 # Mosaic analysis (KV-layer impact + Cassandra infra)
 cat ~/repos/antigravity-core/scripts/pagestore_mosaic_analysis.py
 
