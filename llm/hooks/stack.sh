@@ -5,6 +5,7 @@
 #   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #   checkout --pr N [--base REF] [--prefix PREFIX]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+#   insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 #   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #
@@ -113,6 +114,18 @@ stack_sync_rerun_command() {
   printf '%s\n' "$cmd"
 }
 
+stack_insert_rerun_command() {
+  local base_override="$1" prefix_override="$2" branch="$3" after="$4" after_pr="$5" keep_scratch="${6:-false}"
+  local cmd="stack insert"
+  cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
+  cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
+  cmd=$(stack_append_flag "$cmd" "--branch" "$branch")
+  cmd=$(stack_append_flag "$cmd" "--after" "$after")
+  cmd=$(stack_append_flag "$cmd" "--after-pr" "$after_pr")
+  [[ "$keep_scratch" == "true" ]] && cmd="$cmd --keep-scratch"
+  printf '%s\n' "$cmd"
+}
+
 stack_ref_name() {
   printf 'refs/heads/%s\n' "$1"
 }
@@ -169,6 +182,60 @@ stack_descendants_ordered() {
       }
     }
   ' <<<"$ordered"
+}
+
+stack_parent_map_contains_branch() {
+  local branch="$1" parent_map="$2"
+  awk -F'\t' -v b="$branch" '$1 == b { found=1 } END { exit(found ? 0 : 1) }' <<<"$parent_map"
+}
+
+stack_parent_from_map() {
+  local branch="$1" parent_map="$2"
+  awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' <<<"$parent_map"
+}
+
+stack_remove_subtree_from_ordered() {
+  local root="$1" ordered="$2"
+  awk -F'\t' -v root="$root" '
+    { name[NR]=$2; parent[$2]=$3; line[$2]=$0 }
+    END {
+      for (i=1; i<=NR; i++) {
+        n=name[i]
+        if (n == root) continue
+        p=parent[n]
+        skip=0
+        while (p != "") {
+          if (p == root) {
+            skip=1
+            break
+          }
+          p=parent[p]
+        }
+        if (!skip) print line[n]
+      }
+    }
+  ' <<<"$ordered"
+}
+
+stack_remove_existing_git_descendants_from_ordered() {
+  local root="$1" ordered="$2"
+  while IFS=$'\t' read -r depth name parent ahead behind; do
+    [[ -z "$name" ]] && continue
+    if [[ "$name" != "$root" ]] && git merge-base --is-ancestor "$root" "$name" 2>/dev/null; then
+      continue
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$depth" "$name" "$parent" "$ahead" "$behind"
+  done <<<"$ordered"
+}
+
+stack_children_blob_from_ordered() {
+  local ordered="$1"
+  awk -F'\t' 'NF { print $3 "\t" $2 }' <<<"$ordered"
+}
+
+stack_branch_list_from_ordered() {
+  local ordered="$1"
+  awk -F'\t' 'NF { print $2 }' <<<"$ordered"
 }
 
 # Detect the base ref to compare feature branches against.
@@ -1157,6 +1224,43 @@ stack_sync_report_failure() {
   stack_fail "scratch sync preflight failed (exit $rc). Real branch refs were not changed."
 }
 
+stack_insert_print_debug() {
+  local scratch_repo="$1" script_path="$2" branch="$3" after="$4" after_pr="$5" base="$6" prefix="$7"
+  echo
+  echo "Scratch kept: $scratch_repo"
+  local cmd
+  cmd="Debug command: cd $(stack_shell_quote "$scratch_repo") && bash $(stack_shell_quote "$script_path") __insert-preflight"
+  cmd=$(stack_append_flag "$cmd" "--branch" "$branch")
+  cmd=$(stack_append_flag "$cmd" "--after" "$after")
+  cmd=$(stack_append_flag "$cmd" "--after-pr" "$after_pr")
+  cmd=$(stack_append_flag "$cmd" "--base" "$base")
+  cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix")
+  printf '%s\n' "$cmd"
+}
+
+stack_insert_report_failure() {
+  local scratch_repo="$1" rc="$2" keep_scratch="$3" script_path="$4" branch="$5" after="$6" after_pr="$7" base="$8" prefix="$9"
+  local conflicts status_short
+  conflicts=$(git -C "$scratch_repo" diff --name-only --diff-filter=U 2>/dev/null || true)
+  status_short=$(git -C "$scratch_repo" status --short 2>/dev/null || true)
+
+  if [[ -n "$conflicts" ]]; then
+    stack_warn "scratch preflight conflict files:"
+    sed 's/^/  /' <<<"$conflicts" >&2
+  elif [[ -n "$status_short" ]]; then
+    stack_warn "scratch preflight left changes:"
+    sed 's/^/  /' <<<"$status_short" >&2
+  fi
+
+  if [[ "$keep_scratch" == "true" ]]; then
+    stack_insert_print_debug "$scratch_repo" "$script_path" "$branch" "$after" "$after_pr" "$base" "$prefix"
+  else
+    stack_warn "rerun with --keep-scratch to preserve the scratch clone and preflight log."
+  fi
+
+  stack_fail "scratch insert preflight failed (exit $rc). Real branch refs were not changed."
+}
+
 # Rebase one branch (and its descendants) off old parent tip onto new parent.
 # Recursive depth-first walk over children_blob (lines: "parent\tchild").
 # Sets STACK_ADOPT_REBASES to the number of rebases performed in the subtree.
@@ -1286,6 +1390,250 @@ stack_cmd_adopt_merged_inner() {
     return 0
   fi
   echo "Adopted ${actions} child rebase(s)."
+}
+
+stack_insert_plan_order() {
+  local after_branch="$1" branch="$2" parent_map="$3" base="$4"
+  local ordered after_line descendants selected
+  ordered=$(echo "$parent_map" | stack_order_tree "$base")
+  after_line=$(awk -F'\t' -v b="$after_branch" '$2 == b { print; exit }' <<<"$ordered")
+  [[ -n "$after_line" ]] || stack_fail "insertion point is not in the selected stack: $after_branch"
+  descendants=$(stack_descendants_ordered "$after_branch" "$ordered")
+  selected="$after_line"
+  [[ -n "$descendants" ]] && selected="${selected}"$'\n'"${descendants}"
+  selected=$(stack_remove_subtree_from_ordered "$branch" "$selected")
+  stack_remove_existing_git_descendants_from_ordered "$branch" "$selected"
+}
+
+stack_insert_run_preflight() {
+  local branch="$1" after_branch="$2" insert_base="$3" children_blob="$4" dry_run="${5:-false}"
+  local after_tip branch_tip
+  after_tip=$(git rev-parse --verify "$after_branch")
+  branch_tip=$(git rev-parse --verify "$branch")
+
+  if [[ "$branch_tip" == "$after_tip" ]]; then
+    stack_fail "$branch has no commits to insert after $after_branch"
+  fi
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo "  (dry-run) git rebase --onto ${after_branch} ${insert_base:0:8} ${branch}"
+  else
+    echo "  rebasing inserted branch ${branch} onto ${after_branch} (off ${insert_base:0:8})"
+    if ! git rebase --onto "$after_branch" "$insert_base" "$branch" >/dev/null 2>&1; then
+      git rebase --abort >/dev/null 2>&1 || true
+      stack_fail "rebase failed for inserted branch ${branch}. Resolve manually:
+  git rebase --onto ${after_branch} ${insert_base} ${branch}"
+    fi
+  fi
+
+  local kids child actions=0
+  kids=$(awk -F'\t' -v p="$after_branch" '$1 == p {print $2}' <<<"$children_blob")
+  for child in $kids; do
+    [[ -z "$child" ]] && continue
+    stack_adopt_rebase_descendant "$child" "$branch" "$after_tip" "$dry_run" "$children_blob"
+    actions=$((actions + ${STACK_ADOPT_REBASES:-0}))
+  done
+
+  if (( actions == 0 )); then
+    echo "  no selected descendants to restack"
+  elif [[ "$dry_run" != "true" ]]; then
+    echo "  restacked ${actions} descendant branch(es)"
+  fi
+}
+
+# stack insert — place a local branch after an existing stack branch and
+# cascade-rebase the selected descendants onto the inserted branch in scratch.
+stack_cmd_insert() {
+  local dry_run="false" keep_scratch="false"
+  local base_override="" prefix_override="" branch="" after_branch="" after_pr=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run="true"; shift ;;
+      --keep-scratch) keep_scratch="true"; shift ;;
+      --branch) branch="${2:-}"; [[ -n "$branch" ]] || stack_fail "--branch requires a branch"; shift 2 ;;
+      --after) after_branch="${2:-}"; [[ -n "$after_branch" ]] || stack_fail "--after requires a branch"; shift 2 ;;
+      --after-pr) after_pr="${2:-}"; [[ "$after_pr" =~ ^[0-9]+$ ]] || stack_fail "--after-pr requires a PR number"; shift 2 ;;
+      --base)   base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown insert flag: $1" ;;
+    esac
+  done
+  stack_require jq
+  stack_repo_root >/dev/null
+  [[ -n "$branch" ]] || stack_fail "stack insert requires --branch BRANCH"
+  if [[ -n "$after_branch" && -n "$after_pr" ]]; then
+    stack_fail "choose exactly one insertion point: --after or --after-pr"
+  fi
+  [[ -n "$after_branch" || -n "$after_pr" ]] \
+    || stack_fail "stack insert requires --after BRANCH or --after-pr N"
+
+  local dirty
+  dirty=$(git status --porcelain 2>/dev/null)
+  [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
+
+  local base prefix local_parent_map parent_map prs rerun_cmd
+  base=$(stack_upstream_ref "$base_override")
+  prefix=$(stack_prefix "$prefix_override")
+  stack_local_ref_exists "$branch" \
+    || stack_fail "branch to insert not found locally: $branch"
+  case "$branch" in
+    "$prefix"*) ;;
+    *) stack_fail "branch to insert must be under stack prefix $prefix: $branch" ;;
+  esac
+
+  local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+  prs=$(stack_fetch_prs_for_scope "$after_pr")
+  parent_map="$local_parent_map"
+  if [[ -n "$after_pr" ]]; then
+    after_branch=$(stack_pr_branch_by_number "$prs" "$after_pr")
+    [[ -n "$after_branch" ]] || stack_fail "open PR not found in stack data: #$after_pr"
+    stack_local_ref_exists "$after_branch" \
+      || stack_fail "PR #$after_pr branch not found locally: $after_branch"
+    parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+    parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$after_pr" "true")
+    stack_warn_topology_mismatches "$parent_map" "$local_parent_map" "$prs" "$base"
+  else
+    stack_local_ref_exists "$after_branch" \
+      || stack_fail "insertion point branch not found locally: $after_branch"
+    stack_parent_map_contains_branch "$after_branch" "$local_parent_map" \
+      || stack_fail "insertion point is not under stack prefix $prefix: $after_branch"
+  fi
+
+  [[ "$branch" != "$after_branch" ]] || stack_fail "--branch and insertion point cannot be the same branch"
+  if git merge-base --is-ancestor "$branch" "$after_branch" 2>/dev/null; then
+    stack_fail "$branch is an ancestor of $after_branch; inserting it there would create an invalid stack order"
+  fi
+
+  local selected_ordered children_blob insert_base insert_commits tracked_branches pre_tips
+  selected_ordered=$(stack_insert_plan_order "$after_branch" "$branch" "$parent_map" "$base")
+  children_blob=$(stack_children_blob_from_ordered "$selected_ordered")
+  insert_base=$(stack_parent_from_map "$branch" "$local_parent_map")
+  if [[ -z "$insert_base" ]]; then
+    insert_base=$(git merge-base "$after_branch" "$branch" 2>/dev/null || true)
+  fi
+  [[ -n "$insert_base" ]] || stack_fail "could not determine base for inserted branch $branch"
+  git rev-parse --verify "$insert_base" >/dev/null 2>&1 \
+    || stack_fail "inserted branch base not found: $insert_base"
+  insert_commits=$(git rev-list --count "$insert_base..$branch" 2>/dev/null || echo 0)
+  (( insert_commits > 0 )) || stack_fail "$branch has no commits to insert relative to $insert_base"
+
+  local after_arg=""
+  [[ -z "$after_pr" ]] && after_arg="$after_branch"
+  rerun_cmd=$(stack_insert_rerun_command "$base_override" "$prefix_override" "$branch" "$after_arg" "$after_pr" "$keep_scratch")
+  stack_debug "insert base=$base prefix=$prefix branch=$branch after=$after_branch after_pr=${after_pr:-none} dry_run=$dry_run keep_scratch=$keep_scratch"
+
+  echo "Insert plan:"
+  echo "  Insert branch: $branch"
+  echo "  After branch:  $after_branch"
+  if [[ -n "$after_pr" ]]; then
+    echo "  Scope:         GitHub PR DAG rooted at #$after_pr (baseRefName children)"
+    echo "  PR bases:      not changed by this command"
+  else
+    echo "  Scope:         local descendants under $prefix"
+  fi
+
+  tracked_branches=$(
+    printf '%s\n' "$branch"
+    stack_branch_list_from_ordered "$selected_ordered" | awk -v after="$after_branch" '$0 != after'
+  )
+  tracked_branches=$(awk 'NF && !seen[$0]++' <<<"$tracked_branches")
+  pre_tips=$(while read -r b; do
+    [[ -z "$b" ]] && continue
+    printf '%s\t%s\n' "$b" "$(git rev-parse --verify "$b" 2>/dev/null || echo '')"
+  done <<<"$tracked_branches")
+
+  echo
+  echo "Planned rebases:"
+  if [[ "$dry_run" == "true" ]]; then
+    stack_insert_run_preflight "$branch" "$after_branch" "$insert_base" "$children_blob" "true"
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Run the preflight and apply refs: $rerun_cmd"
+    return 0
+  fi
+
+  local repo_root current_branch scratch_root scratch_repo script_path
+  repo_root=$(stack_repo_root)
+  current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  scratch_root=$(mktemp -d "${TMPDIR:-/tmp}/stack-insert.XXXXXX")
+  scratch_repo="$scratch_root/repo"
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+  STACK_INSERT_CLEANUP_ROOT="$scratch_root"
+  STACK_INSERT_KEEP_SCRATCH="$keep_scratch"
+  trap 'if [[ "${STACK_INSERT_KEEP_SCRATCH:-}" != "true" && -n "${STACK_INSERT_CLEANUP_ROOT:-}" ]]; then rm -rf "$STACK_INSERT_CLEANUP_ROOT"; fi' EXIT
+
+  echo "Creating scratch clone: $scratch_repo"
+  stack_sync_create_scratch "$repo_root" "$scratch_repo" "$current_branch" "$local_parent_map"
+
+  local preflight_log="$scratch_root/preflight.log"
+  echo "Preflighting insert in scratch..."
+  set +e
+  (
+    cd "$scratch_repo"
+    stack_insert_run_preflight "$branch" "$after_branch" "$insert_base" "$children_blob" "false"
+  ) >"$preflight_log" 2>&1
+  local preflight_rc=$?
+  set -e
+  sed 's/^/  /' "$preflight_log"
+
+  if (( preflight_rc != 0 )); then
+    stack_insert_report_failure "$scratch_repo" "$preflight_rc" "$keep_scratch" "$script_path" "$branch" "$after_arg" "$after_pr" "$base" "$prefix"
+    return 1
+  fi
+
+  local scratch_tips moved_tips
+  scratch_tips=$(while read -r b; do
+    [[ -z "$b" ]] && continue
+    printf '%s\t%s\n' "$b" "$(git -C "$scratch_repo" rev-parse --verify "$b" 2>/dev/null || echo '')"
+  done <<<"$tracked_branches")
+  moved_tips=$(stack_sync_moved_tips "$pre_tips" "$scratch_tips")
+
+  if [[ -n "$moved_tips" ]]; then
+    stack_sync_apply_refs "$scratch_repo" "$moved_tips"
+  fi
+
+  local leases moved=0 moved_branches="" stale_branches="" b old_sha new_sha lease
+  leases=$(stack_fetch_leases)
+  echo
+  while IFS=$'\t' read -r b old_sha new_sha; do
+    [[ -z "$b" ]] && continue
+    [[ "$old_sha" == "$new_sha" ]] && continue
+    moved=$((moved + 1))
+    moved_branches="${moved_branches}${moved_branches:+, }$b"
+    lease=$(jq -c --arg k "$b" '.[$k] // null' <<<"$leases")
+    if [[ "$lease" != "null" ]]; then
+      stack_warn "lease stale: $b tip moved ($old_sha -> $new_sha). Re-run \`pg\` to refresh."
+      stale_branches="${stale_branches}${stale_branches:+, }$b"
+    else
+      echo "  tip moved: $b ($old_sha -> $new_sha)"
+    fi
+  done <<<"$moved_tips"
+
+  if (( moved == 0 )); then
+    echo "No branches moved."
+    stack_print_next_step \
+      "Refs unchanged." \
+      "Inspect state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")"
+  else
+    local lease_line
+    if [[ -n "$stale_branches" ]]; then
+      lease_line="Stale push-gate leases: $stale_branches"
+    else
+      lease_line="No existing push-gate leases became stale."
+    fi
+    stack_print_next_step \
+      "Inserted $branch after $after_branch." \
+      "Restacked branches: $moved_branches" \
+      "$lease_line" \
+      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
+      "When ready, dry-run push: $(stack_push_rerun_command "$base_override" "$prefix_override" "${after_pr:-}" "${after_pr:+true}") --dry-run"
+  fi
+
+  if [[ "$keep_scratch" == "true" ]]; then
+    stack_insert_print_debug "$scratch_repo" "$script_path" "$branch" "$after_arg" "$after_pr" "$base" "$prefix"
+  fi
 }
 
 # stack squash — collapse the current branch's incremental commits into one
@@ -1736,6 +2084,14 @@ Commands:
     clone, then atomically apply branch ref updates if preflight succeeds.
     Combines a PR-state pass with git-branchless patch-id detection.
 
+  insert --branch BRANCH (--after BRANCH|--after-pr N)
+         [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+    Insert a local branch after an existing stack branch. The inserted branch
+    is rebased onto the insertion point, selected descendants are rebased onto
+    the inserted branch in a scratch clone, and moved refs are applied
+    atomically. --after uses local ancestry; --after-pr scopes descendants by
+    GitHub PR baseRefName.
+
   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]
          [--pr N] [--base REF] [--prefix PREFIX]
     Squash the current branch's incremental commits relative to its stack
@@ -1776,6 +2132,7 @@ stack_main() {
     status)        stack_cmd_status "$@" ;;
     checkout)      stack_cmd_checkout "$@" ;;
     sync)          stack_cmd_sync "$@" ;;
+    insert)        stack_cmd_insert "$@" ;;
     squash)        stack_cmd_squash "$@" ;;
     push)          stack_cmd_push "$@" ;;
     __sync-preflight)
@@ -1791,6 +2148,40 @@ stack_main() {
       stack_sync_run_preflight \
         "$(stack_upstream_ref "$base_override")" \
         "$(stack_prefix "$prefix_override")"
+      ;;
+    __insert-preflight)
+      stack_require jq
+      local branch="" after_branch="" after_pr="" base_override="" prefix_override=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --branch) branch="${2:-}"; shift 2 ;;
+          --after) after_branch="${2:-}"; shift 2 ;;
+          --after-pr) after_pr="${2:-}"; shift 2 ;;
+          --base) base_override="${2:-}"; shift 2 ;;
+          --prefix) prefix_override="${2:-}"; shift 2 ;;
+          *) stack_fail "unknown __insert-preflight flag: $1" ;;
+        esac
+      done
+      [[ -n "$branch" ]] || stack_fail "__insert-preflight requires --branch"
+      [[ -n "$after_branch" || -n "$after_pr" ]] || stack_fail "__insert-preflight requires --after or --after-pr"
+      local base prefix local_parent_map parent_map prs selected_ordered children_blob insert_base
+      base=$(stack_upstream_ref "$base_override")
+      prefix=$(stack_prefix "$prefix_override")
+      local_parent_map=$(stack_build_parent_map "$prefix" "$base")
+      prs=$(stack_fetch_prs_for_scope "$after_pr")
+      parent_map="$local_parent_map"
+      if [[ -n "$after_pr" ]]; then
+        after_branch=$(stack_pr_branch_by_number "$prs" "$after_pr")
+        [[ -n "$after_branch" ]] || stack_fail "open PR not found in stack data: #$after_pr"
+        parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
+        parent_map=$(stack_filter_parent_map_for_pr "$parent_map" "$prs" "$after_pr" "true")
+      fi
+      selected_ordered=$(stack_insert_plan_order "$after_branch" "$branch" "$parent_map" "$base")
+      children_blob=$(stack_children_blob_from_ordered "$selected_ordered")
+      insert_base=$(stack_parent_from_map "$branch" "$local_parent_map")
+      [[ -n "$insert_base" ]] || insert_base=$(git merge-base "$after_branch" "$branch" 2>/dev/null || true)
+      [[ -n "$insert_base" ]] || stack_fail "could not determine base for inserted branch $branch"
+      stack_insert_run_preflight "$branch" "$after_branch" "$insert_base" "$children_blob" "false"
       ;;
     -h|--help|help) stack_usage ;;
     *) stack_fail "unknown command: $cmd (see \`stack --help\`)" ;;

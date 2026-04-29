@@ -234,7 +234,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..24"
+echo "1..28"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -761,6 +761,176 @@ expect_contains "$missing_branch_out" "PR #299 branch not found locally: mho/mis
 REPO="$OLD_REPO"
 echo "ok 23 - checkout --pr reports missing local branches"
 
+# ------------------------------------------------------------------------
+# 24: insert --dry-run prints the planned inserted-branch and descendant
+#     rebases without moving refs.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout mho/feature-base >/dev/null 2>&1
+  git checkout -b mho/inserted --no-track >/dev/null 2>&1
+  printf 'inserted\n' >inserted.txt
+  git add inserted.txt
+  git commit -m "inserted change" >/dev/null
+)
+insert_before=$(git -C "$REPO" rev-parse mho/inserted)
+api_before=$(git -C "$REPO" rev-parse mho/feature-api)
+ui_before=$(git -C "$REPO" rev-parse mho/feature-ui)
+
+insert_dry=$(run_stack insert --dry-run --branch mho/inserted --after mho/feature-base 2>&1)
+expect_contains "$insert_dry" "Insert plan:"
+expect_contains "$insert_dry" "Scope:         local descendants under mho/"
+expect_contains "$insert_dry" "(dry-run) git rebase --onto mho/feature-base"
+expect_contains "$insert_dry" "(dry-run) git rebase --onto mho/inserted"
+expect_contains "$insert_dry" "Run the preflight and apply refs: stack insert --branch mho/inserted --after mho/feature-base"
+[[ "$(git -C "$REPO" rev-parse mho/inserted)" == "$insert_before" ]] || fail "dry-run moved inserted branch"
+[[ "$(git -C "$REPO" rev-parse mho/feature-api)" == "$api_before" ]] || fail "dry-run moved feature-api"
+[[ "$(git -C "$REPO" rev-parse mho/feature-ui)" == "$ui_before" ]] || fail "dry-run moved feature-ui"
+REPO="$OLD_REPO"
+echo "ok 24 - insert --dry-run prints planned rebases without moving refs"
+
+# ------------------------------------------------------------------------
+# 25: insert applies a scratch-preflighted local restack atomically and
+#     reports stale leases for moved branches.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+OLD_LEASES_JSON="$STACK_TEST_LEASES_JSON"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/inserted --no-track >/dev/null 2>&1
+  printf 'inserted\n' >inserted.txt
+  git add inserted.txt
+  git commit -m "inserted change" >/dev/null
+)
+insert_before=$(git -C "$REPO" rev-parse mho/inserted)
+api_before=$(git -C "$REPO" rev-parse mho/feature-api)
+ui_before=$(git -C "$REPO" rev-parse mho/feature-ui)
+STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$api_before" '[
+  {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":$anchor,"pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
+]')
+
+insert_live=$(run_stack insert --branch mho/inserted --after mho/feature-base 2>&1)
+expect_contains "$insert_live" "Preflighting insert in scratch"
+expect_contains "$insert_live" "Applying"
+expect_contains "$insert_live" "Inserted mho/inserted after mho/feature-base"
+expect_contains "$insert_live" "Stale push-gate leases: mho/feature-api"
+[[ "$(git -C "$REPO" rev-parse mho/inserted)" != "$insert_before" ]] || fail "inserted branch did not move onto feature-base"
+[[ "$(git -C "$REPO" rev-parse mho/feature-api)" != "$api_before" ]] || fail "feature-api did not move after insert"
+[[ "$(git -C "$REPO" rev-parse mho/feature-ui)" != "$ui_before" ]] || fail "feature-ui did not move after insert"
+git -C "$REPO" merge-base --is-ancestor mho/feature-base mho/inserted \
+  || fail "inserted branch is not descendant of feature-base"
+git -C "$REPO" merge-base --is-ancestor mho/inserted mho/feature-api \
+  || fail "feature-api is not descendant of inserted branch"
+git -C "$REPO" merge-base --is-ancestor mho/feature-api mho/feature-ui \
+  || fail "feature-ui is not descendant of feature-api after insert"
+STACK_TEST_LEASES_JSON="$OLD_LEASES_JSON"
+REPO="$OLD_REPO"
+echo "ok 25 - insert preflights and applies local restack with stale lease reporting"
+
+# ------------------------------------------------------------------------
+# 26: insert conflict preflight leaves real refs unchanged and auto-cleans
+#     scratch on failure.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/conflict-after --no-track >/dev/null 2>&1
+  printf 'after\n' >after.txt
+  git add after.txt
+  git commit -m "conflict after" >/dev/null
+
+  git checkout -b mho/conflict-child --no-track >/dev/null 2>&1
+  printf 'child\n' >conflict.txt
+  git add conflict.txt
+  git commit -m "conflict child" >/dev/null
+
+  git checkout mho/conflict-after >/dev/null 2>&1
+  git checkout -b mho/conflict-insert --no-track >/dev/null 2>&1
+  printf 'insert\n' >conflict.txt
+  git add conflict.txt
+  git commit -m "conflict insert" >/dev/null
+)
+insert_before=$(git -C "$REPO" rev-parse mho/conflict-insert)
+child_before=$(git -C "$REPO" rev-parse mho/conflict-child)
+
+set +e
+conflict_insert=$(run_stack insert --prefix mho/conflict- --branch mho/conflict-insert --after mho/conflict-after 2>&1)
+conflict_insert_rc=$?
+set -e
+[[ "$conflict_insert_rc" != "0" ]] || fail "expected insert preflight conflict"
+expect_contains "$conflict_insert" "scratch insert preflight failed"
+expect_contains "$conflict_insert" "Real branch refs were not changed"
+[[ "$(git -C "$REPO" rev-parse mho/conflict-insert)" == "$insert_before" ]] || fail "conflict insert moved inserted branch"
+[[ "$(git -C "$REPO" rev-parse mho/conflict-child)" == "$child_before" ]] || fail "conflict insert moved child branch"
+scratch_left=$(find "$TEST_TMP" -maxdepth 1 -type d -name 'stack-insert.*' | wc -l | tr -d ' ')
+[[ "$scratch_left" == "0" ]] || fail "insert scratch dirs should be removed after failed preflight: $scratch_left"
+REPO="$OLD_REPO"
+echo "ok 26 - insert preflight conflict leaves refs unchanged and cleans scratch"
+
+# ------------------------------------------------------------------------
+# 27: insert --after-pr scopes descendants through GitHub PR baseRefName,
+#     excluding no-PR local children.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/pr266 --no-track >/dev/null 2>&1
+  printf 'pr266\n' >pr266.txt
+  git add pr266.txt
+  git commit -m "pr 266 change" >/dev/null
+
+  git checkout -b mho/pr267 --no-track >/dev/null 2>&1
+  printf 'pr267\n' >pr267.txt
+  git add pr267.txt
+  git commit -m "pr 267 child change" >/dev/null
+
+  git checkout mho/pr266 >/dev/null 2>&1
+  git checkout -b mho/no-pr-child --no-track >/dev/null 2>&1
+  printf 'no pr child\n' >no-pr-child.txt
+  git add no-pr-child.txt
+  git commit -m "no-pr child change" >/dev/null
+
+  git checkout mho/pr266 >/dev/null 2>&1
+  git checkout -b mho/pr-insert --no-track >/dev/null 2>&1
+  printf 'pr insert\n' >pr-insert.txt
+  git add pr-insert.txt
+  git commit -m "pr insert change" >/dev/null
+)
+export STACK_TEST_PR_JSON
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":266,"headRefName":"mho/pr266","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/266","title":"pr 266"},
+  {"number":267,"headRefName":"mho/pr267","baseRefName":"mho/pr266","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/267","title":"pr 267"}
+]')
+pr267_before=$(git -C "$REPO" rev-parse mho/pr267)
+no_pr_before=$(git -C "$REPO" rev-parse mho/no-pr-child)
+
+pr_insert=$(run_stack insert --branch mho/pr-insert --after-pr 266 2>&1)
+expect_contains "$pr_insert" "Scope:         GitHub PR DAG rooted at #266"
+expect_contains "$pr_insert" "PR bases:      not changed by this command"
+expect_contains "$pr_insert" "Inserted mho/pr-insert after mho/pr266"
+[[ "$(git -C "$REPO" rev-parse mho/pr267)" != "$pr267_before" ]] || fail "PR child did not move after PR-scoped insert"
+[[ "$(git -C "$REPO" rev-parse mho/no-pr-child)" == "$no_pr_before" ]] || fail "no-PR child should not move in PR-scoped insert"
+git -C "$REPO" merge-base --is-ancestor mho/pr-insert mho/pr267 \
+  || fail "PR child is not descendant of inserted branch"
+REPO="$OLD_REPO"
+echo "ok 27 - insert --after-pr restacks PR children but excludes no-PR local children"
+
 # Restore default fake PR data for the final help/doc test.
 export STACK_TEST_PR_JSON
 STACK_TEST_PR_JSON=$(jq -c -n '[
@@ -769,13 +939,14 @@ STACK_TEST_PR_JSON=$(jq -c -n '[
 ]')
 
 # ------------------------------------------------------------------------
-# 24: help and skill docs match the supported command surface.
+# 28: help and skill docs match the supported command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
 expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "checkout --pr N [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
+expect_contains "$help_out" "insert --branch BRANCH (--after BRANCH|--after-pr N)"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "STACK_DEBUG=1"
@@ -785,12 +956,14 @@ skill_doc=$(cat "$ROOT/llm/skills/stack/SKILL.md")
 expect_contains "$skill_doc" "stack squash [--dry-run]"
 expect_contains "$skill_doc" "--onto-pr-base"
 expect_contains "$skill_doc" "--keep-scratch"
+expect_contains "$skill_doc" "stack insert --branch"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_contains "$skill_doc" "Next step:"
 expect_contains "$skill_doc" "stack checkout --pr <N>"
 stack_doc=$(cat "$ROOT/llm/stack/README.md")
 expect_contains "$stack_doc" "GitHub PR base wins"
+expect_contains "$stack_doc" "stack insert --branch"
 expect_contains "$stack_doc" "Next step:"
 expect_contains "$stack_doc" "stack checkout --pr <N>"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 24 - help and stack skill docs match supported commands"
+echo "ok 28 - help and stack skill docs match supported commands"

@@ -7,11 +7,12 @@ description: Local-first stacked-PR CLI. Use `stack status` instead of hand-roll
 
 Local-first stacked-PR tooling. Merges `git`, `gh`, CI, and `pg` into one view
 (`stack status`), preflights cascade-rebases in a scratch clone after upstream
-advances or a parent squash-merges (`stack sync`), squashes noisy incremental
-branch commits (`stack squash`), and orchestrates the per-branch `pg prepare`
-/ `pg push` loop across the whole stack (`stack push`). Human-readable output
-is guided: every command ends with a `Next step:` block that states the safe
-command or human approval action to run next.
+advances or a parent squash-merges (`stack sync`), inserts a new branch into an
+existing stack with descendant restacks (`stack insert`), squashes noisy
+incremental branch commits (`stack squash`), and orchestrates the per-branch
+`pg prepare` / `pg push` loop across the whole stack (`stack push`).
+Human-readable output is guided: every command ends with a `Next step:` block
+that states the safe command or human approval action to run next.
 
 `stack push` never bypasses `pg` — it stops and waits for the human to
 approve each lease, then resumes on re-invocation.
@@ -35,6 +36,12 @@ approve each lease, then resumes on re-invocation.
   `git-branchless sync --pull`), and only then imports the resulting branch
   tips back into the real repo with old-tip verification.
 - User says "fetch and rebase my stack" / "catch up on main" — `stack sync`.
+- User needs to insert a new branch between an existing PR and its children —
+  run `stack insert --branch <new-branch> --after-pr <N>`. It uses GitHub PR
+  `baseRefName` to choose child PRs, preflights the inserted branch and child
+  rebases in scratch, then imports moved refs atomically.
+- User needs to insert a local branch into a purely local stack — run
+  `stack insert --branch <new-branch> --after <branch>`.
 - User wants to clean up the current PR before pushing — run `stack squash`.
   It squashes the current branch's commits relative to its stack parent, then
   restacks selected descendants. When local ancestry is known wrong, prefer
@@ -61,6 +68,7 @@ approve each lease, then resumes on re-invocation.
 stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 ```
@@ -86,6 +94,17 @@ Set `STACK_DEBUG=1` when alpha-testing or investigating surprising behavior.
 Debug output goes to stderr and includes repo roots, branch counts, scratch
 paths, lease-match counts, planned ref updates on transaction failures, and
 push-gate decision breadcrumbs.
+
+`stack insert` places an existing local branch after a stack branch and restacks
+selected descendants onto it. Use `--after-pr N` when the insertion point is an
+open PR; child selection follows GitHub PR `baseRefName` and excludes no-PR
+local children. Use `--after BRANCH` for local ancestry. Live runs create a
+scratch clone, rebase the inserted branch onto the insertion point, rebase
+descendants onto the inserted branch, and import moved refs with atomic
+old-tip verification. `--dry-run` prints the planned rebases without creating a
+scratch clone or moving refs. Any moved branch with an existing push-gate lease
+is reported as stale. The command does not change GitHub PR bases; retarget or
+create PRs separately when the inserted branch becomes the new review base.
 
 `stack squash` acts on the currently checked-out branch. It determines that
 branch's stack parent, soft-resets the branch to that parent, commits one
@@ -150,9 +169,9 @@ The canonical long-form guide is `llm/stack/README.md`.
    first-push for a tip still requires the human to run `pg`. Never set
    `PG_SKIP_EDIT`, `PG_ALLOW_DESCENDANT`, `PG_SCOPE_OVERRIDE`, or pipe
    `yes` into the approval prompt.
-2. **Guard working tree.** `stack sync`, `stack squash`, and `stack push` hard-fail on
-   a dirty tree. Don't `git stash` for them — surface the message and let
-   them choose.
+2. **Guard working tree.** `stack sync`, `stack insert`, `stack squash`, and
+   `stack push` hard-fail on a dirty tree. Don't `git stash` for them —
+   surface the message and let them choose.
 3. **Conflict stops are hard stops.** If scratch preflight or
    `git-branchless sync` exits non-zero, surface the scratch path/error and
    stop. Do not try to auto-resolve.
