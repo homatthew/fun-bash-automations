@@ -915,6 +915,7 @@ result = {
     "source_ref": None,
     "target_branch": None,
     "force_with_lease": False,
+    "is_delete": False,
 }
 try:
     tokens = shlex.split(cmd)
@@ -947,6 +948,8 @@ for i, token in enumerate(args):
     if token.startswith("-"):
         if token == "--force-with-lease":
             result["force_with_lease"] = True
+        if token in {"--delete", "-d"}:
+            result["is_delete"] = True
         if token in {"--repo"}:
             skip_next = True
         continue
@@ -966,6 +969,9 @@ if refspecs:
       target_branch = refspec
     if source_ref == "":
       source_ref = None
+      # `:branch` colon-syntax means delete; mark for downstream skips.
+      if target_branch:
+        result["is_delete"] = True
     if target_branch == "HEAD" or target_branch == "":
       target_branch = None
     if source_ref and source_ref.startswith("refs/heads/"):
@@ -1300,6 +1306,8 @@ pg_validate_push_guard() {
   source_ref=$(echo "$parsed" | jq -r '.source_ref // empty')
   target_branch=$(echo "$parsed" | jq -r '.target_branch // empty')
   force_with_lease=$(echo "$parsed" | jq -r '.force_with_lease')
+  local is_delete
+  is_delete=$(echo "$parsed" | jq -r '.is_delete')
   [[ -n "$remote" ]] || remote=$(pg_default_remote 2>/dev/null || true)
   if [[ -n "$target_branch" ]]; then
     lease_branch="$target_branch"
@@ -1342,6 +1350,12 @@ pg_validate_push_guard() {
   fi
 
   approved_anchor=$(echo "$lease_json" | jq -r '.approved_anchor')
+  # Deletion pushes (--delete or :branch) don't push commits, so skip the
+  # ancestor + scope checks below — there's no diff to validate.
+  if [[ "$is_delete" == "true" ]]; then
+    jq -n '{allowed:true, verdict:"delete"}'
+    return 0
+  fi
   if ! git merge-base --is-ancestor "$approved_anchor" "$current_head" 2>/dev/null; then
     jq -n --arg reason "Blocked: branch history was rewritten after lease anchor $approved_anchor. Create a new lease before pushing." '{allowed:false, reason:$reason}'
     return 0
