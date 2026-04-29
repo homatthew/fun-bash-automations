@@ -223,6 +223,7 @@ if [ -n "$CONTEXT_FILE" ] && [ -n "$context" ]; then
 fi
 
 nlog "final summary update: context=${display_subtitle:-<none>} summary=$summary"
+state_is_current || exit 0
 resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
   --ignore-dnd --actions Show --timeout 0 --sound Pop \
   ${GROUP:+--group "$GROUP"} \

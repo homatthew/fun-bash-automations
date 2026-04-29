@@ -303,6 +303,50 @@ stop_message_is_unhelpful() {
   return 1
 }
 
+stop_message_needs_input() {
+  local value
+  value=$(normalize_message "$1" 500)
+  [ -n "$value" ] || return 1
+
+  # Codex does not currently have a Claude-style Notification hook. Treat a
+  # Stop as input-needed only when the final text asks for a concrete action.
+  # A bare trailing question mark is too broad: summaries often end with
+  # rhetorical or diagnostic questions that do not actually block on a reply.
+  printf '%s' "$value" | grep -Eiq \
+    '(need|needs|waiting for|requires?) (your )?(input|answer|confirmation|permission|approval|choice|decision)|please (confirm|choose|provide|send|share|clarify)|which (option|approach|one)|what (do you want|would you like|should i)|should i|would you like me to|do you want( me)? to|do you prefer|can you (confirm|provide|send|share|clarify)|are you sure|is that ok|ok to proceed|answer these|respond with|reply with|tell me when|let me know' \
+    && return 0
+  return 1
+}
+
+input_request_kind() {
+  local value
+  value=$(normalize_message "$1" 500 | tr '[:upper:]' '[:lower:]')
+  if printf '%s' "$value" | grep -Eiq 'permission|approval|approve|pg push|push --assert-flow|push-gate|run `?pg`?'; then
+    printf 'Permission'
+  elif printf '%s' "$value" | grep -Eiq 'choose|choice|which (option|approach|one|direction)|two possible|options?:'; then
+    printf 'Choice needed'
+  elif printf '%s' "$value" | grep -Eiq 'confirm|confirmation|do you want|should i|proceed|run that now|is that ok'; then
+    printf 'Confirm'
+  elif printf '%s' "$value" | grep -Eiq 'clarify|clarification|what do you mean|more context|not sure what'; then
+    printf 'Clarify'
+  elif printf '%s' "$value" | grep -Eiq 'provide|send|share|missing|need .* (info|information|details|file|path|url|name)'; then
+    printf 'Missing info'
+  elif printf '%s' "$value" | grep -Eiq 'review|check|look over|inspect'; then
+    printf 'Review needed'
+  else
+    printf 'Input needed'
+  fi
+}
+
+input_subtitle() {
+  local kind="$1" context="$2"
+  if [ -n "$context" ] && ! display_values_match "$kind" "$context"; then
+    printf '%s · %s' "$kind" "$context"
+  else
+    printf '%s' "$kind"
+  fi
+}
+
 display_values_match() {
   local left right
   left=$(normalize_message "$1" 120 | tr '[:upper:]' '[:lower:]')
@@ -310,15 +354,20 @@ display_values_match() {
   [ -n "$left" ] && [ "$left" = "$right" ]
 }
 
+branch_is_display_useful() {
+  local branch="$1"
+  [ -n "$branch" ] || return 1
+  ! printf '%s' "$branch" | grep -Eq '^(main|master|develop|dev|mh-netflix)$'
+}
+
 dedupe_notification_message() {
-  local event="$1" subtitle="$2" message="$3" subtitle_tail
+  local state="$1" subtitle="$2" message="$3" subtitle_tail
   subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
   if display_values_match "$message" "$subtitle" || display_values_match "$message" "$subtitle_tail"; then
-    case "$event" in
-      UserPromptSubmit) printf '%s' "$message" ;;
-      Stop)             printf '%s' "$message" ;;
-      Notification)     printf '%s' "$INPUT_STATUS" ;;
-      *)                printf '%s' "$message" ;;
+    case "$state" in
+      running|done|UserPromptSubmit|Stop) printf '%s' "$message" ;;
+      input|Notification)                 printf '%s' "$INPUT_STATUS" ;;
+      *)                                  printf '%s' "$message" ;;
     esac
     return
   fi
@@ -327,7 +376,7 @@ dedupe_notification_message() {
 
 strip_status_prefix() {
   normalize_message "$1" 140 \
-    | sed -E 's/^(⏳|✅|❓)[[:space:]]+//; s/^[Ii]n progress:[[:space:]]+//; s/^[Ff]inished:[[:space:]]+//'
+    | sed -E 's/^(⏳|🏁|✅|❓)[[:space:]]+//; s/^[Ii]n progress:[[:space:]]+//; s/^[Ff]inished:[[:space:]]+//'
 }
 
 dedupe_notification_subtitle() {
@@ -335,7 +384,7 @@ dedupe_notification_subtitle() {
   subtitle_tail=$(printf '%s' "$subtitle" | sed -E 's/^.* · //')
   message_text="$(strip_status_prefix "$message")"
   if display_values_match "$message_text" "$subtitle_tail"; then
-    if [ -n "$branch" ]; then
+    if branch_is_display_useful "$branch"; then
       printf '%s' "$branch"
     else
       printf ''
@@ -463,6 +512,46 @@ dispatch_final_summary() {
   nohup /bin/bash "$summarizer" "$spec" >/dev/null 2>&1 &
 }
 
+dispatch_input_summary() {
+  local source_text="$1" task_summary="$2" title="$3" subtitle="$4" group="$5" sender="$6" open_url="$7" cwd="$8" state_file="$9" state_id="${10}" summary_file="${11:-}" context_file="${12:-}" repo="${13:-}" branch="${14:-}" pr_context="${15:-}" recent_commits="${16:-}"
+  local summarizer spec label
+  [ -n "$source_text" ] || return 0
+  command -v codex >/dev/null 2>&1 || return 0
+  summarizer="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-input-summary.sh"
+  if [ ! -x "$summarizer" ]; then
+    nlog "input summarizer missing: $summarizer"
+    return 0
+  fi
+  spec=$(mktemp -t fba-notify-input-summary 2>/dev/null) || return 0
+  jq -n \
+    --arg source_text "$source_text" \
+    --arg task_summary "$task_summary" \
+    --arg title "$title" \
+    --arg subtitle "$subtitle" \
+    --arg group "$group" \
+    --arg sender "$sender" \
+    --arg open_url "$open_url" \
+    --arg cwd "$cwd" \
+    --arg log "$NOTIFY_LOG" \
+    --arg state_file "$state_file" \
+    --arg state_id "$state_id" \
+    --arg summary_file "$summary_file" \
+    --arg context_file "$context_file" \
+    --arg repo "$repo" \
+    --arg branch "$branch" \
+    --arg pr_context "$pr_context" \
+    --arg recent_commits "$recent_commits" \
+    '{source_text:$source_text, task_summary:$task_summary, title:$title, subtitle:$subtitle, group:$group, sender:$sender, open_url:$open_url, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, summary_file:$summary_file, context_file:$context_file, repo:$repo, branch:$branch, pr_context:$pr_context, recent_commits:$recent_commits}' \
+    > "$spec"
+  label="com.matthewho.fba.notify.input.${RUNTIME:-agent}.$$.$RANDOM"
+  if launchctl submit -l "$label" -o /tmp/fba-notify-input.out -e /tmp/fba-notify-input.err -- /bin/bash "$summarizer" "$spec" >/dev/null 2>&1; then
+    nlog "input summarizer dispatched: label=$label"
+    return 0
+  fi
+  nlog "launchctl input summarizer failed; falling back to nohup"
+  nohup /bin/bash "$summarizer" "$spec" >/dev/null 2>&1 &
+}
+
 pick_backend() {
   [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && { printf 'suppressed'; return; }
   if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
@@ -548,7 +637,7 @@ backend_vscode() {
   [ -n "$sound" ] && (printf '\a' > /dev/tty) 2>/dev/null || true
   local pids event_lc
   pids=$(ancestor_pids)
-  event_lc=$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')
+  event_lc="${DISPLAY_STATE:-$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')}"
   nlog "vscode: event=$event_lc pids=$pids"
   local _label
   _label=$(printf '%s' "$subtitle" | cut -c1-80)
@@ -631,9 +720,13 @@ TASK_SUMMARY="$(read_notify_summary "$SUMMARY_FILE")"
 TASK_CONTEXT="$(read_notify_context "$CONTEXT_FILE")"
 DISPLAY_TITLE="$REPO"
 FINAL_SUMMARY_SOURCE=""
+DISPLAY_STATE=""
+INPUT_KIND=""
+INPUT_SUMMARY_SOURCE=""
 
 case "$EVENT" in
   UserPromptSubmit)
+    DISPLAY_STATE="running"
     DISPLAY_TITLE="$RUNNING_ICON $REPO"
     TASK_SUMMARY="$(prompt_task_summary "$PROMPT")"
     TASK_CONTEXT="$(prompt_task_context "$PROMPT")"
@@ -649,44 +742,55 @@ case "$EVENT" in
     fi
     ;;
   Stop)
-    DISPLAY_TITLE="$DONE_ICON $REPO"
     RAW_MESSAGE="${LAST_ASSISTANT:-}"
     fallback_title=""
     [ -z "$RAW_MESSAGE" ] && RAW_MESSAGE="$(extract_transcript_message)"
     FINAL_SUMMARY_SOURCE="$RAW_MESSAGE"
-    if stop_message_is_unhelpful "$RAW_MESSAGE"; then
-      if [ -n "$TASK_SUMMARY" ]; then
-        RAW_MESSAGE="$TASK_SUMMARY"
-        fallback_title="$TASK_SUMMARY"
-      else
-        RAW_MESSAGE="Current request completed"
-        fallback_title="Current request completed"
-      fi
-    fi
-    MESSAGE="$(extract_display_message "$RAW_MESSAGE")"
-    title_source="$(extract_display_title "$RAW_MESSAGE")"
-    [ -n "$fallback_title" ] && title_source="$fallback_title"
-    if stop_message_is_unhelpful "$title_source"; then
-      if [ -n "$TASK_SUMMARY" ]; then
-        title_source="$TASK_SUMMARY"
-      else
-        title_source="Current request completed"
-      fi
-    fi
-    llm_title=$(printf '%s\n' "$title_source" \
-      | sed -E 's/^[[:space:]]*[•\-\*]?[[:space:]]*//' \
-      | awk 'NF{print; exit}' \
-      | cut -c1-60)
-    [ -z "$llm_title" ] && llm_title="Current request completed"
-    if [ -n "$TASK_CONTEXT" ]; then
-      SUBTITLE="$TASK_CONTEXT"
-    elif [ -n "${BRANCH:-}" ]; then
-      SUBTITLE="$BRANCH"
+    if [ "$RUNTIME" = "codex" ] && stop_message_needs_input "$RAW_MESSAGE"; then
+      DISPLAY_STATE="input"
+      DISPLAY_TITLE="$INPUT_ICON $REPO"
+      MESSAGE="$(extract_display_message "$RAW_MESSAGE")"
+      INPUT_KIND="$(input_request_kind "$RAW_MESSAGE")"
+      _input_context="${TASK_CONTEXT:-$(prompt_task_context "$RAW_MESSAGE")}"
+      SUBTITLE="$(input_subtitle "$INPUT_KIND" "$_input_context")"
     else
-      SUBTITLE="Finished"
+      DISPLAY_STATE="done"
+      DISPLAY_TITLE="$DONE_ICON $REPO"
+      if stop_message_is_unhelpful "$RAW_MESSAGE"; then
+        if [ -n "$TASK_SUMMARY" ]; then
+          RAW_MESSAGE="$TASK_SUMMARY"
+          fallback_title="$TASK_SUMMARY"
+        else
+          RAW_MESSAGE="Current request completed"
+          fallback_title="Current request completed"
+        fi
+      fi
+      MESSAGE="$(extract_display_message "$RAW_MESSAGE")"
+      title_source="$(extract_display_title "$RAW_MESSAGE")"
+      [ -n "$fallback_title" ] && title_source="$fallback_title"
+      if stop_message_is_unhelpful "$title_source"; then
+        if [ -n "$TASK_SUMMARY" ]; then
+          title_source="$TASK_SUMMARY"
+        else
+          title_source="Current request completed"
+        fi
+      fi
+      llm_title=$(printf '%s\n' "$title_source" \
+        | sed -E 's/^[[:space:]]*[•\-\*]?[[:space:]]*//' \
+        | awk 'NF{print; exit}' \
+        | cut -c1-60)
+      [ -z "$llm_title" ] && llm_title="Current request completed"
+      if [ -n "$TASK_CONTEXT" ]; then
+        SUBTITLE="$TASK_CONTEXT"
+      elif [ -n "${BRANCH:-}" ]; then
+        SUBTITLE="$BRANCH"
+      else
+        SUBTITLE="Finished"
+      fi
     fi
     ;;
   Notification)
+    DISPLAY_STATE="input"
     DISPLAY_TITLE="$INPUT_ICON $REPO"
     # Claude's payload only carries a generic "needs your attention" string.
     # Pull the last assistant message from the transcript so the banner shows
@@ -697,32 +801,33 @@ case "$EVENT" in
     else
       MESSAGE="${NOTIF_MSG:-Waiting for input}"
     fi
-    _label="${NOTIF_TITLE:-Needs input}"
-    if [ -n "${BRANCH:-}" ]; then
-      SUBTITLE="${BRANCH} · ${_label}"
-    else
-      SUBTITLE="$_label"
-    fi
+    INPUT_KIND="$(input_request_kind "$MESSAGE")"
+    _input_context="${TASK_CONTEXT:-${NOTIF_TITLE:-Needs input}}"
+    SUBTITLE="$(input_subtitle "$INPUT_KIND" "$_input_context")"
     ;;
   *) cleanup_and_exit ;;
 esac
 
 # Notification events render in alert dialogs which can show a paragraph.
 # Running and Stop notifications stay shorter so they scan well as status.
-if [ "$EVENT" = "Notification" ]; then
+if [ "$DISPLAY_STATE" = "input" ]; then
   MESSAGE="$(normalize_message "$MESSAGE" 1000)"
+  INPUT_SUMMARY_SOURCE="$MESSAGE"
 elif [ "$EVENT" = "UserPromptSubmit" ]; then
   MESSAGE="$(normalize_message "$MESSAGE" 200)"
 else
   MESSAGE="$(normalize_message "$MESSAGE" 300)"
 fi
-MESSAGE="$(dedupe_notification_message "$EVENT" "$SUBTITLE" "$MESSAGE")"
+MESSAGE="$(dedupe_notification_message "$DISPLAY_STATE" "$SUBTITLE" "$MESSAGE")"
 SUBTITLE="$(dedupe_notification_subtitle "$SUBTITLE" "$MESSAGE" "${BRANCH:-}")"
 
-case "$EVENT" in
-  UserPromptSubmit) write_notify_state "$STATE_FILE" "$RUN_ID" ;;
-  Stop|Notification) write_notify_state "$STATE_FILE" "final:$RUN_ID" ;;
+case "$DISPLAY_STATE" in
+  running) CURRENT_STATE_ID="$RUN_ID" ;;
+  input)   CURRENT_STATE_ID="input:$RUN_ID" ;;
+  done)    CURRENT_STATE_ID="final:$RUN_ID" ;;
+  *)       CURRENT_STATE_ID="$RUN_ID" ;;
 esac
+write_notify_state "$STATE_FILE" "$CURRENT_STATE_ID"
 
 # Fallback click target for non-VSCode backends: open the main repo in
 # the editor. backend_vscode ignores this — it builds its own URL.
@@ -739,10 +844,10 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   fi
   _dry_action="Show"
   _dry_sound="Pop"
-  [ "$EVENT" = "Notification" ] && _dry_action="Respond"
-  [ "$EVENT" = "UserPromptSubmit" ] && _dry_sound=""
-  printf 'macos backend=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
-    "$_backend" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
+  [ "$DISPLAY_STATE" = "input" ] && _dry_action="Respond"
+  [ "$DISPLAY_STATE" = "running" ] && _dry_sound=""
+  printf 'macos backend=%s state=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
+    "$_backend" "$DISPLAY_STATE" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
   cleanup_and_exit
 fi
 
@@ -750,7 +855,7 @@ _chosen_backend=$(pick_backend)
 _async_open_url="$OPEN_URL"
 if [ "$_chosen_backend" = "vscode" ]; then
   _async_pids=$(ancestor_pids)
-  _async_event=$(printf '%s' "$EVENT" | tr '[:upper:]' '[:lower:]')
+  _async_event="$DISPLAY_STATE"
   _async_label=$(printf '%s' "$SUBTITLE" | cut -c1-80)
   _async_open_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")&pids=$(url_encode_path "$_async_pids")&event=$_async_event&label=$(url_encode_path "$_async_label")"
 fi
@@ -760,21 +865,24 @@ fi
 ALERT_STYLE="alert"
 ACTION_LABEL="Show"
 SOUND="Pop"
-[ "$EVENT" = "UserPromptSubmit" ] && SOUND=""
-[ "$EVENT" = "Notification" ] && ACTION_LABEL="Respond"
+[ "$DISPLAY_STATE" = "running" ] && SOUND=""
+[ "$DISPLAY_STATE" = "input" ] && ACTION_LABEL="Respond"
 STICKY_AFTER_CLICK="0"
-[ "$EVENT" = "UserPromptSubmit" ] && STICKY_AFTER_CLICK="1"
-nlog "event=$EVENT backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
+[ "$DISPLAY_STATE" = "running" ] && STICKY_AFTER_CLICK="1"
+[ "$DISPLAY_STATE" = "input" ] && STICKY_AFTER_CLICK="1"
+nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$RUN_ID" "$STICKY_AFTER_CLICK" ;;
-  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$RUN_ID" "$STICKY_AFTER_CLICK" ;;
+  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
+  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
 
-if [ "$EVENT" = "UserPromptSubmit" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$RUN_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
-elif [ "$EVENT" = "Stop" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "final:$RUN_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+if [ "$DISPLAY_STATE" = "running" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+elif [ "$DISPLAY_STATE" = "done" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+elif [ "$DISPLAY_STATE" = "input" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_input_summary "${INPUT_SUMMARY_SOURCE:-$MESSAGE}" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 fi
 
 cleanup_and_exit

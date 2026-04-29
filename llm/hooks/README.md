@@ -11,6 +11,7 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 | `notify-dispatch.sh` | (helper) | Detached `alerter --json` runner. Owns click handling so hooks return quickly. |
 | `notify-working-summary.sh` | (helper) | Detached Codex summarizer for `UserPromptSubmit`; replaces the initial local context/message with generated text only if the same task is still active. |
 | `notify-final-summary.sh` | (helper) | Detached Codex summarizer for `Stop`; replaces generic or verbose final context/message with generated text only if the same task is still final. |
+| `notify-input-summary.sh` | (helper) | Detached Codex classifier for input-needed notifications; replaces provisional question alerts with generated kind/context/summary only if the same input state is still active. |
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on `pg push` / push-gate lease approval. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
@@ -54,9 +55,30 @@ pick_backend()
 
 ## Event Semantics
 
-`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Display shape starts as an emoji-prefixed repo title (`⏳ repo` while running, `🏁 repo` when done), a short AI-generated context subtitle, and an AI-generated task/result message. Branch, open PR metadata, recent commit subjects, repo, cwd, and prompt are inputs to the context generator; broad branch names like `mh-netflix` should not be shown when PR or commit context is more useful. A detached `notify-working-summary.sh` process asks Codex for both context and a 3-8 word running-task summary, then replaces the same grouped alert. A detached `notify-final-summary.sh` process does the same for `Stop`, so the final notification does not need to say `Finished` when a real result summary can be generated. Both updates are guarded by `/tmp/fba-notify-state-*` markers so late summaries cannot overwrite a newer task state. The latest summary/context are also persisted in `/tmp/fba-notify-summary-*` and `/tmp/fba-notify-context-*`, so `Stop` can reuse them when the runtime sends no useful final assistant text.
+Agent notifications are a state machine, not independent banners:
 
-`Stop` and `Notification` are audible final states. They use the same group so they replace any active `Working` alert rather than stacking another notification.
+| State | Title | Subtitle | Message | Action | Sound | Sticky after click |
+|---|---|---|---|---|---|---|
+| `running` | `⏳ <repo>` | concise task context | concise current work summary | Show | none | yes, while state marker still matches |
+| `input` | `❓ <repo>` | `<input kind> · <task context>` | what the user needs to answer or do | Respond | Pop | yes, while state marker still matches |
+| `done` | `🏁 <repo>` | concise result context | concise completed result | Show | Pop | no |
+
+Allowed transitions are `running -> input | done`, `input -> running | done`, and `done -> running`. Runtime mapping is:
+
+| Runtime event | Display state |
+|---|---|
+| Claude `UserPromptSubmit` | `running` |
+| Claude `Notification` | `input` |
+| Claude `Stop` | `done` |
+| Codex `UserPromptSubmit` | `running` |
+| Codex `Stop` with a direct question/blocker | `input` |
+| Codex `Stop` with a result | `done` |
+
+`UserPromptSubmit` is the task-start signal. It should be quiet but specific: no sound, no terminal bell, no raw prompt text, and no generic `Task running` / `Working` display. Branch, open PR metadata, recent commit subjects, repo, cwd, and prompt are inputs to the context generator; broad branch names like `mh-netflix` should not be shown when PR or commit context is more useful. A detached `notify-working-summary.sh` process asks Codex for both context and a 3-8 word running-task summary, then replaces the same grouped alert.
+
+`Stop` and `Notification` replace the same runtime/repo group instead of stacking another notification. Claude has a native `Notification` event for input-needed prompts; Codex currently only has `Stop`, so `notify.sh` uses a cheap candidate check on Codex `Stop` messages that ask for a concrete user action or explicit blocker and immediately posts an input-needed alert (`❓ repo`, `Respond`) instead of done (`🏁 repo`, `Show`). A bare trailing question mark is intentionally not enough, because result summaries can end with rhetorical or diagnostic questions. A detached `notify-input-summary.sh` Codex call may refine the input kind/context/summary, such as `Permission · Git workflow` / `Approve push-gate lease`. A detached `notify-final-summary.sh` process refines only `done` state, so final-summary AI cannot rewrite an input-needed prompt into a completed result.
+
+All async refinements and sticky re-post loops are guarded by `/tmp/fba-notify-state-*` markers. `running` uses the raw run id, `input` uses `input:<run id>`, and `done` uses `final:<run id>`, so late summaries cannot overwrite a newer state and running/input re-posts stop when the marker changes. The latest summary/context are also persisted in `/tmp/fba-notify-summary-*` and `/tmp/fba-notify-context-*`, so `Stop` can reuse them when the runtime sends no useful final assistant text.
 
 ## VS Code coupling
 

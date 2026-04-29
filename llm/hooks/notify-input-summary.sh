@@ -1,5 +1,5 @@
 #!/bin/bash
-# Detached task-start notification summarizer for notify.sh.
+# Detached input-needed notification classifier for notify.sh.
 
 set -euo pipefail
 
@@ -14,7 +14,8 @@ cleanup() {
 trap cleanup EXIT
 
 eval "$(jq -r '
-  @sh "PROMPT=\(.prompt // "")",
+  @sh "SOURCE_TEXT=\(.source_text // "")",
+  @sh "TASK_SUMMARY=\(.task_summary // "")",
   @sh "TITLE=\(.title // "")",
   @sh "SUBTITLE=\(.subtitle // "")",
   @sh "GROUP=\(.group // "")",
@@ -46,41 +47,34 @@ state_is_current() {
   [ "$(cat "$STATE_FILE" 2>/dev/null || true)" = "$STATE_ID" ]
 }
 
-extract_summary() {
-  local file="$1" out
-  out=$(jq -er '
-    if type == "object" then (.summary // .title // .message // .body // empty)
-    elif type == "string" then .
+extract_json_field() {
+  local field="$1" file="$2" out
+  out=$(jq -er --arg field "$field" '
+    if type == "object" then (.[$field] // empty)
     else empty end
   ' "$file" 2>/dev/null || true)
-  [ -n "$out" ] || out=$(awk 'NF{print; exit}' "$file" 2>/dev/null || true)
 
   printf '%s' "$out" \
     | sed -E '
         s/^[[:space:]]*[-"*`]+[[:space:]]*//;
-        s/^[[:space:]]*[Tt]itle:[[:space:]]*//;
-        s/^[[:space:]]*[Ss]ummary:[[:space:]]*//;
         s/[[:space:]]*[."`]+$//;
         s/[[:space:]]+/ /g;
-        s/^ //; s/ $//;' \
-    | cut -c1-80
+        s/^ //; s/ $//;'
 }
 
-extract_context() {
-  local file="$1" out
-  out=$(jq -er '
-    if type == "object" then (.context // .subtitle // empty)
-    else empty end
-  ' "$file" 2>/dev/null || true)
+state_is_input() {
+  local value
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  [ "$value" = "input" ] || [ "$value" = "needs_input" ] || [ "$value" = "needs-input" ]
+}
 
-  printf '%s' "$out" \
-    | sed -E '
-        s/^[[:space:]]*[-"*`]+[[:space:]]*//;
-        s/^[[:space:]]*[Cc]ontext:[[:space:]]*//;
-        s/[[:space:]]*[."`]+$//;
-        s/[[:space:]]+/ /g;
-        s/^ //; s/ $//;' \
-    | cut -c1-48
+kind_is_useful() {
+  case "$1" in
+    Permission|Choice\ needed|Confirm|Clarify|Missing\ info|Review\ needed|Input\ needed)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 context_is_useful() {
@@ -100,6 +94,15 @@ context_is_useful() {
   return 0
 }
 
+display_subtitle() {
+  local kind="$1" context="$2"
+  if [ -n "$context" ]; then
+    printf '%s · %s' "$kind" "$context"
+  else
+    printf '%s' "$kind"
+  fi
+}
+
 run_codex_summary() {
   NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
     -m gpt-5-nano \
@@ -107,21 +110,21 @@ run_codex_summary() {
     -c features.codex_hooks=false \
     -c model_reasoning_effort='"low"' \
     --output-last-message "$tmp" \
-    "Generate concise macOS notification text for a running agent task.
+    "Classify an agent notification that may need user input.
 
 Output strict JSON with exactly these string fields:
-{\"context\":\"...\",\"summary\":\"...\"}
+{\"state\":\"input\",\"kind\":\"...\",\"context\":\"...\",\"summary\":\"...\"}
 
-context: 1-3 words for the workspace/topic, suitable for the notification subtitle. Prefer the domain or feature area over repo/branch names.
-summary: 3-8 words for the running task, suitable for the notification body, starting with a present participle.
-
-Use the repo, branch, cwd, task, open PR, and recent commits together. If the task asks about PRs, commits, or branch work and an open PR is provided, prefer the PR title as the source of context. If the branch is broad or not meaningful (examples: mh-netflix, main, master, dev), do not use the branch name as context. Do not use generic repo names like fun-bash-automations as context when a topic such as Agent notifications, Hook runtime, Stack tooling, or Push-gate leases is available.
+state: \"input\" only if the assistant is asking the user to answer, choose, confirm, approve, provide missing info, review, or run something. Otherwise use \"done\".
+kind: one of Permission, Choice needed, Confirm, Clarify, Missing info, Review needed, Input needed.
+context: 1-3 words for the workspace/topic, suitable for the notification subtitle. Prefer the feature/domain over repo/branch names.
+summary: 3-9 words describing what the user needs to do.
 
 Examples:
-{\"context\":\"Agent notifications\",\"summary\":\"Refining notification status layout\"}
-{\"context\":\"Push-gate leases\",\"summary\":\"Reviewing current PR changes\"}
-{\"context\":\"Stack tooling\",\"summary\":\"Updating stacked PR commands\"}
-{\"context\":\"Hook runtime\",\"summary\":\"Debugging hook timeout behavior\"}
+{\"state\":\"input\",\"kind\":\"Permission\",\"context\":\"Git workflow\",\"summary\":\"Approve push-gate lease\"}
+{\"state\":\"input\",\"kind\":\"Choice needed\",\"context\":\"Agent notifications\",\"summary\":\"Choose input notification behavior\"}
+{\"state\":\"input\",\"kind\":\"Confirm\",\"context\":\"Runtime deploy\",\"summary\":\"Confirm hook deployment\"}
+{\"state\":\"done\",\"kind\":\"Input needed\",\"context\":\"\",\"summary\":\"\"}
 
 Do not include emoji, markdown, file paths, branch names, or punctuation in the field values.
 Except for the required JSON syntax, do not include commentary.
@@ -132,13 +135,16 @@ CWD: $CWD
 Current subtitle: $SUBTITLE
 Open PR: $PR_CONTEXT
 Recent commits: $RECENT_COMMITS
-Task:
-$PROMPT" </dev/null >/dev/null 2>"$err"
+Prior task summary:
+$TASK_SUMMARY
+
+Assistant text:
+$SOURCE_TEXT" </dev/null >/dev/null 2>"$err"
 }
 
 run_with_timeout() {
   local seconds="$1" rc_file pid rc
-  rc_file=$(mktemp -t fba-notify-working-summary-rc 2>/dev/null) || return 1
+  rc_file=$(mktemp -t fba-notify-input-summary-rc 2>/dev/null) || return 1
   rm -f "$rc_file"
   (
     set +e
@@ -167,7 +173,7 @@ run_with_timeout() {
   return "$rc"
 }
 
-[ -n "$PROMPT" ] || exit 0
+[ -n "$SOURCE_TEXT" ] || exit 0
 state_is_current || exit 0
 command -v codex >/dev/null 2>&1 || exit 0
 
@@ -180,52 +186,48 @@ if [ -z "${OPENAI_API_KEY:-}" ] && [ -f "$CODEX_HOME/auth.json" ]; then
   export OPENAI_API_KEY
 fi
 
-tmp=$(mktemp -t fba-notify-working-summary 2>/dev/null) || exit 0
-err=$(mktemp -t fba-notify-working-summary-err 2>/dev/null) || err=/dev/null
+tmp=$(mktemp -t fba-notify-input-summary 2>/dev/null) || exit 0
+err=$(mktemp -t fba-notify-input-summary-err 2>/dev/null) || err=/dev/null
 trap 'rm -f "$SPEC" "$tmp" "$err"' EXIT
 
-nlog "working summary start: prompt_len=${#PROMPT} cwd=$CWD codex=$(command -v codex) home=${HOME:-<none>}"
+nlog "input summary start: source_len=${#SOURCE_TEXT} task_len=${#TASK_SUMMARY} cwd=$CWD codex=$(command -v codex) home=${HOME:-<none>}"
 rc=0
 run_with_timeout 20 || rc=$?
-summary="$(extract_summary "$tmp")"
-context="$(extract_context "$tmp")"
-context_is_useful "$context" || context=""
+state="$(extract_json_field state "$tmp")"
+kind="$(extract_json_field kind "$tmp" | cut -c1-24)"
+context="$(extract_json_field context "$tmp" | cut -c1-48)"
+summary="$(extract_json_field summary "$tmp" | cut -c1-90)"
 out_len=$(wc -c < "$tmp" 2>/dev/null | tr -d ' ' || printf 0)
 err_tail=$(tr '\n' ' ' < "$err" 2>/dev/null | cut -c1-240)
-nlog "working summary codex rc=$rc out_len=$out_len err=${err_tail:-<none>}"
+nlog "input summary codex rc=$rc state=${state:-<none>} kind=${kind:-<none>} out_len=$out_len err=${err_tail:-<none>}"
 
-if [ -z "$summary" ]; then
-  nlog "working summary unavailable"
-  exit 0
-fi
-
-if [ "$rc" -ne 0 ]; then
-  nlog "working summary using output despite rc=$rc: $summary"
-fi
+state_is_input "$state" || exit 0
+kind_is_useful "$kind" || kind="Input needed"
+context_is_useful "$context" || context=""
+[ -n "$summary" ] || summary="$SOURCE_TEXT"
 
 state_is_current || {
-  nlog "working summary skipped stale update: $summary"
+  nlog "input summary skipped stale update: $summary"
   exit 0
 }
 
 if [ -n "$SUMMARY_FILE" ]; then
   printf '%s' "$summary" > "$SUMMARY_FILE" 2>/dev/null || true
 fi
-
-display_subtitle="${context:-${SUBTITLE:-Active task}}"
 if [ -n "$CONTEXT_FILE" ] && [ -n "$context" ]; then
   printf '%s' "$context" > "$CONTEXT_FILE" 2>/dev/null || true
 fi
 
-nlog "working summary update: context=${display_subtitle:-<none>} summary=$summary"
+display_subtitle="$(display_subtitle "$kind" "$context")"
+nlog "input summary update: subtitle=${display_subtitle:-<none>} summary=$summary"
 while :; do
   state_is_current || break
   resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
-    --ignore-dnd --actions Show --timeout 0 \
+    --ignore-dnd --actions Respond --timeout 0 --sound Pop \
     ${GROUP:+--group "$GROUP"} \
     ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
   act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)
-  nlog "working summary alerter act=$act"
+  nlog "input summary alerter act=$act"
   if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
     open "$OPEN_URL" >/dev/null 2>&1 || true
     if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
@@ -234,7 +236,7 @@ while :; do
       open "$OPEN_URL" >/dev/null 2>&1 || true
     fi
     if state_is_current; then
-      nlog "working summary sticky re-post: state=$STATE_ID"
+      nlog "input summary sticky re-post: state=$STATE_ID"
       sleep 0.6
       continue
     fi
