@@ -377,19 +377,19 @@ cwt() {
 
     local name="$1"
     local branch="mho/$name"
-    local path=~/worktrees/codex/mho-$name
+    local worktree_path=~/worktrees/codex/mho-$name
 
     mkdir -p ~/worktrees/codex
-    if [[ -d "$path" ]]; then
-        echo "Entering existing worktree: $path"
+    if [[ -d "$worktree_path" ]]; then
+        echo "Entering existing worktree: $worktree_path"
     else
-        git worktree add -b "$branch" "$path" HEAD || return $?
+        git worktree add -b "$branch" "$worktree_path" HEAD || return $?
         echo "Worktree created:"
-        echo "  Path:   $path"
+        echo "  Path:   $worktree_path"
         echo "  Branch: $branch"
     fi
 
-    cd "$path" || return $?
+    cd "$worktree_path" || return $?
     command codex --dangerously-bypass-approvals-and-sandbox "${@:2}"
 }
 
@@ -529,16 +529,16 @@ gwt() {
     fi
 
     local branch="mho/$1"
-    local path=~/worktrees/mho-$1
+    local worktree_path=~/worktrees/mho-$1
 
     mkdir -p ~/worktrees
-    git worktree add -b "$branch" "$path" HEAD
+    git worktree add -b "$branch" "$worktree_path" HEAD
     echo ""
     echo "Worktree created:"
-    echo "  Path:   $path"
+    echo "  Path:   $worktree_path"
     echo "  Branch: $branch"
     echo ""
-    echo "To enter: cd $path"
+    echo "To enter: cd $worktree_path"
 }
 
 # gwtl - List all worktrees
