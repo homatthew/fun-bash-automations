@@ -1097,7 +1097,11 @@ pg_validate_intent_match() {
     since_label="$base_ref (first push)"
   fi
 
-  commits=$(git log "$since_ref"..HEAD --format='%h %s' 2>/dev/null)
+  # For force-pushes after the approved base has advanced, remote/branch..HEAD
+  # can include commits that are already on the approved base (for example a
+  # mainline commit picked up by rebasing a PR branch). Those commits are not
+  # new branch work and should not be judged against the PR's intent.
+  commits=$(git log "$since_ref"..HEAD --not "$base_ref" --format='%h %s' 2>/dev/null)
   if [[ -z "$commits" ]]; then
     # No new commits since last push → trivial re-push, nothing to verify.
     jq -n '{allowed:true, verdict:"no-new-commits", reason:"no new commits since last push"}'
