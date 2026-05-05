@@ -51,6 +51,7 @@ esac
 
 eval "$(printf '%s' "$INPUT" | jq -r '
   @sh "EVENT=\(.hook_event_name // "")",
+  @sh "TURN_ID=\(.turn_id // "")",
   @sh "NOTIF_TYPE=\(.notification_type // "")",
   @sh "STOP_ACTIVE=\(.stop_hook_active // false)",
   @sh "SESSION_ID=\(.session_id // "")",
@@ -60,6 +61,42 @@ eval "$(printf '%s' "$INPUT" | jq -r '
   @sh "NOTIF_MSG=\(.message // "")",
   @sh "LAST_ASSISTANT=\(.last_assistant_message // "")"
 ')"
+
+text_mentions_stride() {
+  printf '%s' "$1" | grep -Eiq '(^|[^[:alnum:]_])stride([^[:alnum:]_]|$)|stride-matt-ho'
+}
+
+ancestor_process_mentions_stride() {
+  local pid="$PPID" ppid command
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ -n "$pid" ] && [ "$pid" != "1" ] || break
+    command=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    text_mentions_stride "$command" && return 0
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    [ -n "$ppid" ] && [ "$ppid" != "$pid" ] || break
+    pid="$ppid"
+  done
+  return 1
+}
+
+is_stride_invocation() {
+  [ "${NOTIFY_ALLOW_STRIDE:-0}" = "1" ] && return 1
+  [ "$RUNTIME" = "claude" ] || return 1
+
+  [ "${STRIDE:-}" = "1" ] && return 0
+  [ "${STRIDE_CLAUDE:-}" = "1" ] && return 0
+  [ -n "${STRIDE_WORKSPACE:-}" ] && return 0
+  [ -n "${STRIDE_SESSION_ID:-}" ] && return 0
+  env | grep -Eq '^(STRIDE_|CLAUDE_CODE_STRIDE=)' && return 0
+
+  text_mentions_stride "${CWD:-}" && return 0
+  text_mentions_stride "${TRANSCRIPT:-}" && return 0
+  ancestor_process_mentions_stride && return 0
+
+  return 1
+}
+
+[ "${NOTIFY_SUPPRESS_STRIDE:-1}" = "1" ] && is_stride_invocation && cleanup_and_exit
 
 [ "$NOTIF_TYPE" = "idle_prompt" ] && cleanup_and_exit
 [ "$STOP_ACTIVE" = "true" ] && cleanup_and_exit
@@ -188,6 +225,17 @@ url_encode_path() {
   printf '%s' "$out"
 }
 
+notify_key() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+notification_session_key() {
+  [ -n "${NOTIFY_SESSION_KEY:-}" ] && { printf '%s' "$NOTIFY_SESSION_KEY"; return; }
+  [ -n "${SESSION_ID:-}" ] && { printf 'session:%s' "$SESSION_ID"; return; }
+  [ -n "${TURN_ID:-}" ] && { printf 'turn:%s' "$TURN_ID"; return; }
+  printf '%s:%s' "${TERM_PROGRAM:-terminal}" "$PPID"
+}
+
 # Stable per-agent-session so the extension rebinds to the same key
 # across multiple Stop/Notification events from one session.
 make_stable_tid() {
@@ -214,6 +262,7 @@ backend_alerter() {
   (
     resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$message" \
       --sound Pop --timeout 60 --ignore-dnd \
+      ${group:+--group "$group"} \
       ${sender:+--sender "$sender"} --json 2>/dev/null)
     act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
     if [ "$act" = "contentsClicked" ] && [ -n "$open_url" ]; then
@@ -423,6 +472,8 @@ else
   MACOS_SENDER="com.anthropic.claudefordesktop"
   MACOS_GROUP="claude-$REPO"
 fi
+SESSION_GROUP_KEY="$(notify_key "$(notification_session_key)" | cut -c1-80)"
+MACOS_GROUP="$MACOS_GROUP-$SESSION_GROUP_KEY"
 
 send_macos_notification "$REPO" "$SUBTITLE" "$SUMMARY" "$MACOS_GROUP" "$MACOS_SENDER"
 

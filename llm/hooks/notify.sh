@@ -126,6 +126,12 @@ DONE_ICON="🏁"
 INPUT_ICON="❓"
 INPUT_STATUS="$INPUT_ICON Input needed"
 
+HOOK_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ -f "$HOOK_DIR/notify-metrics.sh" ]; then
+  # shellcheck source=notify-metrics.sh
+  . "$HOOK_DIR/notify-metrics.sh"
+fi
+
 nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$NOTIFY_LOG" 2>/dev/null || true
 }
@@ -146,6 +152,10 @@ notify_context_file() {
   local key
   key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_')
   printf '/tmp/fba-notify-context-%s' "$key"
+}
+
+notify_key() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
 write_notify_state() {
@@ -554,11 +564,7 @@ dispatch_input_summary() {
 
 pick_backend() {
   [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && { printf 'suppressed'; return; }
-  if [ "${TERM_PROGRAM:-}" = "ghostty" ]; then
-    local front
-    front=$(osascript -e 'tell application "System Events" to get bundle identifier of first process whose frontmost is true' 2>/dev/null || true)
-    [ "$front" = "com.mitchellh.ghostty" ] && { printf 'suppressed'; return; }
-  fi
+  [ "${TERM_PROGRAM:-}" = "ghostty" ] && { printf 'ghostty'; return; }
   if command -v alerter >/dev/null 2>&1; then
     [ "${TERM_PROGRAM:-}" = "vscode" ] && { printf 'vscode'; return; }
     printf 'alerter'
@@ -588,6 +594,7 @@ backend_alerter() {
     return
   fi
   (
+    notify_started_ms="$(notify_now_ms 2>/dev/null || printf 0)"
     resp=$(alerter --title "$title" --subtitle "$subtitle" --message "$message" \
       --ignore-dnd \
       "${extra_args[@]}" \
@@ -597,17 +604,31 @@ backend_alerter() {
     act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null)
     nlog "alerter act=$act"
     if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$open_url" ]; then
+      notify_clicked_ms="$(notify_now_ms 2>/dev/null || printf 0)"
       nlog "alerter opening: $open_url"
-      # Fire URI immediately (same-window fast path — no delay).
-      # Also run `code <cwd>` in background + re-fire for cross-window case.
-      # Extension ignores the one whose cwd doesn't match its workspace.
-      open "$open_url" >/dev/null 2>&1 || true
-      if [[ "$open_url" == *"cwd="* ]] && command -v code >/dev/null 2>&1; then
-        _cwd=$(printf '%s' "$open_url" | sed -E 's/.*[?&]cwd=([^&]*).*/\1/' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
-        [ -n "$_cwd" ] && ( code "$_cwd" >/dev/null 2>&1; open "$open_url" >/dev/null 2>&1 ) &
+      if command -v notify_click_open_url >/dev/null 2>&1; then
+        notify_click_open_url "inline" "$action_label" "$act" "$group" "$state_id" "$open_url" "$notify_started_ms" "$notify_clicked_ms" "${MAIN_REPO_PATH:-$CWD}"
+      else
+        open "$open_url" >/dev/null 2>&1 || true
       fi
     fi
   ) &
+}
+
+backend_ghostty() {
+  local title="$1" subtitle="$2" message="$3" sound="${4-Pop}"
+  local text
+  text=$(printf '%s · %s: %s' "$title" "$subtitle" "$message" \
+    | tr '\007\033\r\n' '    ' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+    | cut -c1-220)
+  [ -n "$text" ] || return 0
+  nlog "ghostty osc9: title=$title subtitle=$subtitle sound=${sound:-<none>} msg_len=${#message}"
+  if ! printf '\033]9;%s\033\\' "$text" > /dev/tty 2>/dev/null; then
+    nlog "ghostty osc9 failed: no writable tty"
+    return 1
+  fi
+  [ -n "$sound" ] && (printf '\a' > /dev/tty) 2>/dev/null || true
 }
 
 # Walk up the process tree from PPID and return ancestor PIDs as a
@@ -623,6 +644,26 @@ ancestor_pids() {
     _pid=$_ppid
   done
   printf '%s' "$_pids"
+}
+
+notification_session_key() {
+  local tty_path pids
+  [ -n "${NOTIFY_SESSION_KEY:-}" ] && { printf '%s' "$NOTIFY_SESSION_KEY"; return; }
+  [ -n "${SESSION_ID:-}" ] && { printf 'session:%s' "$SESSION_ID"; return; }
+
+  tty_path=$(tty </dev/tty 2>/dev/null || true)
+  if [ -n "$tty_path" ] && [ "$tty_path" != "not a tty" ] && [ "$tty_path" != "/dev/tty" ]; then
+    printf '%s:%s' "${TERM_PROGRAM:-terminal}" "$tty_path"
+    return
+  fi
+
+  pids=$(ancestor_pids)
+  if [ -n "$pids" ]; then
+    printf '%s:%s' "${TERM_PROGRAM:-terminal}" "$pids"
+    return
+  fi
+
+  printf '%s:%s' "${TERM_PROGRAM:-terminal}" "$$"
 }
 
 backend_vscode() {
@@ -699,11 +740,14 @@ BRANCH="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 PR_CONTEXT="$(git_pr_context)"
 RECENT_COMMITS="$(git_recent_commits)"
 
+SESSION_KEY="$(notification_session_key)"
+SESSION_GROUP_KEY="$(notify_key "$SESSION_KEY" | cut -c1-80)"
+
 if [ "$RUNTIME" = "codex" ]; then
-  GROUP="codex-$REPO"
+  GROUP="codex-$REPO-$SESSION_GROUP_KEY"
   SENDER_BUNDLE="com.openai.codex"
 else
-  GROUP="claude-$REPO"
+  GROUP="claude-$REPO-$SESSION_GROUP_KEY"
   # com.anthropic.claudefordesktop -sender hangs terminal-notifier on this
   # machine (Claude.app notification endpoint is broken). Use the placeholder
   # Claude Notify.app bundle (~/Applications/Claude Notify.app) which carries
@@ -716,6 +760,7 @@ RUN_ID="${TURN_ID:-$SESSION_ID}"
 STATE_FILE="$(notify_state_file "$GROUP")"
 SUMMARY_FILE="$(notify_summary_file "$GROUP")"
 CONTEXT_FILE="$(notify_context_file "$GROUP")"
+MACOS_GROUP="$GROUP"
 TASK_SUMMARY="$(read_notify_summary "$SUMMARY_FILE")"
 TASK_CONTEXT="$(read_notify_context "$CONTEXT_FILE")"
 DISPLAY_TITLE="$REPO"
@@ -841,13 +886,15 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   _preview_url="$OPEN_URL"
   if [ "$_backend" = "vscode" ]; then
     _preview_url="vscode://${VSCODE_EXT_PUBLISHER}.${VSCODE_EXT_NAME}${VSCODE_EXT_URI_PATH}?cwd=$(url_encode_path "${MAIN_REPO_PATH:-$CWD}")"
+  elif [ "$_backend" = "ghostty" ]; then
+    _preview_url="<ghostty-native>"
   fi
   _dry_action="Show"
   _dry_sound="Pop"
   [ "$DISPLAY_STATE" = "input" ] && _dry_action="Respond"
   [ "$DISPLAY_STATE" = "running" ] && _dry_sound=""
   printf 'macos backend=%s state=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
-    "$_backend" "$DISPLAY_STATE" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
+    "$_backend" "$DISPLAY_STATE" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
   cleanup_and_exit
 fi
 
@@ -872,17 +919,20 @@ STICKY_AFTER_CLICK="0"
 [ "$DISPLAY_STATE" = "input" ] && STICKY_AFTER_CLICK="1"
 nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
-  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
+  ghostty)           backend_ghostty            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$SOUND" ;;
+  vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
+  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
 
-if [ "$DISPLAY_STATE" = "running" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+if [ "$_chosen_backend" = "ghostty" ]; then
+  nlog "ghostty: skipped async alerter summaries"
+elif [ "$DISPLAY_STATE" = "running" ] && [ "$_chosen_backend" != "suppressed" ]; then
+  dispatch_working_summary "$PROMPT" "$DISPLAY_TITLE" "$SUBTITLE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 elif [ "$DISPLAY_STATE" = "done" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+  dispatch_final_summary "$FINAL_SUMMARY_SOURCE" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 elif [ "$DISPLAY_STATE" = "input" ] && [ "$_chosen_backend" != "suppressed" ]; then
-  dispatch_input_summary "${INPUT_SUMMARY_SOURCE:-$MESSAGE}" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
+  dispatch_input_summary "${INPUT_SUMMARY_SOURCE:-$MESSAGE}" "$TASK_SUMMARY" "$DISPLAY_TITLE" "$SUBTITLE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$_async_open_url" "${MAIN_REPO_PATH:-$CWD}" "$STATE_FILE" "$CURRENT_STATE_ID" "$SUMMARY_FILE" "$CONTEXT_FILE" "$REPO" "${BRANCH:-}" "$PR_CONTEXT" "$RECENT_COMMITS"
 fi
 
 cleanup_and_exit

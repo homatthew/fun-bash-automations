@@ -3,10 +3,16 @@
 
 set -euo pipefail
 
-PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/Visual Studio Code.app/Contents/Resources/app/bin:${PATH:-}"
+PATH="${NOTIFY_PATH_PREFIX:+$NOTIFY_PATH_PREFIX:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/Visual Studio Code.app/Contents/Resources/app/bin:${PATH:-}"
 
 SPEC="${1:-}"
 [ -n "$SPEC" ] && [ -f "$SPEC" ] || exit 0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ -f "$SCRIPT_DIR/notify-metrics.sh" ]; then
+  # shellcheck source=notify-metrics.sh
+  . "$SCRIPT_DIR/notify-metrics.sh"
+fi
 
 cleanup() {
   rm -f "$SPEC"
@@ -49,6 +55,7 @@ state_is_current() {
 }
 
 while :; do
+  notify_started_ms="$(notify_now_ms 2>/dev/null || printf 0)"
   resp=$(alerter --title "$TITLE" --subtitle "$SUBTITLE" --message "$MESSAGE" \
     --ignore-dnd \
     "${extra_args[@]}" \
@@ -60,11 +67,11 @@ while :; do
   nlog "alerter act=$act"
 
   if [[ "$act" = "contentsClicked" || "$act" = "actionClicked" ]] && [ -n "$OPEN_URL" ]; then
+    notify_clicked_ms="$(notify_now_ms 2>/dev/null || printf 0)"
     nlog "alerter opening: $OPEN_URL"
-    open "$OPEN_URL" >/dev/null 2>&1 || true
-    if [ -n "$CWD" ] && command -v code >/dev/null 2>&1; then
-      code "$CWD" >/dev/null 2>&1 || true
-      sleep 0.4
+    if command -v notify_click_open_url >/dev/null 2>&1; then
+      notify_click_open_url "dispatch" "$ACTION_LABEL" "$act" "$GROUP" "$STATE_ID" "$OPEN_URL" "$notify_started_ms" "$notify_clicked_ms" "$CWD"
+    else
       open "$OPEN_URL" >/dev/null 2>&1 || true
     fi
     if state_is_current; then
