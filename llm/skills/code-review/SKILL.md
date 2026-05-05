@@ -65,7 +65,55 @@ This package will be passed verbatim to both sub-agents.
 
 ## Phase 2: Parallel Sub-Agent Reviews
 
-Spawn **both agents in a single message** so they run in parallel. Each gets fresh context — no carry-over from the main conversation.
+Use the runtime-specific launch path below. In both paths, reviewers get the same context package and should not see each other's intermediate findings.
+
+### Claude Runtime Launch Path
+
+When running inside Claude Code, spawn **both agents in a single message** so they run in parallel. Each gets fresh context — no carry-over from the main conversation.
+
+- Agent A: `pr-review-toolkit:code-reviewer`
+- Agent B: `codex:codex-rescue`
+
+### Codex Runtime Launch Path
+
+When running inside Codex, there is no native `pr-review-toolkit:code-reviewer` subagent. Invoke Claude as an external reviewer with `claude --print`, and run the Codex review locally or via a Codex subagent.
+
+1. Write the Claude prompt to a temp file:
+
+   ```bash
+   claude_prompt="$(mktemp -t code-review-claude-prompt)"
+   # write Agent A prompt into "$claude_prompt"
+   ```
+
+2. Start Claude in the background from the repository root:
+
+   ```bash
+   claude_out="$(mktemp -t code-review-claude-out)"
+   claude_err="$(mktemp -t code-review-claude-err)"
+   NOTIFY_SUPPRESS=1 claude -p \
+     --agent pr-review-toolkit:code-reviewer \
+     --permission-mode plan \
+     --tools "Read,Grep,Glob,Bash" \
+     --no-session-persistence \
+     < "$claude_prompt" > "$claude_out" 2> "$claude_err" &
+   claude_pid=$!
+   ```
+
+3. While Claude runs, perform Agent B's Codex review independently in the current Codex session, using the Agent B prompt below.
+
+4. Wait for Claude before consolidation:
+
+   ```bash
+   if ! wait "$claude_pid"; then
+     echo "Claude reviewer failed; stderr follows:" >&2
+     tail -80 "$claude_err" >&2
+   fi
+   claude_findings="$(cat "$claude_out")"
+   ```
+
+5. If `claude` is unavailable or fails before producing findings, continue with the Codex review but explicitly report that the Claude leg was unavailable. Do not invent `[Claude]` findings.
+
+Do not pass write tools to Claude for review. Use `NOTIFY_SUPPRESS=1` so the nested Claude review does not create duplicate desktop notifications. Remove the temp prompt/output/error files after consolidation.
 
 ### Agent A: Claude Code Reviewer
 
