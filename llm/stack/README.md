@@ -13,6 +13,12 @@ or restack work, but it does not override the PR DAG. When `stack` prints a
 topology warning, operationally it means: GitHub PR base wins; local ancestry is
 stale/diagnostic.
 
+After a Dolt-backed private trunk is materialized, the final branch in a stack
+may have the private trunk as its nearest local parent. `stack status`
+recognizes that recorded materialization and prints it as an expected topology
+note instead of stale local ancestry; GitHub PR bases still win for PR-scoped
+commands.
+
 Prefer PR-scoped commands when a PR number is known:
 
 ```bash
@@ -24,11 +30,21 @@ stack push --pr <N> --children
 Broad `stack push` remains supported, but it can include unrelated same-prefix
 local stacks. Use it only when that broad scope is intentional.
 
-For manifest-driven stacks, the stack can own a private trunk. This trunk is a
-normal local branch for one stack, not `main`. The manifest declares item order,
-the private trunk ref, and the pointer branches. `stack trunk materialize` builds
-that trunk in scratch and hard-points each branch to its corresponding commit on
-the trunk.
+For codified stacks, the stack can own a private trunk. This trunk is a normal
+local branch for one stack, not `main`. The manifest declares item order, the
+private trunk ref, and the pointer branches. The manifest source of truth is
+push-gate's Dolt store at `~/.push-gate/dolt-store` by default, not a repo
+`.stack` file. `stack trunk materialize` builds that trunk in scratch,
+hard-points each branch to its corresponding commit on the trunk, and records
+the materialization back to Dolt.
+
+Dolt must be on PATH for `--stack` trunk commands. Install it with
+`brew install dolt`, verify with `dolt version`, and set `PG_STORE_DIR` only if
+the default store location should be overridden.
+
+Private trunk refs must be private branches such as
+`mho/trunk/scm-cassandra-dev`; protected refs like `main`, `origin/main`, and
+`upstream/main` are rejected.
 
 ## Standard Loop
 
@@ -63,12 +79,15 @@ the trunk.
    This restacks PR children selected by GitHub `baseRefName`. It does not
    retarget GitHub PR bases; create or retarget PRs separately after refs move.
 
-6. For a codified private-trunk stack, edit the manifest order instead and
+6. For a codified private-trunk stack, update the stored manifest order and
    materialize it:
 
    ```bash
-   stack trunk status --manifest .stack/<name>.json
-   stack trunk materialize --manifest .stack/<name>.json
+   stack trunk init --name <name> --base origin/main --trunk mho/<name>.trunk
+   stack trunk add --stack <name> --id <id> --branch <branch>
+   stack trunk move --stack <name> --id <id> --after <id>
+   stack trunk status --stack <name>
+   stack trunk materialize --stack <name>
    ```
 
    The private trunk becomes the generated stack integration branch; each PR
@@ -127,6 +146,19 @@ adoption and `git-branchless sync --pull`, then atomically imports changed refs.
 Its next step says whether refs changed, which leases became stale, and whether
 to run tests, inspect status, or push.
 
+Stack-managed restacks turn on repo-local rerere before conflict-prone work:
+
+```bash
+git config --local rerere.enabled true
+git config --local rerere.autoupdate true
+```
+
+`stack sync`, `stack insert`, `stack trunk materialize`, and `stack squash` do
+this automatically for the working repo and scratch repos they create, and copy
+the source repo's rerere cache into scratch before preflight. Separate clones
+need their own repo-local rerere config and rerere cache/history; rerere does
+not learn a conflict resolution in a clone that has never seen that conflict.
+
 `stack insert --branch <new-branch> --after <branch>` inserts a local branch
 after a local stack branch. `stack insert --branch <new-branch> --after-pr <N>`
 uses GitHub PR `baseRefName` to choose child PRs under `N`, excluding no-PR
@@ -136,14 +168,73 @@ and atomically import moved refs with old-tip verification. `--dry-run` prints
 planned rebases without moving refs. The command reports stale push-gate leases
 but does not change GitHub PR bases.
 
-`stack trunk materialize --manifest <path>` reads a JSON manifest with
-`version`, `name`, `base`, `trunk`, and `items`. It builds the private trunk in
-a scratch clone by replaying item branches in manifest order, then atomically
+`stack trunk init` and `stack trunk add` write a stack manifest to push-gate's
+Dolt store. `stack trunk move` reorders existing items with `--after`,
+`--before`, `--first`, or `--last`; `stack trunk remove` prunes an item and
+compacts order. These commands only change manifest order. `stack trunk
+materialize --stack <name>` reads that manifest, builds the private trunk in a
+scratch clone by replaying item branches in manifest order, then atomically
 moves the trunk ref and each item branch pointer to the corresponding commit on
-that trunk. This is the declarative stack mode: change the manifest order, run
-one materialization, then test and push. `stack trunk status` prints the
-manifest order, inferred patch bases, trunk ref, and pointer heads. PR bases are
-validated or retargeted separately; materialization only moves local refs.
+that trunk. This is the declarative stack mode: change the stored order, run one
+materialization, then test and push. `stack trunk status` prints the manifest
+order, inferred patch bases, trunk ref, and pointer heads. `--manifest <path>`
+remains available for compatibility/import flows, but it is not the durable
+source of truth and does not record materializations. PR bases are validated or
+retargeted separately; materialization only moves local refs.
+
+If materialization moves the currently checked-out branch, `stack` refreshes the
+worktree to the new `HEAD` after the atomic ref import. That prevents a clean
+checkout from appearing dirty with inverse changes from the old branch tip.
+
+Push-gate can approve the whole materialized trunk:
+
+```bash
+pg prepare-trunk --stack <name> --what "..." --why "..." --approach "..."
+pg trunk --stack <name>
+pg check-trunk --stack <name>
+stack trunk push --stack <name>
+```
+
+For multi-item trunks, agents should pass item-level explanations:
+
+```bash
+pg prepare-trunk --stack <name> \
+  --what "overall stack outcome" \
+  --why "why these items land together" \
+  --approach "how the trunk was built and verified" \
+  --item-briefs /tmp/<name>-item-briefs.yaml
+```
+
+The trunk approval records the manifest hash, private trunk tip, and each item
+branch commit in Dolt. `stack trunk push --stack <name>` then walks the approved
+items and invokes `pg push --trunk-stack` for each branch, so each item commit
+can be pushed from the private trunk without requiring a separate per-branch
+lease.
+
+For squash-merge-heavy stacks, push only the composed validation ref first:
+
+```bash
+stack trunk push --stack <name> --tip
+```
+
+`--tip` pushes the private trunk ref at the approved `trunk_tip` and does not
+push item branches. Use this when CI should run once on the full stack before
+spending CI on intermediate review branches that may be invalidated by a parent
+squash merge.
+
+The approval draft shows each ordered stack item with:
+
+- `brief`: required item-level `what`, `why`, and `approach`, preferably as
+  YAML bullet lists.
+- `pointer_commit`: exact branch tip approved for push.
+- `base_commit`: effective review base.
+- `contained_commits`: commits included in the item patch range.
+- `changed_files`: paths grouped as readable labels like `added` or
+  `modified`, not raw git status letters.
+- `shortstat`: compact diff size for the item.
+
+That restores branch-by-branch detail without losing the whole-stack approval
+flow.
 
 `stack squash` collapses a branch's incremental commits into one commit and
 restacks descendants. Use `--pr <N> --onto-pr-base` when GitHub says a PR's base
@@ -162,8 +253,11 @@ or stale lease after `pg prepare`.
 - New middle branch: `stack insert --branch <new> --after-pr <N>` can place a
   branch between an open PR and its PR children without manually rebasing each
   child branch.
-- Private stack trunk: `stack trunk materialize --manifest <path>` can rebuild a
-  stack-specific trunk and move branch pointers after changing manifest order.
+- Private stack trunk: `stack trunk materialize --stack <name>` can rebuild a
+  stack-specific trunk from the Dolt manifest and move branch pointers after
+  changing manifest order. If the final branch sees that private trunk as its
+  nearest local parent, status reports the recorded trunk materialization as
+  expected rather than stale ancestry.
 - Redundant local parent branch: PR-scoped status/push still follow GitHub
   `baseRefName`; local ancestry only triggers a warning.
 - Unrelated same-prefix branches: use `--pr <N> --children` to exclude them.

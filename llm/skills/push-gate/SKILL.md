@@ -26,6 +26,14 @@ source of truth; memory or prior outputs may be stale.
 If a rule below conflicts with those files, those files win and this skill
 is out of date — update it.
 
+For stale stack/push-gate context in an already-running agent, ask it to run
+`agent-stack-refresh` directly first. `stack-latest` is a human zsh alias for
+the same helper and may not exist in non-interactive agent shells. The helper
+prints the live stack and push-gate skill paths, current Dolt-backed trunk
+approval flow, and Dolt install/verification guidance. Fresh sessions get skill
+updates through `fba-deploy` symlinks; running sessions still need this explicit
+reset.
+
 ## Step 2 — Hard rules (do not violate)
 
 **Never bypass push-gate.** Do not suggest, run, document, or reproduce in
@@ -71,6 +79,51 @@ you see a user output referencing them, re-read `pg --help` to re-ground.
 **Before telling the user to run `pg`, always run `pg prepare` first.**
 See the `push-gate-prepare` skill for the required arguments. If `pg`
 blocks with "NO PREPARED BRIEF", your fix is `pg prepare`, not a bypass.
+
+For stack trunks, the same split applies at trunk scope:
+
+```
+1. Agent: pg prepare-trunk --stack S --what "..." --why "..." --approach "..." --item-briefs FILE
+2. Human: pg trunk --stack S
+3. Agent: pg push --trunk-stack S --branch B --source-ref COMMIT --assert-flow "..."
+```
+
+The stack manifest and trunk materialization live in the Dolt store under
+`~/.push-gate/dolt-store` by default. Use `stack trunk init/add/status/materialize
+--stack S`; repo `.stack/*.json` files are compatibility/import inputs, not the
+source of truth.
+
+Trunk approval drafts use this vocabulary:
+
+- `stack_items`: ordered review/push units in the stack.
+- `stack_items[].brief`: required item-level `what`, `why`, and `approach`.
+- `pointer_commit`: exact branch tip approved for that stack item.
+- `base_commit`: effective review base for that stack item.
+- `contained_commits`: commits included in the item patch range.
+- `changed_files`: changed paths grouped by readable labels such as `added`
+  and `modified`, not raw git status letters.
+
+The agent-authored `prepare-trunk` brief should explain the cross-item `what`,
+`why`, and `approach` in human terms. For multi-item stacks, agents should pass
+`--item-briefs FILE`; approval blocks until every stack item has item-level
+`what`, `why`, and `approach`.
+
+The item briefs file may be JSON or YAML:
+
+```yaml
+item_briefs:
+  - id: pr266
+    what:
+      - Fix Cassandra page-cache memory attribution.
+    why:
+      - Avoid false memory-driven node-count explanations.
+    approach:
+      - Keep the attribution behavior in PR266.
+    risks:
+      - Baseline churn needs review.
+    verification:
+      - tox -e py312 -- tests/netflix/test_cassandra_memory.py
+```
 
 ## Step 4 — When the agent has no tty
 
@@ -138,6 +191,12 @@ order:
    If `allowed: true`, proceed with `pg -C <repo_root> push …`. If
    `allowed: false`, read `reason` — scope drift, anchor mismatch,
    missing pending-assertion, etc.
+
+For stack-trunk approvals, inspect the Dolt lease directly through:
+
+```bash
+bash ~/repos/fun-bash-automations/llm/hooks/push-gate.sh -C <repo_root> check-trunk --stack <name>
+```
 
 3. **Sentinel file (hint only)** — `/tmp/pg-approved/<repo>__<branch>`
    only exists for approvals created after the notify-approved change

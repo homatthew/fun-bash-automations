@@ -348,6 +348,10 @@ agent-refresh() {
 alias llm-refresh=agent-refresh
 alias llm-deploy=fba-deploy
 
+# stack-latest: human-shell alias for agent-stack-refresh. Agents should run
+# ~/.local/bin/agent-stack-refresh directly because aliases may not be loaded.
+alias stack-latest="$HOME/.local/bin/agent-stack-refresh"
+
 # push-gate: Manage durable push leases for agent pushes.
 # Generates approval drafts, stamps leases, and wraps agent pushes with
 # required self-assertions.

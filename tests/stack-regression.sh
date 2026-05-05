@@ -79,7 +79,232 @@ set -euo pipefail
 log() {
   [[ -n "${STACK_TEST_PG_LOG:-}" ]] && echo "$@" >>"$STACK_TEST_PG_LOG"
 }
+if [[ "${STACK_TEST_PG_DOLT_MISSING:-}" == "1" && "${1:-}" == stack-store-* ]]; then
+  echo "pg: dolt is required for stack-trunk workflows." >&2
+  exit 1
+fi
 case "${1:-}" in
+  stack-store-init)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    name=""; base=""; trunk=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --name) name="$2"; shift 2 ;;
+        --base) base="$2"; shift 2 ;;
+        --trunk) trunk="$2"; shift 2 ;;
+        *) echo "unexpected stack-store-init option: $1" >&2; exit 1 ;;
+      esac
+    done
+    jq --arg name "$name" --arg base "$base" --arg trunk "$trunk" \
+      '.[$name] = {version:1,name:$name,base:$base,trunk:$trunk,items:[]}' \
+      "$store" >"$store.tmp"
+    mv "$store.tmp" "$store"
+    echo "Stack stored: $name"
+    exit 0
+    ;;
+  stack-store-add)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    stack=""; id=""; branch=""; pr=""; after=""; base=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --stack) stack="$2"; shift 2 ;;
+        --id) id="$2"; shift 2 ;;
+        --branch) branch="$2"; shift 2 ;;
+        --pr) pr="$2"; shift 2 ;;
+        --after) after="$2"; shift 2 ;;
+        --base) base="$2"; shift 2 ;;
+        *) echo "unexpected stack-store-add option: $1" >&2; exit 1 ;;
+      esac
+    done
+    if [[ -n "$after" ]] && jq -e --arg stack "$stack" --arg id "$id" '.[$stack].items[]? | select(.id == $id)' "$store" >/dev/null; then
+      echo "stack item already exists: $id; use stack trunk move --stack $stack --id $id --after $after" >&2
+      exit 1
+    fi
+    jq --arg stack "$stack" --arg id "$id" --arg branch "$branch" --arg pr "$pr" --arg after "$after" --arg base "$base" '
+      .[$stack] as $s
+      | if $s == null then error("missing stack")
+        else
+          ({id:$id, branch:$branch}
+            + (if $pr == "" then {} else {pr:($pr|tonumber)} end)
+            + (if $base == "" then {} else {base:$base} end)) as $item
+          | if $after == "" then
+              .[$stack].items = ((.[$stack].items | map(select(.id != $id))) + [$item])
+            else
+              .[$stack].items = (reduce .[$stack].items[] as $old
+                ([]; if $old.id == $id then .
+                     elif $old.id == $after then . + [$old, $item]
+                     else . + [$old] end))
+            end
+          | .[$stack].version = ((.[$stack].version // 1) + 1)
+        end
+    ' "$store" >"$store.tmp"
+    mv "$store.tmp" "$store"
+    echo "Stack item stored: $stack/$id"
+    exit 0
+    ;;
+  stack-store-move)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    stack=""; id=""; after=""; before=""; first="false"; last="false"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --stack|--name) stack="$2"; shift 2 ;;
+        --id) id="$2"; shift 2 ;;
+        --after) after="$2"; shift 2 ;;
+        --before) before="$2"; shift 2 ;;
+        --first) first="true"; shift ;;
+        --last) last="true"; shift ;;
+        *) echo "unexpected stack-store-move option: $1" >&2; exit 1 ;;
+      esac
+    done
+    choices=0
+    [[ -n "$after" ]] && choices=$((choices + 1))
+    [[ -n "$before" ]] && choices=$((choices + 1))
+    [[ "$first" == "true" ]] && choices=$((choices + 1))
+    [[ "$last" == "true" ]] && choices=$((choices + 1))
+    [[ "$choices" == "1" ]] || { echo "stack-store-move requires exactly one position" >&2; exit 1; }
+    [[ "$after" != "$id" && "$before" != "$id" ]] || { echo "cannot move stack item relative to itself: $id" >&2; exit 1; }
+    jq -e --arg stack "$stack" --arg id "$id" '.[$stack].items[]? | select(.id == $id)' "$store" >/dev/null \
+      || { echo "stack item not found: $id" >&2; exit 1; }
+    if [[ -n "$after" || -n "$before" ]]; then
+      target="${after:-$before}"
+      jq -e --arg stack "$stack" --arg target "$target" '.[$stack].items[]? | select(.id == $target)' "$store" >/dev/null \
+        || { echo "stack item not found for move target: $target" >&2; exit 1; }
+    fi
+    jq --arg stack "$stack" --arg id "$id" --arg after "$after" --arg before "$before" --arg first "$first" --arg last "$last" '
+      .[$stack].items as $items
+      | ($items[] | select(.id == $id)) as $moving
+      | ($items | map(select(.id != $id))) as $rest
+      | .[$stack].items =
+          (if $first == "true" then [$moving] + $rest
+           elif $last == "true" then $rest + [$moving]
+           elif $before != "" then
+             reduce $rest[] as $item ([]; if $item.id == $before then . + [$moving, $item] else . + [$item] end)
+           else
+             reduce $rest[] as $item ([]; if $item.id == $after then . + [$item, $moving] else . + [$item] end)
+           end)
+      | .[$stack].version = ((.[$stack].version // 1) + 1)
+    ' "$store" >"$store.tmp"
+    mv "$store.tmp" "$store"
+    echo "Stack item moved: $stack/$id"
+    exit 0
+    ;;
+  stack-store-remove)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    stack=""; id=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --stack|--name) stack="$2"; shift 2 ;;
+        --id) id="$2"; shift 2 ;;
+        *) echo "unexpected stack-store-remove option: $1" >&2; exit 1 ;;
+      esac
+    done
+    jq -e --arg stack "$stack" --arg id "$id" '.[$stack].items[]? | select(.id == $id)' "$store" >/dev/null \
+      || { echo "stack item not found: $id" >&2; exit 1; }
+    jq --arg stack "$stack" --arg id "$id" '
+      .[$stack].items = (.[$stack].items | map(select(.id != $id)))
+      | .[$stack].version = ((.[$stack].version // 1) + 1)
+    ' "$store" >"$store.tmp"
+    mv "$store.tmp" "$store"
+    echo "Stack item removed: $stack/$id"
+    exit 0
+    ;;
+  stack-store-manifest)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    stack=""; format="text"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --stack|--name) stack="$2"; shift 2 ;;
+        --json) format="json"; shift ;;
+        *) echo "unexpected stack-store-manifest option: $1" >&2; exit 1 ;;
+      esac
+    done
+    jq -c --arg stack "$stack" '.[$stack] | {version:1,name,base,trunk,store_version:(.version // 1),items}' "$store"
+    exit 0
+    ;;
+  stack-store-record-materialization)
+    log "record-materialization $*"
+    if [[ -n "${STACK_TEST_STACK_MATERIALIZATIONS:-}" ]]; then
+      shift
+      stack=""
+      json=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --stack) stack="$2"; shift 2 ;;
+          --json) json="$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      jq -c . <<<"$json" >>"$STACK_TEST_STACK_MATERIALIZATIONS"
+    fi
+    echo "Materialization stored"
+    exit 0
+    ;;
+  stack-store-branch-materialization)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    mat_file="${STACK_TEST_STACK_MATERIALIZATIONS:?STACK_TEST_STACK_MATERIALIZATIONS required}"
+    shift
+    branch=""
+    format="text"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --branch) branch="$2"; shift 2 ;;
+        --json) format="json"; shift ;;
+        *) echo "unexpected stack-store-branch-materialization option: $1" >&2; exit 1 ;;
+      esac
+    done
+    mat=$(jq -sc --arg branch "$branch" '[.[] | select(any(.items[]; .branch == $branch))] | last // empty' "$mat_file")
+    [[ -n "$mat" ]] || exit 1
+    stack=$(jq -r '.stack' <<<"$mat")
+    trunk=$(jq -r --arg stack "$stack" '.[$stack].trunk // ""' "$store")
+    if [[ "$format" == "json" ]]; then
+      jq -c --arg branch "$branch" --arg trunk "$trunk" '
+        . as $m
+        | ($m.items[] | select(.branch == $branch)) as $item
+        | {
+            stack: $m.stack,
+            trunk: $trunk,
+            materialization_id: $m.materialization_id,
+            manifest_hash: $m.manifest_hash,
+            trunk_tip: $m.trunk_tip,
+            item_id: $item.id,
+            order_index: $item.order_index,
+            branch: $item.branch,
+            commit: $item.commit,
+            pr: $item.pr
+          }' <<<"$mat"
+    else
+      commit=$(jq -r --arg branch "$branch" '.items[] | select(.branch == $branch) | .commit' <<<"$mat")
+      printf '%s\t%s\t%s\t%s\n' "$stack" "$trunk" "$branch" "$commit"
+    fi
+    exit 0
+    ;;
+  check-trunk)
+    shift
+    stack=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --stack|--name) stack="$2"; shift 2 ;;
+        *) echo "unexpected check-trunk option: $1" >&2; exit 1 ;;
+      esac
+    done
+    mat=$(jq -c --arg stack "$stack" 'select(.stack == $stack)' "${STACK_TEST_STACK_MATERIALIZATIONS:?}" | tail -1 || true)
+    if [[ -z "$mat" ]]; then
+      jq -n --arg stack "$stack" '{allowed:false, reason:("No active trunk lease for stack " + $stack)}'
+    else
+      jq -n --argjson mat "$mat" '{allowed:true, materialization:$mat, lease:{items:$mat.items}}'
+    fi
+    exit 0
+    ;;
   leases)
     printf '%s\n' "${STACK_TEST_LEASES_JSON:-[]}"
     exit 0
@@ -206,6 +431,11 @@ mkdir -p "$HOOK_DIR"
 cp "$HOOK" "$HOOK_DIR/stack.sh"
 chmod +x "$HOOK_DIR/stack.sh"
 make_fake_pg "$HOOK_DIR"
+export STACK_TEST_STACK_STORE="$TEST_TMP/fake-stack-store.json"
+export STACK_TEST_STACK_MATERIALIZATIONS="$TEST_TMP/fake-stack-materializations.jsonl"
+: >"$STACK_TEST_STACK_STORE"
+jq -n '{}' >"$STACK_TEST_STACK_STORE"
+: >"$STACK_TEST_STACK_MATERIALIZATIONS"
 
 BRANCHLESS_LOG="$TEST_TMP/branchless.log"
 : >"$BRANCHLESS_LOG"
@@ -234,7 +464,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..31"
+echo "1..34"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -1094,6 +1324,199 @@ scratch_left=$(find "$TEST_TMP" -maxdepth 1 -type d -name 'stack-trunk.*' | wc -
 REPO="$OLD_REPO"
 echo "ok 30 - trunk materialize conflict leaves refs unchanged and cleans scratch"
 
+# ------------------------------------------------------------------------
+# 31: trunk init/add/status/materialize can use push-gate's stack store as
+#     the manifest source of truth instead of a repo .stack file.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+jq -n '{}' >"$STACK_TEST_STACK_STORE"
+: >"$STACK_TEST_STACK_MATERIALIZATIONS"
+(
+  cd "$REPO"
+  git checkout mho/feature-base >/dev/null 2>&1
+  git checkout -b mho/dolt-insert --no-track >/dev/null 2>&1
+  printf 'dolt insert\n' >dolt-insert.txt
+  git add dolt-insert.txt
+  git commit -m "dolt insert feature" >/dev/null
+
+  git checkout mho/feature-ui >/dev/null 2>&1
+  git checkout -b mho/remove-me --no-track >/dev/null 2>&1
+  printf 'remove me\n' >remove-me.txt
+  git add remove-me.txt
+  git commit -m "temporary removable stack item" >/dev/null
+)
+
+store_init=$(run_stack trunk init --name dolt-demo --base origin/main --trunk mho/dolt-demo.trunk 2>&1)
+expect_contains "$store_init" "Stack stored: dolt-demo"
+expect_contains "$store_init" "stack trunk add --stack dolt-demo"
+
+store_add_base=$(run_stack trunk add --stack dolt-demo --id base --branch mho/feature-base 2>&1)
+expect_contains "$store_add_base" "Stack item stored: dolt-demo/base"
+store_add_insert=$(run_stack trunk add --stack dolt-demo --id insert --branch mho/dolt-insert --after base 2>&1)
+expect_contains "$store_add_insert" "Stack item stored: dolt-demo/insert"
+store_add_api=$(run_stack trunk add --stack dolt-demo --id api --branch mho/feature-api --after insert --pr 43 2>&1)
+expect_contains "$store_add_api" "Stack item stored: dolt-demo/api"
+store_add_ui=$(run_stack trunk add --stack dolt-demo --id ui --branch mho/feature-ui --after api 2>&1)
+expect_contains "$store_add_ui" "Stack item stored: dolt-demo/ui"
+store_add_remove=$(run_stack trunk add --stack dolt-demo --id remove-me --branch mho/remove-me --after ui 2>&1)
+expect_contains "$store_add_remove" "Stack item stored: dolt-demo/remove-me"
+
+set +e
+store_add_existing_after=$(run_stack trunk add --stack dolt-demo --id insert --branch mho/dolt-insert --after ui 2>&1)
+store_add_existing_after_rc=$?
+set -e
+[[ "$store_add_existing_after_rc" != "0" ]] || fail "expected add --after existing item to fail"
+expect_contains "$store_add_existing_after" "use stack trunk move --stack dolt-demo --id insert --after ui"
+
+store_move_dry=$(run_stack trunk move --stack dolt-demo --id ui --first --dry-run 2>&1)
+expect_contains "$store_move_dry" "Current order:"
+expect_contains "$store_move_dry" "Proposed order:"
+expect_contains "$store_move_dry" "Apply order change: stack trunk move --stack dolt-demo --id ui --first"
+
+store_move_last=$(run_stack trunk move --stack dolt-demo --id insert --last 2>&1)
+expect_contains "$store_move_last" "Stack item moved: dolt-demo/insert"
+expect_contains "$store_move_last" "Materialize reordered trunk: stack trunk materialize --stack dolt-demo"
+store_status_moved=$(run_stack trunk status --stack dolt-demo --json)
+[[ "$(jq -r '.manifest.items[-1].id' <<<"$store_status_moved")" == "insert" ]] \
+  || fail "expected insert to move last: $store_status_moved"
+
+store_move_restore=$(run_stack trunk move --stack dolt-demo --id insert --after base 2>&1)
+expect_contains "$store_move_restore" "Stack item moved: dolt-demo/insert"
+store_status_restored=$(run_stack trunk status --stack dolt-demo --json)
+[[ "$(jq -r '.manifest.items[1].id' <<<"$store_status_restored")" == "insert" ]] \
+  || fail "expected insert restored after base: $store_status_restored"
+
+store_remove_dry=$(run_stack trunk remove --stack dolt-demo --id remove-me --dry-run 2>&1)
+expect_contains "$store_remove_dry" "Current order:"
+expect_contains "$store_remove_dry" "Proposed order:"
+expect_contains "$store_remove_dry" "Apply removal: stack trunk remove --stack dolt-demo --id remove-me"
+
+store_remove_live=$(run_stack trunk remove --stack dolt-demo --id remove-me 2>&1)
+expect_contains "$store_remove_live" "Stack item removed: dolt-demo/remove-me"
+store_status_removed=$(run_stack trunk status --stack dolt-demo --json)
+[[ "$(jq -r '[.manifest.items[].id] | index("remove-me") == null' <<<"$store_status_removed")" == "true" ]] \
+  || fail "expected remove-me removed from manifest: $store_status_removed"
+
+store_status=$(run_stack trunk status --stack dolt-demo 2>&1)
+expect_contains "$store_status" "Stack trunk: dolt-demo"
+expect_contains "$store_status" "Source: Dolt stack dolt-demo"
+expect_contains "$store_status" "Materialize changes: stack trunk materialize --stack dolt-demo"
+
+git -C "$REPO" checkout mho/feature-api >/dev/null 2>&1
+store_live=$(run_stack trunk materialize --stack dolt-demo 2>&1)
+expect_contains "$store_live" "Refreshed checked-out worktree for moved branch mho/feature-api"
+expect_contains "$store_live" "Materialized private trunk: mho/dolt-demo.trunk"
+expect_contains "$store_live" "Run affected tests, then inspect: stack trunk status --stack dolt-demo"
+[[ -z "$(git -C "$REPO" status --porcelain)" ]] || fail "materialize should refresh checked-out moved branch worktree"
+git -C "$REPO" merge-base --is-ancestor mho/dolt-insert mho/feature-api \
+  || fail "Dolt-store feature-api should be descendant of inserted branch"
+[[ "$(git -C "$REPO" rev-parse mho/feature-ui)" == "$(git -C "$REPO" rev-parse mho/dolt-demo.trunk)" ]] \
+  || fail "Dolt-store private trunk should point to final stack commit"
+expect_contains "$(cat "$STACK_TEST_STACK_MATERIALIZATIONS")" '"stack":"dolt-demo"'
+expect_contains "$(cat "$STACK_TEST_STACK_MATERIALIZATIONS")" '"trunk_tip":'
+
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":43,"headRefName":"mho/feature-api","baseRefName":"mho/feature-base","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/43","title":"api"},
+  {"number":44,"headRefName":"mho/feature-ui","baseRefName":"mho/feature-api","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/44","title":"ui"}
+]')
+materialized_status=$(run_stack status --pr 44 --children 2>&1)
+expect_contains "$materialized_status" "Topology note: PR #44 base is mho/feature-api"
+expect_contains "$materialized_status" "private trunk mho/dolt-demo.trunk from Dolt stack dolt-demo"
+expect_contains "$materialized_status" "expected after stack trunk materialize"
+expect_not_contains "$materialized_status" "local ancestry is stale/diagnostic"
+store_push_dry=$(run_stack trunk push --stack dolt-demo --dry-run 2>&1)
+expect_contains "$store_push_dry" "Trunk push order: dolt-demo"
+expect_contains "$store_push_dry" "Push approved trunk items: stack trunk push --stack dolt-demo"
+
+store_push_tip_dry=$(run_stack trunk push --stack dolt-demo --tip --dry-run 2>&1)
+expect_contains "$store_push_tip_dry" "Trunk push mode: tip only"
+expect_contains "$store_push_tip_dry" "Pushing validation ref:"
+expect_contains "$store_push_tip_dry" "mho/dolt-demo.trunk"
+expect_contains "$store_push_tip_dry" "Not pushing item branches:"
+expect_contains "$store_push_tip_dry" "Push validation trunk tip: stack trunk push --stack dolt-demo --tip"
+
+: >"$PG_LOG"
+set +e
+store_push_tip_live=$(run_stack trunk push --stack dolt-demo --tip --remote upstream 2>&1)
+store_push_tip_live_rc=$?
+set -e
+[[ "$store_push_tip_live_rc" == "0" ]] \
+  || fail "expected live trunk tip push to exit 0, got $store_push_tip_live_rc: $store_push_tip_live"
+expect_contains "$store_push_tip_live" "Trunk push mode: tip only"
+expect_contains "$store_push_tip_live" "Trunk tip push complete for dolt-demo."
+expect_not_contains "$store_push_tip_live" "syntax error"
+tip_push_calls=$(grep -c "^push push --trunk-stack dolt-demo" "$PG_LOG" || true)
+[[ "$tip_push_calls" == "1" ]] \
+  || fail "expected 1 trunk tip pg push call, got $tip_push_calls: $(cat "$PG_LOG")"
+expect_contains "$(cat "$PG_LOG")" "--branch mho/dolt-demo.trunk"
+expect_contains "$(cat "$PG_LOG")" "--remote upstream"
+expect_not_contains "$(cat "$PG_LOG")" "--branch mho/feature-ui"
+
+: >"$PG_LOG"
+set +e
+store_push_live=$(run_stack trunk push --stack dolt-demo --remote upstream 2>&1)
+store_push_live_rc=$?
+set -e
+[[ "$store_push_live_rc" == "0" ]] \
+  || fail "expected live trunk push to exit 0 after successful item pushes, got $store_push_live_rc: $store_push_live"
+expect_contains "$store_push_live" "Trunk push order: dolt-demo"
+expect_contains "$store_push_live" "Trunk push complete for dolt-demo."
+expect_contains "$store_push_live" "Next step:"
+expect_not_contains "$store_push_live" "syntax error"
+trunk_push_calls=$(grep -c "^push push --trunk-stack dolt-demo" "$PG_LOG" || true)
+[[ "$trunk_push_calls" == "4" ]] \
+  || fail "expected 4 trunk pg push calls, got $trunk_push_calls: $(cat "$PG_LOG")"
+remote_push_calls=$(grep -c -- "--remote upstream" "$PG_LOG" || true)
+[[ "$remote_push_calls" == "4" ]] \
+  || fail "expected each trunk push to preserve --remote upstream, got: $(cat "$PG_LOG")"
+REPO="$OLD_REPO"
+echo "ok 31 - trunk commands use push-gate stack store as source of truth"
+
+# ------------------------------------------------------------------------
+# 32: stack trunk names must be private branches, not protected main refs.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+jq -n '{}' >"$STACK_TEST_STACK_STORE"
+
+safe_trunk_init=$(run_stack trunk init --name scm-cassandra --base origin/main --trunk mho/trunk/scm-cassandra-dev 2>&1)
+expect_contains "$safe_trunk_init" "Stack stored: scm-cassandra"
+
+set +e
+bad_trunk_init=$(run_stack trunk init --name bad-main --base origin/main --trunk upstream/main 2>&1)
+bad_trunk_rc=$?
+set -e
+[[ "$bad_trunk_rc" != "0" ]] || fail "expected protected upstream/main trunk init to fail"
+expect_contains "$bad_trunk_init" "not protected main ref: upstream/main"
+REPO="$OLD_REPO"
+echo "ok 32 - trunk init accepts private trunk branches and rejects upstream main"
+
+# ------------------------------------------------------------------------
+# 33: stack trunk commands print actionable Dolt prerequisite guidance.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+set +e
+export STACK_TEST_PG_DOLT_MISSING=1
+missing_dolt=$(run_stack trunk status --stack missing-dolt 2>&1)
+missing_dolt_rc=$?
+unset STACK_TEST_PG_DOLT_MISSING
+set -e
+[[ "$missing_dolt_rc" != "0" ]] || fail "expected missing Dolt stack status to fail"
+expect_contains "$missing_dolt" "Dolt is required for stack trunk store commands."
+expect_contains "$missing_dolt" "Install: brew install dolt"
+expect_contains "$missing_dolt" "Verify: dolt version"
+expect_contains "$missing_dolt" "PG_STORE_DIR"
+REPO="$OLD_REPO"
+echo "ok 33 - stack trunk commands explain missing Dolt setup"
+
 # Restore default fake PR data for the final help/doc test.
 export STACK_TEST_PR_JSON
 STACK_TEST_PR_JSON=$(jq -c -n '[
@@ -1102,7 +1525,7 @@ STACK_TEST_PR_JSON=$(jq -c -n '[
 ]')
 
 # ------------------------------------------------------------------------
-# 31: help and skill docs match the supported command surface.
+# 34: help and skill docs match the supported command surface.
 # ------------------------------------------------------------------------
 
 help_out=$(run_stack --help 2>&1)
@@ -1110,17 +1533,27 @@ expect_contains "$help_out" "status [--json] [--base REF] [--prefix PREFIX] [--p
 expect_contains "$help_out" "checkout --pr N [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "insert --branch BRANCH (--after BRANCH|--after-pr N)"
-expect_contains "$help_out" "trunk materialize --name NAME|--manifest PATH"
+expect_contains "$help_out" "trunk init --name NAME --base REF --trunk BRANCH"
+expect_contains "$help_out" "trunk add --stack NAME --id ID --branch BRANCH"
+expect_contains "$help_out" "trunk move --stack NAME --id ID"
+expect_contains "$help_out" "trunk remove --stack NAME --id ID"
+expect_contains "$help_out" "trunk materialize --name NAME|--stack NAME|--manifest PATH"
+expect_contains "$help_out" "trunk push --stack NAME [--tip]"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
 expect_contains "$help_out" "STACK_DEBUG=1"
 expect_contains "$help_out" "Every human-readable command prints Next step:"
+expect_contains "$help_out" "Dolt is required for --stack"
 expect_not_contains "$help_out" "prune"
 skill_doc=$(cat "$ROOT/llm/skills/stack/SKILL.md")
+expect_contains "$skill_doc" "agent-stack-refresh"
+expect_contains "$skill_doc" "Dolt install/verification guidance"
 expect_contains "$skill_doc" "stack squash [--dry-run]"
 expect_contains "$skill_doc" "--onto-pr-base"
 expect_contains "$skill_doc" "--keep-scratch"
 expect_contains "$skill_doc" "stack insert --branch"
+expect_contains "$skill_doc" "stack trunk move --stack"
+expect_contains "$skill_doc" "Do not"
 expect_contains "$skill_doc" "stack trunk materialize"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_contains "$skill_doc" "Next step:"
@@ -1128,8 +1561,11 @@ expect_contains "$skill_doc" "stack checkout --pr <N>"
 stack_doc=$(cat "$ROOT/llm/stack/README.md")
 expect_contains "$stack_doc" "GitHub PR base wins"
 expect_contains "$stack_doc" "stack insert --branch"
+expect_contains "$stack_doc" "stack trunk move"
 expect_contains "$stack_doc" "private trunk"
+expect_contains "$stack_doc" "expected topology"
+expect_contains "$stack_doc" "brew install dolt"
 expect_contains "$stack_doc" "Next step:"
 expect_contains "$stack_doc" "stack checkout --pr <N>"
 expect_not_contains "$skill_doc" "## Deferred"
-echo "ok 31 - help and stack skill docs match supported commands"
+echo "ok 34 - help and stack skill docs match supported commands"

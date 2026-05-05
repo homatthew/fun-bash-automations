@@ -6,8 +6,13 @@
 #   checkout --pr N [--base REF] [--prefix PREFIX]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-#   trunk  materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-#   trunk  status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
+#   trunk  init --name NAME --base REF --trunk BRANCH
+#   trunk  add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--base REF]
+#   trunk  move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
+#   trunk  remove --stack NAME --id ID [--dry-run]
+#   trunk  materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+#   trunk  push --stack NAME [--tip] [--dry-run] [--remote NAME]
+#   trunk  status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 #   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 #
@@ -31,6 +36,20 @@ stack_warn() {
   echo "stack: $*" >&2
 }
 
+stack_dolt_required_message() {
+  cat <<'EOF'
+Dolt is required for stack trunk store commands.
+Install: brew install dolt
+Verify: dolt version
+Store: ~/.push-gate/dolt-store by default; set PG_STORE_DIR to override.
+EOF
+}
+
+stack_is_dolt_missing_output() {
+  local output="$1"
+  grep -qiE 'dolt is required|dolt.*not found|command not found: dolt' <<<"$output"
+}
+
 stack_debug_enabled() {
   case "${STACK_DEBUG:-}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -45,6 +64,31 @@ stack_debug() {
 
 stack_helper_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+stack_pg_helper() {
+  local helper
+  helper="$(stack_helper_dir)/push-gate.sh"
+  [[ -f "$helper" ]] || stack_fail "push-gate.sh not found at $helper"
+  printf '%s\n' "$helper"
+}
+
+stack_run_pg_store_command() {
+  local helper="$1"
+  shift
+  local err
+  err=$(mktemp "${TMPDIR:-/tmp}/stack-pg.XXXXXX")
+  if ! bash "$helper" "$@" 2>"$err"; then
+    local detail
+    detail=$(cat "$err")
+    rm -f "$err"
+    if stack_is_dolt_missing_output "$detail"; then
+      stack_fail "$(stack_dolt_required_message)"
+    fi
+    stack_fail "push-gate stack store command failed: $*
+${detail}"
+  fi
+  rm -f "$err"
 }
 
 stack_require() {
@@ -75,6 +119,81 @@ stack_common_dir() {
       printf '%s\n' "$repo_root/$common"
       ;;
   esac
+}
+
+stack_common_dir_for_repo() {
+  local repo="$1" common
+  common=$(git -C "$repo" rev-parse --git-common-dir)
+  case "$common" in
+    /*) printf '%s\n' "$common" ;;
+    *) printf '%s\n' "$repo/$common" ;;
+  esac
+}
+
+stack_enable_rerere_for_repo() {
+  local repo="$1"
+  git -C "$repo" config --local rerere.enabled true >/dev/null 2>&1 || true
+  git -C "$repo" config --local rerere.autoupdate true >/dev/null 2>&1 || true
+  stack_debug "enabled git rerere for $repo"
+}
+
+stack_copy_rerere_cache() {
+  local src_repo="$1" dst_repo="$2" src_common dst_common
+  src_common=$(stack_common_dir_for_repo "$src_repo" 2>/dev/null || true)
+  dst_common=$(stack_common_dir_for_repo "$dst_repo" 2>/dev/null || true)
+  [[ -n "$src_common" && -n "$dst_common" && -d "$src_common/rr-cache" ]] || return 0
+  mkdir -p "$dst_common/rr-cache"
+  cp -R "$src_common/rr-cache/." "$dst_common/rr-cache/" 2>/dev/null || true
+  stack_debug "copied rerere cache into scratch"
+}
+
+stack_has_unmerged_paths() {
+  [[ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]]
+}
+
+stack_rebase_in_progress() {
+  local common
+  common=$(git rev-parse --git-common-dir)
+  [[ -d "$common/rebase-merge" || -d "$common/rebase-apply" ]]
+}
+
+stack_cherry_pick_in_progress() {
+  local common
+  common=$(git rev-parse --git-common-dir)
+  [[ -f "$common/CHERRY_PICK_HEAD" ]]
+}
+
+stack_continue_rebase_after_rerere() {
+  local branch="$1" continued=0
+  while stack_rebase_in_progress; do
+    if stack_has_unmerged_paths; then
+      return 1
+    fi
+    echo "  rerere reused recorded resolution for $branch; continuing rebase..."
+    if ! GIT_EDITOR=true git rebase --continue >/dev/null 2>&1; then
+      stack_has_unmerged_paths && return 1
+      return 1
+    fi
+    continued=1
+  done
+  [[ "$continued" == "1" ]]
+}
+
+stack_rebase_onto() {
+  local target="$1" old_base="$2" branch="$3"
+  git rebase --onto "$target" "$old_base" "$branch" >/dev/null 2>&1 && return 0
+  stack_continue_rebase_after_rerere "$branch" && return 0
+  return 1
+}
+
+stack_cherry_pick_commit() {
+  local commit="$1" branch="$2"
+  git cherry-pick "$commit" >/dev/null 2>&1 && return 0
+  if stack_cherry_pick_in_progress && ! stack_has_unmerged_paths; then
+    echo "  rerere reused recorded resolution for $branch commit ${commit:0:8}; continuing cherry-pick..."
+    GIT_EDITOR=true git cherry-pick --continue >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 stack_shell_quote() {
@@ -713,12 +832,47 @@ stack_topology_mismatch_lines() {
   done <<<"$scoped_map"
 }
 
+stack_trunk_materialized_branch_context() {
+  local branch="$1" helper
+  helper=$(stack_pg_helper)
+  bash "$helper" stack-store-branch-materialization --branch "$branch" --json 2>/dev/null || true
+}
+
+stack_topology_expected_trunk_context() {
+  local branch="$1" local_parent="$2"
+  local context trunk_branch recorded_commit branch_head
+  context=$(stack_trunk_materialized_branch_context "$branch")
+  [[ -n "$context" && "$context" != "null" ]] || return 1
+  trunk_branch=$(jq -r '.trunk // ""' <<<"$context" 2>/dev/null) || return 1
+  recorded_commit=$(jq -r '.commit // ""' <<<"$context" 2>/dev/null) || return 1
+  [[ -n "$trunk_branch" && "$local_parent" == "$trunk_branch" ]] || return 1
+  branch_head=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
+  [[ -n "$recorded_commit" && "$branch_head" == "$recorded_commit" ]] || return 1
+  jq -c --arg branch_head "$branch_head" '. + {branch_head: $branch_head}' <<<"$context"
+}
+
+stack_unexpected_topology_mismatch_lines() {
+  local mismatches="$1" pr_num branch pr_base pr_parent local_parent
+  while IFS=$'\t' read -r pr_num branch pr_base pr_parent local_parent; do
+    [[ -z "$branch" ]] && continue
+    if stack_topology_expected_trunk_context "$branch" "$local_parent" >/dev/null; then
+      continue
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pr_num" "$branch" "$pr_base" "$pr_parent" "$local_parent"
+  done <<<"$mismatches"
+}
+
 stack_warn_topology_mismatches() {
   local scoped_map="$1" local_parent_map="$2" prs="$3" base="$4"
-  local mismatches pr_num branch pr_base pr_parent local_parent
+  local mismatches pr_num branch pr_base pr_parent local_parent trunk_context stack_name
   mismatches=$(stack_topology_mismatch_lines "$scoped_map" "$local_parent_map" "$prs" "$base")
   while IFS=$'\t' read -r pr_num branch pr_base pr_parent local_parent; do
     [[ -z "$branch" ]] && continue
+    if trunk_context=$(stack_topology_expected_trunk_context "$branch" "$local_parent"); then
+      stack_name=$(jq -r '.stack // ""' <<<"$trunk_context")
+      stack_warn "Topology note: PR #$pr_num base is $pr_base, and local nearest parent is private trunk $local_parent from Dolt stack $stack_name. This is expected after stack trunk materialize; GitHub PR base still wins for PR-scoped commands."
+      continue
+    fi
     stack_warn "Topology mismatch: PR #$pr_num base is $pr_base, but local nearest parent is $local_parent. GitHub PR base wins; local ancestry is stale/diagnostic. Using PR base $pr_parent."
   done <<<"$mismatches"
 }
@@ -816,7 +970,7 @@ stack_push_print_agent_handoff() {
 stack_print_status_next_step() {
   local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="$4"
   local parent_map="$5" local_parent_map="$6" prs="$7" base="$8" prefix="$9"
-  local ordered mismatches push_cmd status_cmd sync_cmd
+  local ordered mismatches unexpected_mismatches push_cmd status_cmd sync_cmd
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
   if [[ -z "$ordered" ]]; then
     stack_print_next_step "No stacked branches found under $prefix. Nothing to push."
@@ -824,6 +978,7 @@ stack_print_status_next_step() {
   fi
 
   mismatches=$(stack_topology_mismatch_lines "$parent_map" "$local_parent_map" "$prs" "$base")
+  unexpected_mismatches=$(stack_unexpected_topology_mismatch_lines "$mismatches")
   if [[ -n "$pr_filter" ]]; then
     push_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "true")
     status_cmd=$(stack_status_rerun_command "$base_override" "$prefix_override" "$pr_filter" "true")
@@ -833,7 +988,7 @@ stack_print_status_next_step() {
         "Then push only that PR stack: $push_cmd"
       return 0
     fi
-    if [[ -n "$mismatches" ]]; then
+    if [[ -n "$unexpected_mismatches" ]]; then
       stack_print_next_step \
         "GitHub PR base wins; local ancestry is stale/diagnostic." \
         "For middle-stack edits, first check out the PR branch: stack checkout --pr $pr_filter" \
@@ -855,7 +1010,7 @@ stack_print_status_next_step() {
       "After sync and tests pass, run: $push_cmd"
     return 0
   fi
-  if [[ -n "$mismatches" ]]; then
+  if [[ -n "$unexpected_mismatches" ]]; then
     stack_print_next_step \
       "GitHub PR bases are authoritative. Use PR-scoped commands for affected PRs before broad push." \
       "Example: stack status --pr <N> --children"
@@ -1136,6 +1291,9 @@ stack_sync_create_scratch() {
   user_email=$(git -C "$repo_root" config --get user.email 2>/dev/null || echo "stack-sync@example.invalid")
   git -C "$scratch_repo" config user.name "$user_name"
   git -C "$scratch_repo" config user.email "$user_email"
+  stack_enable_rerere_for_repo "$repo_root"
+  stack_enable_rerere_for_repo "$scratch_repo"
+  stack_copy_rerere_cache "$repo_root" "$scratch_repo"
 
   checkout_branch="$current_branch"
   if [[ -z "$checkout_branch" || "$checkout_branch" == "HEAD" ]]; then
@@ -1267,19 +1425,8 @@ stack_insert_report_failure() {
   stack_fail "scratch insert preflight failed (exit $rc). Real branch refs were not changed."
 }
 
-stack_trunk_manifest_path() {
-  local name="$1" manifest_override="${2:-}"
-  if [[ -n "$manifest_override" ]]; then
-    printf '%s\n' "$manifest_override"
-    return 0
-  fi
-  [[ -n "$name" ]] || stack_fail "stack trunk requires --name NAME or --manifest PATH"
-  printf '.stack/%s.json\n' "$name"
-}
-
-stack_trunk_load_manifest() {
-  local manifest="$1"
-  [[ -f "$manifest" ]] || stack_fail "stack trunk manifest not found: $manifest"
+stack_trunk_validate_manifest_json() {
+  local manifest_json="$1" source="$2"
   jq -e '
     (.version == 1)
     and (.name | type == "string" and length > 0)
@@ -1287,9 +1434,84 @@ stack_trunk_load_manifest() {
     and (.trunk | type == "string" and length > 0)
     and (.items | type == "array" and length > 0)
     and all(.items[]; (.id | type == "string" and length > 0) and (.branch | type == "string" and length > 0))
-  ' "$manifest" >/dev/null \
-    || stack_fail "invalid stack trunk manifest: $manifest"
-  cat "$manifest"
+  ' <<<"$manifest_json" >/dev/null \
+    || stack_fail "invalid stack trunk manifest: $source"
+  stack_trunk_validate_private_trunk_ref "$(jq -r '.trunk' <<<"$manifest_json")"
+}
+
+stack_trunk_validate_private_trunk_ref() {
+  local trunk="$1"
+  case "$trunk" in
+    main|master|refs/heads/main|refs/heads/master|origin/main|origin/master|upstream/main|upstream/master|refs/remotes/origin/main|refs/remotes/origin/master|refs/remotes/upstream/main|refs/remotes/upstream/master)
+      stack_fail "stack trunk must be a private branch, not protected main ref: $trunk"
+      ;;
+  esac
+}
+
+stack_trunk_load_manifest_file() {
+  local manifest="$1"
+  [[ -f "$manifest" ]] || stack_fail "stack trunk manifest not found: $manifest"
+  local manifest_json
+  manifest_json=$(jq -c . "$manifest")
+  stack_trunk_validate_manifest_json "$manifest_json" "$manifest"
+  printf '%s\n' "$manifest_json"
+}
+
+stack_trunk_load_manifest_store() {
+  local stack_name="$1" helper manifest_json
+  [[ -n "$stack_name" ]] || stack_fail "stack trunk store load requires --name/--stack NAME"
+  helper=$(stack_pg_helper)
+  local err
+  err=$(mktemp "${TMPDIR:-/tmp}/stack-pg.XXXXXX")
+  if ! manifest_json=$(bash "$helper" stack-store-manifest --stack "$stack_name" --json 2>"$err"); then
+    local detail
+    detail=$(cat "$err")
+    rm -f "$err"
+    if stack_is_dolt_missing_output "$detail"; then
+      stack_fail "$(stack_dolt_required_message)"
+    fi
+    stack_fail "failed to load stack manifest from Dolt store: $stack_name
+${detail}"
+  fi
+  rm -f "$err"
+  stack_trunk_validate_manifest_json "$manifest_json" "Dolt stack $stack_name"
+  printf '%s\n' "$manifest_json"
+}
+
+stack_trunk_load_manifest() {
+  local name="$1" manifest_override="${2:-}"
+  if [[ -n "$manifest_override" ]]; then
+    stack_trunk_load_manifest_file "$manifest_override"
+  else
+    stack_trunk_load_manifest_store "$name"
+  fi
+}
+
+stack_trunk_source_label() {
+  local name="$1" manifest_override="${2:-}"
+  if [[ -n "$manifest_override" ]]; then
+    printf 'manifest %s\n' "$(stack_shell_quote "$manifest_override")"
+  else
+    printf 'Dolt stack %s\n' "$(stack_shell_quote "$name")"
+  fi
+}
+
+stack_trunk_status_command() {
+  local name="$1" manifest_override="${2:-}"
+  if [[ -n "$manifest_override" ]]; then
+    printf 'stack trunk status --manifest %s\n' "$(stack_shell_quote "$manifest_override")"
+  else
+    printf 'stack trunk status --stack %s\n' "$(stack_shell_quote "$name")"
+  fi
+}
+
+stack_trunk_materialize_command() {
+  local name="$1" manifest_override="${2:-}"
+  if [[ -n "$manifest_override" ]]; then
+    printf 'stack trunk materialize --manifest %s\n' "$(stack_shell_quote "$manifest_override")"
+  else
+    printf 'stack trunk materialize --stack %s\n' "$(stack_shell_quote "$name")"
+  fi
 }
 
 stack_trunk_manifest_field() {
@@ -1366,7 +1588,7 @@ stack_trunk_apply_item_in_scratch() {
   echo "  item $id: $branch ($count commit(s) from $patch_base)"
   while read -r commit; do
     [[ -z "$commit" ]] && continue
-    if ! git cherry-pick "$commit" >/dev/null 2>&1; then
+    if ! stack_cherry_pick_commit "$commit" "$branch"; then
       git cherry-pick --abort >/dev/null 2>&1 || true
       stack_fail "cherry-pick failed for $branch commit ${commit:0:8}"
     fi
@@ -1410,11 +1632,302 @@ stack_trunk_report_failure() {
   stack_fail "stack trunk materialize preflight failed (exit $rc). Real branch refs were not changed."
 }
 
+stack_trunk_materialization_json() {
+  local stack_name="$1" manifest_json="$2"
+  local materialization_id manifest_hash trunk trunk_tip items='[]'
+  local idx=0 id branch pr item_base commit_sha
+  manifest_hash=$(printf '%s' "$manifest_json" | jq -S -c . | shasum -a 256 | awk '{print $1}')
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  trunk_tip=$(git rev-parse --verify "$trunk")
+  materialization_id="$trunk_tip"
+  while IFS=$'\t' read -r id branch pr item_base; do
+    [[ -z "$branch" ]] && continue
+    idx=$((idx + 1))
+    [[ "$pr" == "-" ]] && pr=""
+    commit_sha=$(git rev-parse --verify "$branch")
+    items=$(jq \
+      --arg id "$id" \
+      --arg branch "$branch" \
+      --arg commit "$commit_sha" \
+      --arg pr "$pr" \
+      --argjson order_index "$idx" \
+      '. + [{
+        id: $id,
+        order_index: $order_index,
+        branch: $branch,
+        commit: $commit,
+        pr: (if $pr == "" then null else ($pr | tonumber) end)
+      }]' <<<"$items")
+  done < <(stack_trunk_item_lines "$manifest_json")
+  jq -n \
+    --arg stack "$stack_name" \
+    --arg materialization_id "$materialization_id" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg trunk_tip "$trunk_tip" \
+    --argjson items "$items" \
+    '{
+      stack: $stack,
+      materialization_id: $materialization_id,
+      manifest_hash: $manifest_hash,
+      trunk_tip: $trunk_tip,
+      items: $items
+    }'
+}
+
+stack_trunk_alignment_state() {
+  local manifest_json="$1" trunk item_head prev_head="" id branch pr item_base trunk_head
+  trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  trunk_head=$(git rev-parse --verify "$trunk" 2>/dev/null || echo "")
+  [[ -n "$trunk_head" ]] || { printf 'not_materialized\n'; return 0; }
+
+  while IFS=$'\t' read -r id branch pr item_base; do
+    [[ -z "$branch" ]] && continue
+    item_head=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
+    [[ -n "$item_head" ]] || { printf 'missing_pointer\n'; return 0; }
+    if [[ -n "$prev_head" ]] && ! git merge-base --is-ancestor "$prev_head" "$item_head" 2>/dev/null; then
+      printf 'needs_materialize\n'
+      return 0
+    fi
+    prev_head="$item_head"
+  done < <(stack_trunk_item_lines "$manifest_json")
+
+  if [[ -n "$prev_head" && "$prev_head" == "$trunk_head" ]]; then
+    printf 'up_to_date\n'
+  else
+    printf 'needs_materialize\n'
+  fi
+}
+
+stack_trunk_record_materialization() {
+  local stack_name="$1" manifest_json="$2" materialization_json helper
+  [[ -n "$stack_name" ]] || return 0
+  helper=$(stack_pg_helper)
+  materialization_json=$(stack_trunk_materialization_json "$stack_name" "$manifest_json")
+  stack_run_pg_store_command "$helper" stack-store-record-materialization --stack "$stack_name" --json "$materialization_json" >/dev/null
+}
+
+stack_refresh_worktree_if_current_branch_moved() {
+  local current_branch="$1" moved_tips="$2"
+  [[ -n "$current_branch" && "$current_branch" != "HEAD" ]] || return 0
+  awk -F'\t' -v b="$current_branch" '$1 == b && $2 != $3 { found=1 } END { exit(found ? 0 : 1) }' <<<"$moved_tips" \
+    || return 0
+  git reset --hard HEAD >/dev/null
+  echo "Refreshed checked-out worktree for moved branch $current_branch."
+}
+
+stack_cmd_trunk_init() {
+  local name="" base_ref="" trunk=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name|--stack) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
+      --base) base_ref="${2:-}"; [[ -n "$base_ref" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --trunk) trunk="${2:-}"; [[ -n "$trunk" ]] || stack_fail "--trunk requires a branch"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk init flag: $1" ;;
+    esac
+  done
+  [[ -n "$name" && -n "$base_ref" && -n "$trunk" ]] \
+    || stack_fail "stack trunk init requires --name, --base, and --trunk"
+  stack_trunk_validate_private_trunk_ref "$trunk"
+  stack_repo_root >/dev/null
+  local helper
+  helper=$(stack_pg_helper)
+  stack_run_pg_store_command "$helper" stack-store-init --name "$name" --base "$base_ref" --trunk "$trunk"
+  stack_print_next_step \
+    "Add the first item: stack trunk add --stack $(stack_shell_quote "$name") --id <id> --branch <branch>" \
+    "Inspect the Dolt manifest: stack trunk status --stack $(stack_shell_quote "$name")"
+}
+
+stack_cmd_trunk_add() {
+  local stack_name="" item_id="" branch="" pr_number="" after="" item_base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --id) item_id="${2:-}"; [[ -n "$item_id" ]] || stack_fail "--id requires a value"; shift 2 ;;
+      --branch) branch="${2:-}"; [[ -n "$branch" ]] || stack_fail "--branch requires a value"; shift 2 ;;
+      --pr) pr_number="${2:-}"; [[ "$pr_number" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a number"; shift 2 ;;
+      --after) after="${2:-}"; [[ -n "$after" ]] || stack_fail "--after requires an item id"; shift 2 ;;
+      --base) item_base="${2:-}"; [[ -n "$item_base" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk add flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" && -n "$branch" ]] \
+    || stack_fail "stack trunk add requires --stack, --id, and --branch"
+  stack_repo_root >/dev/null
+  git rev-parse --verify "$branch" >/dev/null 2>&1 \
+    || stack_fail "stack trunk item branch not found: $branch"
+  local helper cmd_args=()
+  helper=$(stack_pg_helper)
+  cmd_args=(stack-store-add --stack "$stack_name" --id "$item_id" --branch "$branch")
+  [[ -n "$pr_number" ]] && cmd_args+=(--pr "$pr_number")
+  [[ -n "$after" ]] && cmd_args+=(--after "$after")
+  [[ -n "$item_base" ]] && cmd_args+=(--base "$item_base")
+  stack_run_pg_store_command "$helper" "${cmd_args[@]}"
+  stack_print_next_step \
+    "Inspect order: stack trunk status --stack $(stack_shell_quote "$stack_name")" \
+    "Materialize when ready: stack trunk materialize --stack $(stack_shell_quote "$stack_name")"
+}
+
+stack_trunk_print_item_order() {
+  local manifest_json="$1"
+  jq -r '.items[] | "  - " + .id + ": " + .branch' <<<"$manifest_json"
+}
+
+stack_trunk_move_proposed_order() {
+  local manifest_json="$1" move_id="$2" after="$3" before="$4" first="$5" last="$6"
+  local ids=() branches=() remaining_ids=() remaining_branches=()
+  local id branch pr item_base found_item="false" found_target="false" i
+  while IFS=$'\t' read -r id branch pr item_base; do
+    [[ -z "$id" ]] && continue
+    ids+=("$id")
+    branches+=("$branch")
+  done < <(stack_trunk_item_lines "$manifest_json")
+  for i in "${!ids[@]}"; do
+    if [[ "${ids[$i]}" == "$move_id" ]]; then
+      found_item="true"
+      continue
+    fi
+    remaining_ids+=("${ids[$i]}")
+    remaining_branches+=("${branches[$i]}")
+  done
+  [[ "$found_item" == "true" ]] || stack_fail "stack item not found: $move_id"
+  if [[ "$first" == "true" ]]; then
+    printf '%s\t%s\n' "$move_id" "$(jq -r --arg id "$move_id" '.items[] | select(.id == $id) | .branch' <<<"$manifest_json")"
+    for i in "${!remaining_ids[@]}"; do printf '%s\t%s\n' "${remaining_ids[$i]}" "${remaining_branches[$i]}"; done
+    return 0
+  fi
+  if [[ "$last" == "true" ]]; then
+    for i in "${!remaining_ids[@]}"; do printf '%s\t%s\n' "${remaining_ids[$i]}" "${remaining_branches[$i]}"; done
+    printf '%s\t%s\n' "$move_id" "$(jq -r --arg id "$move_id" '.items[] | select(.id == $id) | .branch' <<<"$manifest_json")"
+    return 0
+  fi
+  [[ "$after" != "$move_id" && "$before" != "$move_id" ]] || stack_fail "cannot move stack item relative to itself: $move_id"
+  for i in "${!remaining_ids[@]}"; do
+    if [[ -n "$before" && "${remaining_ids[$i]}" == "$before" ]]; then
+      printf '%s\t%s\n' "$move_id" "$(jq -r --arg id "$move_id" '.items[] | select(.id == $id) | .branch' <<<"$manifest_json")"
+      found_target="true"
+    fi
+    printf '%s\t%s\n' "${remaining_ids[$i]}" "${remaining_branches[$i]}"
+    if [[ -n "$after" && "${remaining_ids[$i]}" == "$after" ]]; then
+      printf '%s\t%s\n' "$move_id" "$(jq -r --arg id "$move_id" '.items[] | select(.id == $id) | .branch' <<<"$manifest_json")"
+      found_target="true"
+    fi
+  done
+  [[ "$found_target" == "true" ]] || stack_fail "stack item not found for move target: ${after:-$before}"
+}
+
+stack_trunk_print_proposed_lines() {
+  local lines="$1"
+  awk -F'\t' 'NF { print "  - " $1 ": " $2 }' <<<"$lines"
+}
+
+stack_cmd_trunk_move() {
+  local stack_name="" item_id="" after="" before="" first="false" last="false" dry_run="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --id) item_id="${2:-}"; [[ -n "$item_id" ]] || stack_fail "--id requires a value"; shift 2 ;;
+      --after) after="${2:-}"; [[ -n "$after" ]] || stack_fail "--after requires an item id"; shift 2 ;;
+      --before) before="${2:-}"; [[ -n "$before" ]] || stack_fail "--before requires an item id"; shift 2 ;;
+      --first) first="true"; shift ;;
+      --last) last="true"; shift ;;
+      --dry-run) dry_run="true"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk move flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" ]] || stack_fail "stack trunk move requires --stack and --id"
+  local choices=0
+  [[ -n "$after" ]] && choices=$((choices + 1))
+  [[ -n "$before" ]] && choices=$((choices + 1))
+  [[ "$first" == "true" ]] && choices=$((choices + 1))
+  [[ "$last" == "true" ]] && choices=$((choices + 1))
+  [[ "$choices" == "1" ]] || stack_fail "stack trunk move requires exactly one of --after, --before, --first, or --last"
+  stack_repo_root >/dev/null
+
+  local manifest_json proposed helper cmd_args=() position_arg=""
+  manifest_json=$(stack_trunk_load_manifest "$stack_name" "")
+  proposed=$(stack_trunk_move_proposed_order "$manifest_json" "$item_id" "$after" "$before" "$first" "$last")
+  if [[ "$dry_run" == "true" ]]; then
+    [[ -n "$after" ]] && position_arg=" --after $(stack_shell_quote "$after")"
+    [[ -n "$before" ]] && position_arg=" --before $(stack_shell_quote "$before")"
+    [[ "$first" == "true" ]] && position_arg=" --first"
+    [[ "$last" == "true" ]] && position_arg=" --last"
+    echo "Current order:"
+    stack_trunk_print_item_order "$manifest_json"
+    echo
+    echo "Proposed order:"
+    stack_trunk_print_proposed_lines "$proposed"
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Apply order change: stack trunk move --stack $(stack_shell_quote "$stack_name") --id $(stack_shell_quote "$item_id")$position_arg" \
+      "Then materialize: stack trunk materialize --stack $(stack_shell_quote "$stack_name")"
+    return 0
+  fi
+
+  helper=$(stack_pg_helper)
+  cmd_args=(stack-store-move --stack "$stack_name" --id "$item_id")
+  [[ -n "$after" ]] && cmd_args+=(--after "$after")
+  [[ -n "$before" ]] && cmd_args+=(--before "$before")
+  [[ "$first" == "true" ]] && cmd_args+=(--first)
+  [[ "$last" == "true" ]] && cmd_args+=(--last)
+  stack_run_pg_store_command "$helper" "${cmd_args[@]}"
+  echo "New order:"
+  stack_trunk_print_item_order "$(stack_trunk_load_manifest "$stack_name" "")"
+  stack_print_next_step \
+    "Materialize reordered trunk: stack trunk materialize --stack $(stack_shell_quote "$stack_name")" \
+    "Inspect order: stack trunk status --stack $(stack_shell_quote "$stack_name")"
+}
+
+stack_cmd_trunk_remove() {
+  local stack_name="" item_id="" dry_run="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --id) item_id="${2:-}"; [[ -n "$item_id" ]] || stack_fail "--id requires a value"; shift 2 ;;
+      --dry-run) dry_run="true"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk remove flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" ]] || stack_fail "stack trunk remove requires --stack and --id"
+  stack_repo_root >/dev/null
+  local manifest_json proposed helper
+  manifest_json=$(stack_trunk_load_manifest "$stack_name" "")
+  jq -e --arg id "$item_id" '.items[] | select(.id == $id)' <<<"$manifest_json" >/dev/null \
+    || stack_fail "stack item not found: $item_id"
+  proposed=$(jq -r --arg id "$item_id" '.items[] | select(.id != $id) | [.id, .branch] | @tsv' <<<"$manifest_json")
+  if [[ "$dry_run" == "true" ]]; then
+    echo "Current order:"
+    stack_trunk_print_item_order "$manifest_json"
+    echo
+    echo "Proposed order:"
+    if [[ -n "$proposed" ]]; then
+      stack_trunk_print_proposed_lines "$proposed"
+    else
+      echo "  (empty)"
+    fi
+    stack_print_next_step \
+      "Refs unchanged in dry-run." \
+      "Apply removal: stack trunk remove --stack $(stack_shell_quote "$stack_name") --id $(stack_shell_quote "$item_id")" \
+      "Then materialize: stack trunk materialize --stack $(stack_shell_quote "$stack_name")"
+    return 0
+  fi
+  helper=$(stack_pg_helper)
+  stack_run_pg_store_command "$helper" stack-store-remove --stack "$stack_name" --id "$item_id"
+  echo "New order:"
+  stack_trunk_print_item_order "$(stack_trunk_load_manifest "$stack_name" "")"
+  stack_print_next_step \
+    "Materialize reordered trunk: stack trunk materialize --stack $(stack_shell_quote "$stack_name")" \
+    "Inspect order: stack trunk status --stack $(stack_shell_quote "$stack_name")"
+}
+
 stack_cmd_trunk_materialize() {
   local name="" manifest_override="" dry_run="false" keep_scratch="false" base_override="" prefix_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --name) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
+      --name|--stack) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
       --manifest) manifest_override="${2:-}"; [[ -n "$manifest_override" ]] || stack_fail "--manifest requires a path"; shift 2 ;;
       --dry-run) dry_run="true"; shift ;;
       --keep-scratch) keep_scratch="true"; shift ;;
@@ -1430,10 +1943,10 @@ stack_cmd_trunk_materialize() {
   local dirty
   dirty=$(git status --porcelain 2>/dev/null)
   [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
+  stack_enable_rerere_for_repo "$(stack_repo_root)"
 
-  local manifest manifest_json manifest_base base prefix parent_map item_bases pre_tips trunk
-  manifest=$(stack_trunk_manifest_path "$name" "$manifest_override")
-  manifest_json=$(stack_trunk_load_manifest "$manifest")
+  local manifest_json manifest_base base prefix parent_map item_bases pre_tips trunk
+  manifest_json=$(stack_trunk_load_manifest "$name" "$manifest_override")
   manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
   base=$(stack_upstream_ref "${base_override:-$manifest_base}")
   prefix=$(stack_prefix "$prefix_override")
@@ -1445,7 +1958,7 @@ stack_cmd_trunk_materialize() {
   if [[ "$dry_run" == "true" ]]; then
     stack_print_next_step \
       "Refs unchanged in dry-run." \
-      "Build the private trunk and branch pointers: stack trunk materialize --manifest $(stack_shell_quote "$manifest")"
+      "Build the private trunk and branch pointers: $(stack_trunk_materialize_command "$name" "$manifest_override")"
     return 0
   fi
 
@@ -1489,6 +2002,7 @@ stack_cmd_trunk_materialize() {
   moved_tips=$(stack_sync_moved_tips "$pre_tips" "$scratch_tips")
   if [[ -n "$moved_tips" ]]; then
     stack_sync_apply_refs "$scratch_repo" "$moved_tips"
+    stack_refresh_worktree_if_current_branch_moved "$current_branch" "$moved_tips"
   fi
 
   local leases moved=0 moved_branches="" stale_branches="" b old_sha new_sha lease
@@ -1508,6 +2022,10 @@ stack_cmd_trunk_materialize() {
     fi
   done <<<"$moved_tips"
 
+  if [[ -z "$manifest_override" ]]; then
+    stack_trunk_record_materialization "$name" "$manifest_json"
+  fi
+
   if (( moved == 0 )); then
     echo "No refs moved."
     stack_print_next_step "Private trunk already materialized."
@@ -1522,7 +2040,7 @@ stack_cmd_trunk_materialize() {
       "Materialized private trunk: $trunk" \
       "Moved refs: $moved_branches" \
       "$lease_line" \
-      "Run affected tests, then inspect: stack trunk status --manifest $(stack_shell_quote "$manifest")"
+      "Run affected tests, then inspect: $(stack_trunk_status_command "$name" "$manifest_override")"
   fi
 
   if [[ "$keep_scratch" == "true" ]]; then
@@ -1535,7 +2053,7 @@ stack_cmd_trunk_status() {
   local name="" manifest_override="" format="table" base_override="" prefix_override=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --name) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
+      --name|--stack) name="${2:-}"; [[ -n "$name" ]] || stack_fail "--name requires a value"; shift 2 ;;
       --manifest) manifest_override="${2:-}"; [[ -n "$manifest_override" ]] || stack_fail "--manifest requires a path"; shift 2 ;;
       --json) format="json"; shift ;;
       --base) base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
@@ -1547,15 +2065,15 @@ stack_cmd_trunk_status() {
   stack_require jq
   stack_repo_root >/dev/null
 
-  local manifest manifest_json manifest_base base prefix parent_map item_bases trunk
-  manifest=$(stack_trunk_manifest_path "$name" "$manifest_override")
-  manifest_json=$(stack_trunk_load_manifest "$manifest")
+  local manifest_json manifest_base base prefix parent_map item_bases trunk alignment_state
+  manifest_json=$(stack_trunk_load_manifest "$name" "$manifest_override")
   manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
   base=$(stack_upstream_ref "${base_override:-$manifest_base}")
   prefix=$(stack_prefix "$prefix_override")
   parent_map=$(stack_build_parent_map "$prefix" "$base")
   item_bases=$(stack_trunk_resolve_item_bases "$manifest_json" "$parent_map" "$base")
   trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  alignment_state=$(stack_trunk_alignment_state "$manifest_json")
 
   if [[ "$format" == "json" ]]; then
     local items='[]' id branch pr patch_base head trunk_head
@@ -1567,12 +2085,13 @@ stack_cmd_trunk_status() {
       items=$(jq --arg id "$id" --arg branch "$branch" --arg pr "$pr" --arg patch_base "$patch_base" --arg head "$head" \
         '. + [{id:$id, branch:$branch, pr:$pr, patch_base:$patch_base, head:$head}]' <<<"$items")
     done <<<"$item_bases"
-    jq -n --argjson manifest "$manifest_json" --arg base "$base" --arg trunk_head "$trunk_head" --argjson items "$items" \
-      '{manifest:$manifest, resolved_base:$base, trunk_head:$trunk_head, items:$items}'
+    jq -n --argjson manifest "$manifest_json" --arg base "$base" --arg trunk_head "$trunk_head" --arg alignment_state "$alignment_state" --argjson items "$items" \
+      '{manifest:$manifest, resolved_base:$base, trunk_head:$trunk_head, alignment_state:$alignment_state, items:$items}'
     return 0
   fi
 
   stack_trunk_print_plan "$manifest_json" "$item_bases" "${base_override:-$manifest_base}"
+  echo "  Source: $(stack_trunk_source_label "$name" "$manifest_override")"
   echo
   printf '%-22s %-36s %s\n' "Pointer" "Branch" "Head"
   printf '%-22s %-36s %s\n' "-------" "------" "----"
@@ -1582,16 +2101,134 @@ stack_cmd_trunk_status() {
     [[ -z "$branch" ]] && continue
     printf '%-22s %-36s %s\n' "$id" "$branch" "$(git rev-parse --short "$branch" 2>/dev/null || echo "missing")"
   done <<<"$item_bases"
-  stack_print_next_step "Materialize changes: stack trunk materialize --manifest $(stack_shell_quote "$manifest")"
+  case "$alignment_state" in
+    up_to_date)
+      stack_print_next_step \
+        "Private trunk is up to date; no materialize needed." \
+        "Run affected tests, then prepare approval if needed: pg prepare-trunk --stack $(stack_shell_quote "${name:-$(stack_trunk_manifest_field "$manifest_json" "name")}") --what <what> --why <why> --approach <approach> --item-briefs <file>"
+      ;;
+    not_materialized)
+      stack_print_next_step "Private trunk missing; Materialize changes: $(stack_trunk_materialize_command "$name" "$manifest_override")"
+      ;;
+    missing_pointer)
+      stack_print_next_step "One or more stack item branches are missing; fix refs before materializing."
+      ;;
+    *)
+      stack_print_next_step "Materialize changes: $(stack_trunk_materialize_command "$name" "$manifest_override")"
+      ;;
+  esac
+}
+
+stack_cmd_trunk_push() {
+  local stack_name="" dry_run="false" remote="" tip_only="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --tip) tip_only="true"; shift ;;
+      --dry-run) dry_run="true"; shift ;;
+      --remote) remote="${2:-}"; [[ -n "$remote" ]] || stack_fail "--remote requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk push flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || stack_fail "stack trunk push requires --stack NAME"
+  stack_require jq
+  stack_repo_root >/dev/null
+  local helper check allowed reason
+  helper=$(stack_pg_helper)
+  local err
+  err=$(mktemp "${TMPDIR:-/tmp}/stack-pg.XXXXXX")
+  if ! check=$(bash "$helper" check-trunk --stack "$stack_name" 2>"$err"); then
+    local detail
+    detail=$(cat "$err")
+    rm -f "$err"
+    if stack_is_dolt_missing_output "$detail"; then
+      stack_fail "$(stack_dolt_required_message)"
+    fi
+    stack_fail "failed to check trunk lease for $stack_name
+${detail}"
+  fi
+  rm -f "$err"
+  allowed=$(jq -r '.allowed' <<<"$check")
+  if [[ "$allowed" != "true" ]]; then
+    reason=$(jq -r '.reason' <<<"$check")
+    echo "$reason"
+    stack_print_next_step \
+      "Refresh the materialization if needed: stack trunk materialize --stack $(stack_shell_quote "$stack_name")" \
+      "Prepare approval: pg prepare-trunk --stack $(stack_shell_quote "$stack_name") --what <what> --why <why> --approach <approach>" \
+      "Ask the human to review: pg trunk --stack $(stack_shell_quote "$stack_name")"
+    return 0
+  fi
+
+  local manifest_json trunk_ref trunk_tip
+  manifest_json=$(stack_trunk_load_manifest "$stack_name" "")
+  trunk_ref=$(stack_trunk_manifest_field "$manifest_json" "trunk")
+  trunk_tip=$(jq -r '.materialization.trunk_tip // ""' <<<"$check")
+
+  if [[ "$tip_only" == "true" ]]; then
+    echo "Trunk push mode: tip only"
+    echo "Pushing validation ref:"
+    printf '  %s @ %s\n' "$trunk_ref" "${trunk_tip:0:12}"
+    echo
+    echo "Not pushing item branches:"
+    jq -r '.materialization.items[] | [.order_index, .id, .branch, .commit] | @tsv' <<<"$check" |
+    while IFS=$'\t' read -r order_index id branch commit_sha; do
+      [[ -z "$branch" ]] && continue
+      printf '  %s. %s -> %s @ %s\n' "$order_index" "$id" "$branch" "${commit_sha:0:12}"
+    done
+
+    if [[ "$dry_run" == "true" ]]; then
+      stack_print_next_step "Push validation trunk tip: stack trunk push --stack $(stack_shell_quote "$stack_name") --tip"
+      return 0
+    fi
+
+    local assert_flow
+    assert_flow=$(printf 'push stack trunk tip %s\nbranch %s\nsource %s\n' "$stack_name" "$trunk_ref" "$trunk_tip")
+    local args=(push --trunk-stack "$stack_name" --branch "$trunk_ref" --source-ref "$trunk_tip" --force-with-lease --assert-flow "$assert_flow")
+    [[ -n "$remote" ]] && args+=(--remote "$remote")
+    bash "$helper" "${args[@]}"
+
+    stack_print_next_step "Trunk tip push complete for $stack_name."
+    return 0
+  fi
+
+  echo "Trunk push order: $stack_name"
+  jq -r '.materialization.items[] | [.order_index, .id, .branch, .commit] | @tsv' <<<"$check" |
+  while IFS=$'\t' read -r order_index id branch commit_sha; do
+    [[ -z "$branch" ]] && continue
+    printf '  %s. %s -> %s @ %s\n' "$order_index" "$id" "$branch" "${commit_sha:0:12}"
+  done
+
+  if [[ "$dry_run" == "true" ]]; then
+    stack_print_next_step "Push approved trunk items: stack trunk push --stack $(stack_shell_quote "$stack_name")"
+    return 0
+  fi
+
+  jq -r '.materialization.items[] | [.id, .branch, .commit] | @tsv' <<<"$check" |
+  while IFS=$'\t' read -r id branch commit_sha; do
+    [[ -z "$branch" ]] && continue
+    local assert_flow
+    assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\n' "$stack_name" "$id" "$branch" "$commit_sha")
+    local args=(push --trunk-stack "$stack_name" --branch "$branch" --source-ref "$commit_sha" --force-with-lease --assert-flow "$assert_flow")
+    [[ -n "$remote" ]] && args+=(--remote "$remote")
+    bash "$helper" "${args[@]}"
+  done
+
+  stack_print_next_step "Trunk push complete for $stack_name."
 }
 
 stack_cmd_trunk() {
   local sub="${1:-}"
-  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: status or materialize"
+  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, status, materialize, or push"
   shift
   case "$sub" in
+    init) stack_cmd_trunk_init "$@" ;;
+    add) stack_cmd_trunk_add "$@" ;;
+    move) stack_cmd_trunk_move "$@" ;;
+    remove) stack_cmd_trunk_remove "$@" ;;
     status) stack_cmd_trunk_status "$@" ;;
     materialize) stack_cmd_trunk_materialize "$@" ;;
+    push) stack_cmd_trunk_push "$@" ;;
     -h|--help|help) stack_usage ;;
     *) stack_fail "unknown trunk subcommand: $sub" ;;
   esac
@@ -1610,7 +2247,7 @@ stack_adopt_rebase_descendant() {
     echo "  (dry-run) git rebase --onto ${target} ${off:0:8} ${cur}"
   else
     echo "  rebasing ${cur} onto ${target} (off ${off:0:8})"
-    if ! git rebase --onto "$target" "$off" "$cur" >/dev/null 2>&1; then
+    if ! stack_rebase_onto "$target" "$off" "$cur"; then
       git rebase --abort >/dev/null 2>&1 || true
       stack_fail "rebase failed for ${cur}. Resolve manually:
   git rebase --onto ${target} ${off} ${cur}"
@@ -1755,7 +2392,7 @@ stack_insert_run_preflight() {
     echo "  (dry-run) git rebase --onto ${after_branch} ${insert_base:0:8} ${branch}"
   else
     echo "  rebasing inserted branch ${branch} onto ${after_branch} (off ${insert_base:0:8})"
-    if ! git rebase --onto "$after_branch" "$insert_base" "$branch" >/dev/null 2>&1; then
+    if ! stack_rebase_onto "$after_branch" "$insert_base" "$branch"; then
       git rebase --abort >/dev/null 2>&1 || true
       stack_fail "rebase failed for inserted branch ${branch}. Resolve manually:
   git rebase --onto ${after_branch} ${insert_base} ${branch}"
@@ -1997,6 +2634,7 @@ stack_cmd_squash() {
   local dirty
   dirty=$(git status --porcelain 2>/dev/null)
   [[ -z "$dirty" ]] || stack_fail "working tree dirty. git stash or commit first."
+  stack_enable_rerere_for_repo "$(stack_repo_root)"
 
   local current
   current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
@@ -2093,7 +2731,7 @@ stack_cmd_squash() {
     old_parent_tip=$(stack_lookup_tip "$child_parent" "$pre_tips")
     [[ -n "$old_parent_tip" ]] || stack_fail "could not find old parent tip for $child_parent"
     echo "Restacking $child onto $child_parent"
-    if ! git rebase --onto "$child_parent" "$old_parent_tip" "$child" >/dev/null 2>&1; then
+    if ! stack_rebase_onto "$child_parent" "$old_parent_tip" "$child"; then
       git rebase --abort >/dev/null 2>&1 || true
       git checkout "$current" >/dev/null 2>&1 || true
       stack_fail "rebase failed for ${child}. Resolve manually:
@@ -2428,13 +3066,39 @@ Commands:
     atomically. --after uses local ancestry; --after-pr scopes descendants by
     GitHub PR baseRefName.
 
-  trunk status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
-  trunk materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch]
-                   [--base REF] [--prefix PREFIX]
-    Use a per-stack private trunk manifest as the source of truth. Materialize
-    builds the trunk in scratch by replaying item branches in manifest order,
-    then atomically moves the trunk ref and each item branch pointer to the
-    corresponding trunk commit. The private trunk is not main.
+  trunk init --name NAME --base REF --trunk BRANCH
+    Create or update a Dolt-backed stack manifest. The private trunk is per
+    stack and is not main.
+
+  trunk add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID]
+            [--base REF]
+    Add or update one item in the Dolt-backed stack manifest.
+
+  trunk move --stack NAME --id ID (--after ID|--before ID|--first|--last)
+             [--dry-run]
+    Reorder an existing item in the Dolt-backed stack manifest. This changes
+    manifest order only; run trunk materialize to rebuild the private trunk.
+
+  trunk remove --stack NAME --id ID [--dry-run]
+    Remove one item from the Dolt-backed stack manifest and compact order.
+
+  trunk status --name NAME|--stack NAME|--manifest PATH [--json]
+               [--base REF] [--prefix PREFIX]
+  trunk materialize --name NAME|--stack NAME|--manifest PATH
+                   [--dry-run] [--keep-scratch] [--base REF]
+                   [--prefix PREFIX]
+    Use a per-stack private trunk manifest as the source of truth. --name and
+    --stack read the manifest from push-gate's Dolt store; --manifest is a
+    compatibility/import path. Materialize builds the trunk in scratch by
+    replaying item branches in manifest order, then atomically moves the trunk
+    ref and each item branch pointer to the corresponding trunk commit. If the
+    checked-out branch moves, the worktree is refreshed to the new HEAD.
+    Dolt is required for --stack: brew install dolt && dolt version.
+
+  trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
+    Push each approved item commit from the materialized private trunk through
+    push-gate's trunk lease flow. With --tip, push only the private trunk ref
+    as the composed-stack validation target and leave item branches untouched.
 
   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]
          [--pr N] [--base REF] [--prefix PREFIX]
@@ -2460,7 +3124,8 @@ Guided workflow:
     stack push --pr N --children
   Every human-readable command prints Next step: with the safe command or
   human approval action to run next. Topology warnings mean GitHub PR
-  baseRefName wins; local ancestry is stale/diagnostic.
+  baseRefName wins; local ancestry is stale/diagnostic unless the warning is
+  an expected Dolt trunk materialization note.
 
 Debugging:
   Set STACK_DEBUG=1 to print repo roots, branch counts, scratch paths,

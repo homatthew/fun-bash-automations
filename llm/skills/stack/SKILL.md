@@ -8,8 +8,9 @@ description: Local-first stacked-PR CLI. Use `stack status` instead of hand-roll
 Local-first stacked-PR tooling. Merges `git`, `gh`, CI, and `pg` into one view
 (`stack status`), preflights cascade-rebases in a scratch clone after upstream
 advances or a parent squash-merges (`stack sync`), inserts a new branch into an
-existing stack with descendant restacks (`stack insert`), materializes declared
-stacks onto per-stack private trunks (`stack trunk materialize`), squashes noisy
+existing stack with descendant restacks (`stack insert`), stores declared stack
+manifests in push-gate's Dolt store (`stack trunk init/add`), materializes them
+onto per-stack private trunks (`stack trunk materialize`), squashes noisy
 incremental branch commits (`stack squash`), and orchestrates the per-branch
 `pg prepare` / `pg push` loop across the whole stack (`stack push`).
 Human-readable output is guided: every command ends with a `Next step:` block
@@ -17,6 +18,17 @@ that states the safe command or human approval action to run next.
 
 `stack push` never bypasses `pg` — it stops and waits for the human to
 approve each lease, then resumes on re-invocation.
+
+## Stale context reset
+
+If the user says an ongoing agent may have stale stack context, tell that agent
+to run `agent-stack-refresh` directly before using `stack` or `pg`.
+`stack-latest` is a human zsh alias for the same helper and may not exist in
+non-interactive agent shells. The helper prints the live SKILL.md paths, the
+current Dolt-backed trunk flow, Dolt install/verification guidance, and optional
+`stack --help` / `pg --help` output. Skills are symlinked by `fba-deploy`, so
+fresh sessions see updates automatically; already-running sessions must
+explicitly re-read or run the helper.
 
 ## When to invoke
 
@@ -43,9 +55,12 @@ approve each lease, then resumes on re-invocation.
   rebases in scratch, then imports moved refs atomically.
 - User needs to insert a local branch into a purely local stack — run
   `stack insert --branch <new-branch> --after <branch>`.
-- User has a codified stack manifest and wants the stack's private trunk to be
-  the source of truth — run `stack trunk status --manifest <path>` and then
-  `stack trunk materialize --manifest <path>`. The private trunk is not `main`;
+- User has a codified stack and wants the stack's private trunk to be the
+  source of truth — use `stack trunk init --name <name> --base <ref> --trunk <branch>`
+  and `stack trunk add --stack <name> ...`, then run `stack trunk status --stack <name>`
+  and `stack trunk materialize --stack <name>`. The manifest lives in
+  push-gate's Dolt store; `--manifest <path>` is only a compatibility/import
+  path. The private trunk is not `main`, `origin/main`, or `upstream/main`;
   branch pointers move to commits on that stack-specific trunk.
 - User wants to clean up the current PR before pushing — run `stack squash`.
   It squashes the current branch's commits relative to its stack parent, then
@@ -74,8 +89,13 @@ stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-stack trunk status --name NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
-stack trunk materialize --name NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack trunk init --name NAME --base REF --trunk BRANCH
+stack trunk add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--base REF]
+stack trunk move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
+stack trunk remove --stack NAME --id ID [--dry-run]
+stack trunk status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
+stack trunk materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
 stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 ```
@@ -97,6 +117,19 @@ scratch clone is removed on success and failure. Use `--keep-scratch` to
 preserve it; the command prints the scratch path and a debug command to rerun
 the preflight.
 
+`stack sync`, `stack insert`, `stack trunk materialize`, and `stack squash`
+enable Git rerere automatically for the repo-local config they operate on:
+
+```
+git config --local rerere.enabled true
+git config --local rerere.autoupdate true
+```
+
+Scratch clones receive the source repo's rerere cache before stack-managed
+restacks, so repeated conflicts can be reused. Separate clones need their own
+repo-local rerere config and their own rerere cache/history; enabling rerere in
+one clone does not create conflict history in another clone.
+
 Set `STACK_DEBUG=1` when alpha-testing or investigating surprising behavior.
 Debug output goes to stderr and includes repo roots, branch counts, scratch
 paths, lease-match counts, planned ref updates on transaction failures, and
@@ -113,14 +146,48 @@ scratch clone or moving refs. Any moved branch with an existing push-gate lease
 is reported as stale. The command does not change GitHub PR bases; retarget or
 create PRs separately when the inserted branch becomes the new review base.
 
-`stack trunk materialize` reads a manifest, builds that stack's private trunk in
-a scratch clone, replays item branches in manifest order, and then atomically
-moves the trunk ref plus each item branch pointer to the corresponding commit on
-the trunk. This is the declarative form of restacking: change the manifest
-order, then materialize once. The private trunk is per stack and is never
-`main`. `stack trunk status` shows the manifest order, inferred patch bases,
-trunk ref, and pointer branch heads. PR base changes are handled separately;
-this command only moves local refs and reports stale push-gate leases.
+`stack trunk init` and `stack trunk add` write the manifest to the Dolt-backed
+push-gate store. `stack trunk materialize --stack <name>` reads that manifest,
+builds the stack's private trunk in a scratch clone, replays item branches in
+manifest order, and then atomically moves the trunk ref plus each item branch
+pointer to the corresponding commit on the trunk. This is the declarative form
+of restacking: change the stored order, then materialize once. The private trunk
+is per stack and is never `main`. `stack trunk status` shows the manifest order,
+inferred patch bases, trunk ref, and pointer branch heads. PR base changes are
+handled separately; this command only moves local refs, records the
+materialization in Dolt, and reports stale push-gate leases.
+Use `stack trunk move --stack <name> --id <item> --after <item>` or
+`--before` / `--first` / `--last` to reorder existing items. Use
+`stack trunk remove --stack <name> --id <item>` to prune an item. These commands
+change the Dolt manifest order only; run `stack trunk materialize --stack <name>`
+afterwards to rebuild the private trunk commits and branch pointers. Do not
+create a `-v2` stack just to reorder items.
+If the checked-out branch is one of the refs moved by materialization, `stack`
+refreshes the worktree to the new branch tip so the checkout does not appear
+dirty with inverse changes from the old tip. Dolt must be on PATH for
+`--stack` commands; install with `brew install dolt`, verify with `dolt version`,
+and use `PG_STORE_DIR` only when the default `~/.push-gate/dolt-store` should be
+overridden.
+After the human approves the materialized trunk with `pg trunk --stack <name>`,
+`stack trunk push --stack <name>` walks the approved item commits and invokes
+`pg push --trunk-stack` for each branch. If the trunk lease is missing or stale,
+it stops with the exact prepare/review commands instead of pushing.
+Use `stack trunk push --stack <name> --tip` when the goal is CI validation of
+the composed stack: it pushes only the private trunk ref at the approved
+`trunk_tip` and leaves item branches untouched.
+
+The push-gate trunk approval draft uses explicit stack vocabulary:
+- `stack_items`: ordered review/push units.
+- `stack_items[].brief`: required item-level `what`, `why`, and `approach`;
+  use YAML bullet lists for reviewable detail.
+- `pointer_commit`: exact commit approved for that stack item.
+- `base_commit`: effective review base for that stack item.
+- `contained_commits`: commits included in the item patch range.
+- `changed_files`: readable file groups such as `added` and `modified`.
+
+Agents should use the stack-level `prepare-trunk` brief for the cross-item
+`what`, `why`, and `approach`, and pass `pg prepare-trunk --item-briefs FILE`
+for item-level explanations.
 
 `stack squash` acts on the currently checked-out branch. It determines that
 branch's stack parent, soft-resets the branch to that parent, commits one

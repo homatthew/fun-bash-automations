@@ -164,6 +164,1327 @@ WHERE repo_root = $(pg_sql_quote "$repo_root")
 SQL
 }
 
+# ------------------------------------------------------------------------
+# Versioned stack-trunk store (Dolt)
+# ------------------------------------------------------------------------
+# Stack-trunk workflows use Dolt as the source of truth for stack manifests,
+# materializations, and trunk leases. Legacy branch leases remain in the
+# git-common-dir JSON files above.
+
+pg_dolt_store_dir() {
+  printf '%s\n' "${PG_STORE_DIR:-$HOME/.push-gate/dolt-store}"
+}
+
+pg_dolt_author_name() {
+  printf '%s\n' "${PG_DOLT_USER_NAME:-push-gate}"
+}
+
+pg_dolt_author_email() {
+  printf '%s\n' "${PG_DOLT_USER_EMAIL:-push-gate@localhost}"
+}
+
+pg_dolt_required_message() {
+  cat <<'EOF'
+dolt is required for stack-trunk workflows.
+Install: brew install dolt
+Verify: dolt version
+Store: ~/.push-gate/dolt-store by default; set PG_STORE_DIR to override.
+EOF
+}
+
+pg_require_dolt() {
+  command -v dolt >/dev/null 2>&1 || {
+    pg_fail "$(pg_dolt_required_message)"
+    return 1
+  }
+}
+
+pg_dolt_sql() {
+  local query="$1"
+  pg_require_dolt || return 1
+  pg_dolt_init || return 1
+  (cd "$(pg_dolt_store_dir)" && dolt sql -q "$query")
+}
+
+pg_dolt_sql_csv() {
+  local query="$1"
+  pg_require_dolt || return 1
+  pg_dolt_init || return 1
+  (cd "$(pg_dolt_store_dir)" && dolt sql -r csv -q "$query")
+}
+
+pg_dolt_commit() {
+  local msg="$1"
+  pg_require_dolt || return 1
+  (
+    cd "$(pg_dolt_store_dir)"
+    dolt add . >/dev/null 2>&1 || true
+    dolt commit -m "$msg" >/dev/null 2>&1 || true
+  )
+}
+
+pg_csv_unquote() {
+  local value="$1"
+  value="${value%$'\r'}"
+  if [[ "$value" == \"*\" ]]; then
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value//\"\"/\"}"
+  fi
+  printf '%s\n' "$value"
+}
+
+pg_dolt_init() {
+  local dir author_name author_email
+  dir=$(pg_dolt_store_dir)
+  author_name=$(pg_dolt_author_name)
+  author_email=$(pg_dolt_author_email)
+  mkdir -p "$dir" || return 1
+  if [[ ! -d "$dir/.dolt" ]]; then
+    (cd "$dir" && dolt init --name "$author_name" --email "$author_email" >/dev/null) || return 1
+  fi
+  (
+    cd "$dir"
+    dolt config --local --set user.name "$author_name" >/dev/null 2>&1 || true
+    dolt config --local --set user.email "$author_email" >/dev/null 2>&1 || true
+    dolt sql -q '
+CREATE TABLE IF NOT EXISTS repos (
+  repo_key VARCHAR(512) PRIMARY KEY,
+  repo_root VARCHAR(1024) NOT NULL,
+  common_dir VARCHAR(1024) NOT NULL,
+  repo_name VARCHAR(255) NOT NULL,
+  updated_at VARCHAR(64) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stacks (
+  repo_key VARCHAR(512) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  base_ref VARCHAR(512) NOT NULL,
+  trunk_branch VARCHAR(512) NOT NULL,
+  status VARCHAR(64) NOT NULL,
+  version BIGINT NOT NULL,
+  created_at VARCHAR(64) NOT NULL,
+  updated_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, name)
+);
+CREATE TABLE IF NOT EXISTS stack_items (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  item_id VARCHAR(255) NOT NULL,
+  order_index BIGINT NOT NULL,
+  branch VARCHAR(512) NOT NULL,
+  pr_number BIGINT,
+  item_base VARCHAR(512),
+  created_at VARCHAR(64) NOT NULL,
+  updated_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, stack_name, item_id)
+);
+CREATE TABLE IF NOT EXISTS trunk_materializations (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  materialization_id VARCHAR(80) NOT NULL,
+  manifest_hash VARCHAR(80) NOT NULL,
+  trunk_tip VARCHAR(80) NOT NULL,
+  created_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, stack_name, materialization_id)
+);
+CREATE TABLE IF NOT EXISTS trunk_materialization_items (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  materialization_id VARCHAR(80) NOT NULL,
+  item_id VARCHAR(255) NOT NULL,
+  order_index BIGINT NOT NULL,
+  branch VARCHAR(512) NOT NULL,
+  commit_sha VARCHAR(80) NOT NULL,
+  pr_number BIGINT,
+  PRIMARY KEY (repo_key, stack_name, materialization_id, item_id)
+);
+CREATE TABLE IF NOT EXISTS trunk_leases (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  manifest_hash VARCHAR(80) NOT NULL,
+  materialization_id VARCHAR(80) NOT NULL,
+  trunk_tip VARCHAR(80) NOT NULL,
+  approved_scope_json TEXT,
+  brief_json TEXT,
+  status VARCHAR(64) NOT NULL,
+  created_by VARCHAR(255) NOT NULL,
+  created_at VARCHAR(64) NOT NULL,
+  updated_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, stack_name)
+);
+CREATE TABLE IF NOT EXISTS trunk_lease_items (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  item_id VARCHAR(255) NOT NULL,
+  order_index BIGINT NOT NULL,
+  branch VARCHAR(512) NOT NULL,
+  commit_sha VARCHAR(80) NOT NULL,
+  pr_number BIGINT,
+  PRIMARY KEY (repo_key, stack_name, item_id)
+);
+CREATE TABLE IF NOT EXISTS pending_trunk_assertions (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  branch VARCHAR(512) NOT NULL,
+  remote VARCHAR(255) NOT NULL,
+  source_ref VARCHAR(512) NOT NULL,
+  commit_sha VARCHAR(80) NOT NULL,
+  assert_flow TEXT NOT NULL,
+  created_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, stack_name, branch)
+);
+' >/dev/null
+    dolt sql -q "ALTER TABLE pending_trunk_assertions ADD COLUMN remote VARCHAR(255) NOT NULL DEFAULT 'origin';" >/dev/null 2>&1 || true
+  ) || return 1
+}
+
+pg_repo_key() {
+  pg_git_common_dir
+}
+
+pg_store_upsert_repo() {
+  local repo_key repo_root common_dir repo_name now
+  repo_key=$(pg_repo_key) || return 1
+  repo_root=$(pg_main_repo_path) || return 1
+  common_dir=$(pg_git_common_dir) || return 1
+  repo_name=$(pg_repo_name)
+  now=$(pg_now_utc)
+  pg_dolt_sql "
+REPLACE INTO repos (repo_key, repo_root, common_dir, repo_name, updated_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$repo_root"), $(pg_sql_quote "$common_dir"), $(pg_sql_quote "$repo_name"), $(pg_sql_quote "$now"));
+" >/dev/null
+}
+
+pg_stack_manifest_json() {
+  local stack_name="$1" repo_key
+  repo_key=$(pg_repo_key) || return 1
+  pg_dolt_sql_csv "
+SELECT JSON_OBJECT(
+  'version', 1,
+  'name', s.name,
+  'base', s.base_ref,
+  'trunk', s.trunk_branch,
+  'store_version', s.version,
+  'items', COALESCE((
+    SELECT JSON_ARRAYAGG(JSON_OBJECT(
+      'id', i.item_id,
+      'branch', i.branch,
+      'pr', i.pr_number,
+      'base', i.item_base
+    ))
+    FROM (
+      SELECT item_id, branch, pr_number, item_base
+      FROM stack_items
+      WHERE repo_key = s.repo_key AND stack_name = s.name
+      ORDER BY order_index
+    ) i
+  ), JSON_ARRAY())
+) AS manifest
+FROM stacks s
+WHERE s.repo_key = $(pg_sql_quote "$repo_key") AND s.name = $(pg_sql_quote "$stack_name");
+" | tail -n +2 | sed 's/^"//; s/"$//; s/""/"/g' | head -1
+}
+
+pg_cmd_stack_store_init() {
+  local name="" base_ref="" trunk=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --base) base_ref="$2"; shift 2 ;;
+      --trunk) trunk="$2"; shift 2 ;;
+      *) pg_fail "Unknown stack-store-init option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$name" && -n "$base_ref" && -n "$trunk" ]] || pg_fail "stack-store-init requires --name, --base, and --trunk"
+  pg_store_upsert_repo || return 1
+  local repo_key now existing_version version created_at
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  existing_version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$name");" | tail -n +2 | head -1)
+  created_at=$(pg_dolt_sql_csv "SELECT created_at FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$name");" | tail -n +2 | head -1)
+  version="${existing_version:-0}"
+  version=$((version + 1))
+  [[ -n "$created_at" ]] || created_at="$now"
+  pg_dolt_sql "
+REPLACE INTO stacks (repo_key, name, base_ref, trunk_branch, status, version, created_at, updated_at)
+VALUES (
+  $(pg_sql_quote "$repo_key"),
+  $(pg_sql_quote "$name"),
+  $(pg_sql_quote "$base_ref"),
+  $(pg_sql_quote "$trunk"),
+  'active',
+  $version,
+  $(pg_sql_quote "$created_at"),
+  $(pg_sql_quote "$now")
+);
+" >/dev/null
+  pg_dolt_commit "stack init $name"
+  echo "Stack stored: $name"
+}
+
+pg_cmd_stack_store_add() {
+  local stack_name="" item_id="" branch="" pr_number="" after="" item_base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack) stack_name="$2"; shift 2 ;;
+      --id) item_id="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --pr) pr_number="$2"; shift 2 ;;
+      --after) after="$2"; shift 2 ;;
+      --base) item_base="$2"; shift 2 ;;
+      *) pg_fail "Unknown stack-store-add option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" && -n "$branch" ]] || pg_fail "stack-store-add requires --stack, --id, and --branch"
+  pg_store_upsert_repo || return 1
+  local repo_key now order_index stack_exists version pr_sql base_sql created_at existing_order
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  stack_exists=$(pg_dolt_sql_csv "SELECT COUNT(*) FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  [[ "${stack_exists:-0}" != "0" ]] || pg_fail "stack not found in Dolt store: $stack_name"
+  existing_order=$(pg_dolt_sql_csv "SELECT order_index FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");" | tail -n +2 | head -1)
+  if [[ -n "$after" && -n "$existing_order" ]]; then
+    pg_fail "stack item already exists: $item_id; use stack trunk move --stack $stack_name --id $item_id --after $after"
+  fi
+  if [[ -n "$after" ]]; then
+    order_index=$(pg_dolt_sql_csv "SELECT order_index + 1 FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$after");" | tail -n +2 | head -1)
+    [[ -n "$order_index" ]] || pg_fail "stack item not found for --after: $after"
+    pg_dolt_sql "UPDATE stack_items SET order_index = order_index + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND order_index >= $order_index;" >/dev/null
+  else
+    if [[ -n "$existing_order" ]]; then
+      order_index="$existing_order"
+    else
+      order_index=$(pg_dolt_sql_csv "SELECT COALESCE(MAX(order_index), 0) + 1 FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+      [[ -n "$order_index" ]] || order_index=1
+    fi
+  fi
+  pr_sql=$(pg_sql_int_or_null "$pr_number")
+  if [[ -n "$item_base" ]]; then base_sql="$(pg_sql_quote "$item_base")"; else base_sql="NULL"; fi
+  created_at=$(pg_dolt_sql_csv "SELECT created_at FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");" | tail -n +2 | head -1)
+  [[ -n "$created_at" ]] || created_at="$now"
+  pg_dolt_sql "
+REPLACE INTO stack_items (repo_key, stack_name, item_id, order_index, branch, pr_number, item_base, created_at, updated_at)
+VALUES (
+  $(pg_sql_quote "$repo_key"),
+  $(pg_sql_quote "$stack_name"),
+  $(pg_sql_quote "$item_id"),
+  $order_index,
+  $(pg_sql_quote "$branch"),
+  $pr_sql,
+  $base_sql,
+  $(pg_sql_quote "$created_at"),
+  $(pg_sql_quote "$now")
+);
+UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");
+" >/dev/null
+  version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  pg_dolt_commit "stack add $stack_name/$item_id"
+  echo "Stack item stored: $stack_name/$item_id (version $version)"
+}
+
+pg_stack_store_update_order() {
+  local repo_key="$1" stack_name="$2" now="$3"
+  shift 3
+  local idx=1 item_id sql=""
+  for item_id in "$@"; do
+    [[ -z "$item_id" ]] && continue
+    sql="${sql}UPDATE stack_items SET order_index = $idx, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");
+"
+    idx=$((idx + 1))
+  done
+  [[ -n "$sql" ]] || return 0
+  pg_dolt_sql "$sql" >/dev/null
+}
+
+pg_cmd_stack_store_move() {
+  local stack_name="" item_id="" after="" before="" first="false" last="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --id) item_id="$2"; shift 2 ;;
+      --after) after="$2"; shift 2 ;;
+      --before) before="$2"; shift 2 ;;
+      --first) first="true"; shift ;;
+      --last) last="true"; shift ;;
+      *) pg_fail "Unknown stack-store-move option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" ]] || pg_fail "stack-store-move requires --stack and --id"
+  local choices=0
+  [[ -n "$after" ]] && choices=$((choices + 1))
+  [[ -n "$before" ]] && choices=$((choices + 1))
+  [[ "$first" == "true" ]] && choices=$((choices + 1))
+  [[ "$last" == "true" ]] && choices=$((choices + 1))
+  [[ "$choices" == "1" ]] || pg_fail "stack-store-move requires exactly one of --after, --before, --first, or --last"
+  [[ "$after" != "$item_id" && "$before" != "$item_id" ]] || pg_fail "cannot move stack item relative to itself: $item_id"
+  pg_store_upsert_repo || return 1
+  local repo_key now stack_exists version found_item="false" found_target="false"
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  stack_exists=$(pg_dolt_sql_csv "SELECT COUNT(*) FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  [[ "${stack_exists:-0}" != "0" ]] || pg_fail "stack not found in Dolt store: $stack_name"
+
+  local remaining=() new_order=() existing_id
+  while IFS=, read -r existing_id; do
+    [[ -z "$existing_id" ]] && continue
+    existing_id=$(pg_csv_unquote "$existing_id")
+    if [[ "$existing_id" == "$item_id" ]]; then
+      found_item="true"
+      continue
+    fi
+    remaining+=("$existing_id")
+  done < <(pg_dolt_sql_csv "
+SELECT item_id
+FROM stack_items
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name")
+ORDER BY order_index;
+" | tail -n +2)
+  [[ "$found_item" == "true" ]] || pg_fail "stack item not found: $item_id"
+
+  if [[ "$first" == "true" ]]; then
+    new_order=("$item_id" "${remaining[@]}")
+  elif [[ "$last" == "true" ]]; then
+    new_order=("${remaining[@]}" "$item_id")
+  else
+    for existing_id in "${remaining[@]}"; do
+      if [[ -n "$before" && "$existing_id" == "$before" ]]; then
+        new_order+=("$item_id")
+        found_target="true"
+      fi
+      new_order+=("$existing_id")
+      if [[ -n "$after" && "$existing_id" == "$after" ]]; then
+        new_order+=("$item_id")
+        found_target="true"
+      fi
+    done
+    [[ "$found_target" == "true" ]] || pg_fail "stack item not found for move target: ${after:-$before}"
+  fi
+
+  pg_stack_store_update_order "$repo_key" "$stack_name" "$now" "${new_order[@]}"
+  pg_dolt_sql "UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" >/dev/null
+  version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  pg_dolt_commit "stack move $stack_name/$item_id"
+  echo "Stack item moved: $stack_name/$item_id (version $version)"
+}
+
+pg_cmd_stack_store_remove() {
+  local stack_name="" item_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --id) item_id="$2"; shift 2 ;;
+      *) pg_fail "Unknown stack-store-remove option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$item_id" ]] || pg_fail "stack-store-remove requires --stack and --id"
+  pg_store_upsert_repo || return 1
+  local repo_key now stack_exists item_order version remaining=() existing_id
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  stack_exists=$(pg_dolt_sql_csv "SELECT COUNT(*) FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  [[ "${stack_exists:-0}" != "0" ]] || pg_fail "stack not found in Dolt store: $stack_name"
+  item_order=$(pg_dolt_sql_csv "SELECT order_index FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");" | tail -n +2 | head -1)
+  [[ -n "$item_order" ]] || pg_fail "stack item not found: $item_id"
+  while IFS=, read -r existing_id; do
+    [[ -z "$existing_id" ]] && continue
+    existing_id=$(pg_csv_unquote "$existing_id")
+    [[ "$existing_id" == "$item_id" ]] && continue
+    remaining+=("$existing_id")
+  done < <(pg_dolt_sql_csv "
+SELECT item_id
+FROM stack_items
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name")
+ORDER BY order_index;
+" | tail -n +2)
+  pg_dolt_sql "DELETE FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");" >/dev/null
+  pg_stack_store_update_order "$repo_key" "$stack_name" "$now" "${remaining[@]}"
+  pg_dolt_sql "UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" >/dev/null
+  version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
+  pg_dolt_commit "stack remove $stack_name/$item_id"
+  echo "Stack item removed: $stack_name/$item_id (version $version)"
+}
+
+pg_cmd_stack_store_manifest() {
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown stack-store-manifest option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "stack-store-manifest requires --stack NAME"
+  pg_store_upsert_repo || return 1
+  local manifest
+  manifest=$(pg_stack_manifest_json "$stack_name")
+  [[ -n "$manifest" ]] || pg_fail "stack not found in Dolt store: $stack_name"
+  if [[ "$format" == "json" ]]; then
+    jq -c . <<<"$manifest"
+  else
+    jq -r '"Stack: " + .name, "Base: " + .base, "Trunk: " + .trunk, (.items[] | "  - " + .id + ": " + .branch)' <<<"$manifest"
+  fi
+}
+
+pg_cmd_stack_store_record_materialization() {
+  local stack_name="" materialization_json=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack) stack_name="$2"; shift 2 ;;
+      --json) materialization_json="$2"; shift 2 ;;
+      *) pg_fail "Unknown stack-store-record-materialization option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$materialization_json" ]] || pg_fail "stack-store-record-materialization requires --stack and --json"
+  pg_store_upsert_repo || return 1
+  local repo_key now materialization_id manifest_hash trunk_tip
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  materialization_id=$(jq -r '.materialization_id' <<<"$materialization_json")
+  manifest_hash=$(jq -r '.manifest_hash' <<<"$materialization_json")
+  trunk_tip=$(jq -r '.trunk_tip' <<<"$materialization_json")
+  [[ -n "$materialization_id" && -n "$manifest_hash" && -n "$trunk_tip" ]] || pg_fail "invalid materialization json"
+  pg_dolt_sql "
+REPLACE INTO trunk_materializations (repo_key, stack_name, materialization_id, manifest_hash, trunk_tip, created_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$now"));
+DELETE FROM trunk_materialization_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND materialization_id = $(pg_sql_quote "$materialization_id");
+" >/dev/null
+  while IFS=$'\t' read -r item_id order_index branch commit_sha pr_number; do
+    [[ -z "$item_id" ]] && continue
+    local pr_sql="NULL"
+    [[ "$pr_number" =~ ^[0-9]+$ ]] && pr_sql="$pr_number"
+    pg_dolt_sql "
+REPLACE INTO trunk_materialization_items (repo_key, stack_name, materialization_id, item_id, order_index, branch, commit_sha, pr_number)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$item_id"), $order_index, $(pg_sql_quote "$branch"), $(pg_sql_quote "$commit_sha"), $pr_sql);
+" >/dev/null
+  done < <(jq -r '.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' <<<"$materialization_json")
+  pg_dolt_commit "stack materialize $stack_name"
+  echo "Materialization stored: $stack_name $materialization_id"
+}
+
+pg_cmd_stack_store_branch_materialization() {
+  local branch="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown stack-store-branch-materialization option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$branch" ]] || pg_fail "stack-store-branch-materialization requires --branch"
+  pg_store_upsert_repo || return 1
+  local repo_key row stack_name trunk_branch materialization_id manifest_hash trunk_tip item_id order_index commit_sha pr_number created_at
+  repo_key=$(pg_repo_key) || return 1
+  row=$(pg_dolt_sql_csv "
+SELECT s.name, s.trunk_branch, m.materialization_id, m.manifest_hash, m.trunk_tip,
+       i.item_id, i.order_index, i.commit_sha, COALESCE(i.pr_number, ''), m.created_at
+FROM trunk_materialization_items i
+JOIN trunk_materializations m
+  ON m.repo_key = i.repo_key
+ AND m.stack_name = i.stack_name
+ AND m.materialization_id = i.materialization_id
+JOIN stacks s
+  ON s.repo_key = i.repo_key
+ AND s.name = i.stack_name
+WHERE i.repo_key = $(pg_sql_quote "$repo_key")
+  AND i.branch = $(pg_sql_quote "$branch")
+ORDER BY m.created_at DESC
+LIMIT 1;
+" | tail -n +2 | head -1)
+  [[ -n "$row" ]] || return 1
+  IFS=, read -r stack_name trunk_branch materialization_id manifest_hash trunk_tip item_id order_index commit_sha pr_number created_at <<<"$row"
+  stack_name=$(pg_csv_unquote "$stack_name")
+  trunk_branch=$(pg_csv_unquote "$trunk_branch")
+  materialization_id=$(pg_csv_unquote "$materialization_id")
+  manifest_hash=$(pg_csv_unquote "$manifest_hash")
+  trunk_tip=$(pg_csv_unquote "$trunk_tip")
+  item_id=$(pg_csv_unquote "$item_id")
+  commit_sha=$(pg_csv_unquote "$commit_sha")
+  pr_number=$(pg_csv_unquote "$pr_number")
+  created_at=$(pg_csv_unquote "$created_at")
+  if [[ "$format" == "json" ]]; then
+    jq -n \
+      --arg stack "$stack_name" \
+      --arg trunk "$trunk_branch" \
+      --arg materialization_id "$materialization_id" \
+      --arg manifest_hash "$manifest_hash" \
+      --arg trunk_tip "$trunk_tip" \
+      --arg item_id "$item_id" \
+      --arg order_index "$order_index" \
+      --arg branch "$branch" \
+      --arg commit "$commit_sha" \
+      --arg pr "$pr_number" \
+      --arg created_at "$created_at" \
+      '{
+        stack: $stack,
+        trunk: $trunk,
+        materialization_id: $materialization_id,
+        manifest_hash: $manifest_hash,
+        trunk_tip: $trunk_tip,
+        item_id: $item_id,
+        order_index: ($order_index | tonumber),
+        branch: $branch,
+        commit: $commit,
+        pr: (if $pr == "" then null else ($pr | tonumber) end),
+        created_at: $created_at
+      }'
+  else
+    printf '%s\t%s\t%s\t%s\n' "$stack_name" "$trunk_branch" "$branch" "$commit_sha"
+  fi
+}
+
+pg_trunk_prepare_path() {
+  local stack_name="$1" repo_name
+  repo_name=$(pg_repo_name)
+  printf '/tmp/pg-prepare-trunk-%s-%s.json' \
+    "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$stack_name")"
+}
+
+pg_trunk_draft_path() {
+  local stack_name="$1" repo_name
+  repo_name=$(pg_repo_name)
+  printf '/tmp/pg-approve-trunk-%s-%s.json' \
+    "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$stack_name")"
+}
+
+pg_trunk_latest_materialization_json() {
+  local stack_name="$1" repo_key row materialization_id manifest_hash trunk_tip created_at
+  repo_key=$(pg_repo_key) || return 1
+  row=$(pg_dolt_sql_csv "
+SELECT materialization_id, manifest_hash, trunk_tip, created_at
+FROM trunk_materializations
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name")
+ORDER BY created_at DESC
+LIMIT 1;
+" | tail -n +2 | head -1)
+  [[ -n "$row" ]] || return 1
+  IFS=, read -r materialization_id manifest_hash trunk_tip created_at <<<"$row"
+  local items='[]' item_id order_index branch commit_sha pr_number
+  while IFS=, read -r item_id order_index branch commit_sha pr_number; do
+    [[ -z "$item_id" ]] && continue
+    pr_number=$(pg_csv_unquote "$pr_number")
+    items=$(jq \
+      --arg id "$item_id" \
+      --arg branch "$branch" \
+      --arg commit "$commit_sha" \
+      --arg pr "$pr_number" \
+      --argjson order_index "$order_index" \
+      '. + [{
+        id: $id,
+        order_index: $order_index,
+        branch: $branch,
+        commit: $commit,
+        pr: (if $pr == "" then null else ($pr | tonumber) end)
+      }]' <<<"$items")
+  done < <(pg_dolt_sql_csv "
+SELECT item_id, order_index, branch, commit_sha, COALESCE(pr_number, '')
+FROM trunk_materialization_items
+WHERE repo_key = $(pg_sql_quote "$repo_key")
+  AND stack_name = $(pg_sql_quote "$stack_name")
+  AND materialization_id = $(pg_sql_quote "$materialization_id")
+ORDER BY order_index;
+" | tail -n +2)
+  jq -n \
+    --arg stack "$stack_name" \
+    --arg materialization_id "$materialization_id" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg trunk_tip "$trunk_tip" \
+    --arg created_at "$created_at" \
+    --argjson items "$items" \
+    '{
+      stack: $stack,
+      materialization_id: $materialization_id,
+      manifest_hash: $manifest_hash,
+      trunk_tip: $trunk_tip,
+      created_at: $created_at,
+      items: $items
+    }'
+}
+
+pg_trunk_active_lease_json() {
+  local stack_name="$1" repo_key row manifest_hash materialization_id trunk_tip status updated_at
+  repo_key=$(pg_repo_key) || return 1
+  row=$(pg_dolt_sql_csv "
+SELECT manifest_hash, materialization_id, trunk_tip, status, updated_at
+FROM trunk_leases
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" | tail -n +2 | head -1)
+  [[ -n "$row" ]] || return 1
+  IFS=, read -r manifest_hash materialization_id trunk_tip status updated_at <<<"$row"
+  local items='[]' item_id order_index branch commit_sha pr_number
+  while IFS=, read -r item_id order_index branch commit_sha pr_number; do
+    [[ -z "$item_id" ]] && continue
+    pr_number=$(pg_csv_unquote "$pr_number")
+    items=$(jq \
+      --arg id "$item_id" \
+      --arg branch "$branch" \
+      --arg commit "$commit_sha" \
+      --arg pr "$pr_number" \
+      --argjson order_index "$order_index" \
+      '. + [{
+        id: $id,
+        order_index: $order_index,
+        branch: $branch,
+        commit: $commit,
+        pr: (if $pr == "" then null else ($pr | tonumber) end)
+      }]' <<<"$items")
+  done < <(pg_dolt_sql_csv "
+SELECT item_id, order_index, branch, commit_sha, COALESCE(pr_number, '')
+FROM trunk_lease_items
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name")
+ORDER BY order_index;
+" | tail -n +2)
+  jq -n \
+    --arg stack "$stack_name" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg materialization_id "$materialization_id" \
+    --arg trunk_tip "$trunk_tip" \
+    --arg status "$status" \
+    --arg updated_at "$updated_at" \
+    --argjson items "$items" \
+    '{
+      stack: $stack,
+      manifest_hash: $manifest_hash,
+      materialization_id: $materialization_id,
+      trunk_tip: $trunk_tip,
+      status: $status,
+      updated_at: $updated_at,
+      items: $items
+    }'
+}
+
+pg_trunk_check_json() {
+  local stack_name="$1" materialization lease
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || true)
+  if [[ -z "$materialization" ]]; then
+    jq -n --arg stack "$stack_name" '{allowed:false, reason:("No materialization recorded for stack " + $stack + ". Run stack trunk materialize first.")}'
+    return 0
+  fi
+  lease=$(pg_trunk_active_lease_json "$stack_name" 2>/dev/null || true)
+  if [[ -z "$lease" ]]; then
+    jq -n --arg stack "$stack_name" '{allowed:false, reason:("No active trunk lease for stack " + $stack + ". Run pg prepare-trunk, then pg trunk.")}'
+    return 0
+  fi
+  local lease_status lease_manifest lease_tip materialization_manifest materialization_tip lease_items materialization_items
+  lease_status=$(jq -r '.status' <<<"$lease")
+  lease_manifest=$(jq -r '.manifest_hash' <<<"$lease")
+  lease_tip=$(jq -r '.trunk_tip' <<<"$lease")
+  materialization_manifest=$(jq -r '.manifest_hash' <<<"$materialization")
+  materialization_tip=$(jq -r '.trunk_tip' <<<"$materialization")
+  lease_items=$(jq -c '[.items[] | {id,branch,commit}]' <<<"$lease")
+  materialization_items=$(jq -c '[.items[] | {id,branch,commit}]' <<<"$materialization")
+  if [[ "$lease_status" != "active" ]]; then
+    jq -n --arg status "$lease_status" '{allowed:false, reason:("Trunk lease is not active: " + $status)}'
+    return 0
+  fi
+  if [[ "$lease_manifest" != "$materialization_manifest" ]]; then
+    jq -n '{allowed:false, reason:"Stack manifest changed after trunk approval. Re-run pg prepare-trunk and pg trunk."}'
+    return 0
+  fi
+  if [[ "$lease_tip" != "$materialization_tip" ]]; then
+    jq -n '{allowed:false, reason:"Private trunk tip changed after approval. Re-run pg prepare-trunk and pg trunk."}'
+    return 0
+  fi
+  if [[ "$lease_items" != "$materialization_items" ]]; then
+    jq -n '{allowed:false, reason:"Stack item commits changed after trunk approval. Re-run pg prepare-trunk and pg trunk."}'
+    return 0
+  fi
+  jq -n --argjson lease "$lease" --argjson materialization "$materialization" \
+    '{allowed:true, lease:$lease, materialization:$materialization}'
+}
+
+pg_git_log_json_for_range() {
+  local range="$1"
+  local commits='[]' sha short subject
+  while IFS=$'\t' read -r sha short subject; do
+    [[ -z "$sha" ]] && continue
+    commits=$(jq \
+      --arg sha "$sha" \
+      --arg short "$short" \
+      --arg subject "$subject" \
+      '. + [{sha:$sha, short:$short, subject:$subject}]' <<<"$commits")
+  done < <(git log --reverse --format='%H%x09%h%x09%s' "$range" 2>/dev/null | awk 'NR <= 20')
+  printf '%s\n' "$commits"
+}
+
+pg_git_changed_files_json_for_range() {
+  local range="$1"
+  local files='[]' status path extra change
+  while IFS=$'\t' read -r status path extra; do
+    [[ -z "$status" || -z "$path" ]] && continue
+    if [[ -n "$extra" ]]; then
+      path="$path -> $extra"
+    fi
+    case "$status" in
+      A) change="added" ;;
+      M) change="modified" ;;
+      D) change="deleted" ;;
+      R*) change="renamed" ;;
+      C*) change="copied" ;;
+      T) change="type changed" ;;
+      U) change="unmerged" ;;
+      *) change="$status" ;;
+    esac
+    files=$(jq \
+      --arg change "$change" \
+      --arg path "$path" \
+      '. + [{change:$change, path:$path}]' <<<"$files")
+  done < <(git diff --name-status "$range" 2>/dev/null | awk 'NR <= 50')
+  printf '%s\n' "$files"
+}
+
+pg_json_or_yaml_file() {
+  local file="$1"
+  [[ -f "$file" ]] || { pg_fail "brief file not found: $file"; return 1; }
+  case "$file" in
+    *.json)
+      jq -c . "$file"
+      ;;
+    *.yaml|*.yml)
+      command -v yq >/dev/null 2>&1 \
+        || { pg_fail "YAML brief files require yq. Use JSON or install yq."; return 1; }
+      yq eval '.' "$file" --output-format=json | jq -c .
+      ;;
+    *)
+      if jq -e . "$file" >/dev/null 2>&1; then
+        jq -c . "$file"
+      else
+        command -v yq >/dev/null 2>&1 \
+          || { pg_fail "brief file is not JSON, and yq is unavailable for YAML: $file"; return 1; }
+        yq eval '.' "$file" --output-format=json | jq -c .
+      fi
+      ;;
+  esac
+}
+
+pg_normalize_item_briefs_json() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    printf '[]\n'
+    return 0
+  fi
+  jq -c '
+    if type == "array" then .
+    elif has("item_briefs") then .item_briefs
+    else error("item brief file must be an array or object with item_briefs")
+    end
+    | map({
+        id: (.id // error("item brief missing id")),
+        what: (.what // null),
+        why: (.why // null),
+        approach: (.approach // null),
+        risks: (.risks // null),
+        verification: (.verification // null)
+      })
+  ' <<<"$raw"
+}
+
+pg_validate_trunk_item_briefs() {
+  local materialization="$1" item_briefs="$2"
+  jq -e --argjson materialization "$materialization" --argjson item_briefs "$item_briefs" '
+    def ids(a): [a[] | .id] | sort;
+    def filled:
+      if type == "array" then length > 0 and all(.[]; type == "string" and length > 0)
+      elif type == "string" then length > 0
+      else false
+      end;
+    (ids($materialization.items) == ids($item_briefs))
+    and all($item_briefs[]; (.what | filled) and (.why | filled) and (.approach | filled))
+  ' >/dev/null <<<"{}"
+}
+
+pg_trunk_stack_items_json() {
+  local stack_name="$1" materialization="$2" item_briefs="${3:-[]}"
+  local manifest base_ref base_commit previous_commit details='[]'
+  manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
+  base_ref=$(jq -r '.base // ""' <<<"${manifest:-{}}" 2>/dev/null || echo "")
+  if [[ -n "$base_ref" ]]; then
+    base_commit=$(git rev-parse --verify "$base_ref" 2>/dev/null || true)
+  else
+    base_commit=""
+  fi
+
+  local id order_index branch commit_sha pr_number review_base review_base_label range subject body commits files stat shortstat
+  while IFS=$'\t' read -r id order_index branch commit_sha pr_number; do
+    [[ -z "$id" ]] && continue
+    review_base="$previous_commit"
+    review_base_label="$previous_commit"
+    if [[ -z "$review_base" ]]; then
+      review_base="$base_commit"
+      review_base_label="$base_ref"
+    fi
+    if [[ -z "$review_base" ]]; then
+      review_base=$(git rev-parse --verify "${commit_sha}^" 2>/dev/null || true)
+      review_base_label="${commit_sha}^"
+    fi
+    if [[ -n "$review_base" ]]; then
+      range="${review_base}..${commit_sha}"
+      commits=$(pg_git_log_json_for_range "$range")
+      files=$(pg_git_changed_files_json_for_range "$range")
+      stat=$(git diff --stat "$range" 2>/dev/null | awk 'NR <= 30')
+      shortstat=$(git diff --shortstat "$range" 2>/dev/null | sed 's/^ *//')
+    else
+      range="$commit_sha"
+      commits=$(jq -n --arg sha "$commit_sha" --arg short "${commit_sha:0:12}" --arg subject "$(git log -1 --format='%s' "$commit_sha" 2>/dev/null || echo "")" '[{sha:$sha, short:$short, subject:$subject}]')
+      files='[]'
+      stat=""
+      shortstat=""
+    fi
+    subject=$(git log -1 --format='%s' "$commit_sha" 2>/dev/null || echo "")
+    body=$(git log -1 --format='%b' "$commit_sha" 2>/dev/null | awk 'NF && n < 40 { print; n++ }' || true)
+    details=$(jq \
+      --arg id "$id" \
+      --argjson order_index "$order_index" \
+      --arg branch "$branch" \
+      --arg pointer_commit "$commit_sha" \
+      --arg pr "$pr_number" \
+      --arg base_commit "$review_base" \
+      --arg base_label "$review_base_label" \
+      --arg range "$range" \
+      --arg pointer_subject "$subject" \
+      --arg pointer_body "$body" \
+      --arg stat "$stat" \
+      --arg shortstat "$shortstat" \
+      --argjson item_briefs "$item_briefs" \
+      --argjson commits "$commits" \
+      --argjson files "$files" \
+      --arg id_for_brief "$id" \
+      '
+      ($item_briefs | map(select(.id == $id_for_brief)) | first // {}) as $item_brief
+      | . + [{
+        id: $id,
+        order_index: $order_index,
+        branch: $branch,
+        pr: (if $pr == "" then null else ($pr | tonumber) end),
+        brief: {
+          what: ($item_brief.what // $pointer_subject // null),
+          why: ($item_brief.why // null),
+          approach: ($item_brief.approach // null),
+          risks: ($item_brief.risks // null),
+          verification: ($item_brief.verification // null)
+        },
+        pointer_commit: $pointer_commit,
+        pointer_subject: $pointer_subject,
+        pointer_body: (if $pointer_body == "" then null else $pointer_body end),
+        base_commit: (if $base_commit == "" then null else $base_commit end),
+        base_label: (if $base_label == "" then null else $base_label end),
+        range: $range,
+        contained_commits: $commits,
+        changed_files: (
+          $files
+          | sort_by(.change)
+          | group_by(.change)
+          | map({change: .[0].change, paths: map(.path)})
+        ),
+        stat: (if $stat == "" then null else $stat end),
+        shortstat: (if $shortstat == "" then null else $shortstat end)
+      }]' <<<"$details")
+    previous_commit="$commit_sha"
+  done < <(jq -r '.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' <<<"$materialization")
+  printf '%s\n' "$details"
+}
+
+pg_cmd_prepare_trunk() {
+  local stack_name="" what="" why="" approach="" scope="" risks="" item_briefs_file="" item_briefs_raw="" item_briefs="[]"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --what) what="$2"; shift 2 ;;
+      --why) why="$2"; shift 2 ;;
+      --approach) approach="$2"; shift 2 ;;
+      --scope) scope="$2"; shift 2 ;;
+      --risks) risks="$2"; shift 2 ;;
+      --item-briefs|--item-brief-file) item_briefs_file="$2"; shift 2 ;;
+      *) pg_fail "Unknown prepare-trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg prepare-trunk requires --stack NAME"
+  local missing=()
+  [[ -z "$what" || "$what" == "<"* ]] && missing+=("--what")
+  [[ -z "$why" || "$why" == "<"* ]] && missing+=("--why")
+  [[ -z "$approach" || "$approach" == "<"* ]] && missing+=("--approach")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    pg_fail "pg prepare-trunk requires --what, --why, and --approach."
+    return 1
+  fi
+  local repo_root materialization path
+  repo_root=$(pg_repo_root) || { pg_fail "not in a git repo"; return 1; }
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name") \
+    || { pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."; return 1; }
+  if [[ -n "$item_briefs_file" ]]; then
+    item_briefs_raw=$(pg_json_or_yaml_file "$item_briefs_file") || return 1
+    item_briefs=$(pg_normalize_item_briefs_json "$item_briefs_raw") || return 1
+    pg_validate_trunk_item_briefs "$materialization" "$item_briefs" \
+      || { pg_fail "item briefs must contain exactly one entry per stack item, and each needs what, why, and approach."; return 1; }
+  fi
+  path=$(pg_trunk_prepare_path "$stack_name")
+  jq -n \
+    --arg repo_root "$repo_root" \
+    --arg stack "$stack_name" \
+    --arg what "$what" \
+    --arg why "$why" \
+    --arg approach "$approach" \
+    --arg scope "$scope" \
+    --arg risks "$risks" \
+    --arg at "$(pg_now_utc)" \
+    --argjson materialization "$materialization" \
+    --argjson item_briefs "$item_briefs" \
+    '{
+      repo_root: $repo_root,
+      stack: $stack,
+      what: $what,
+      why: $why,
+      approach: $approach,
+      scope: (if $scope == "" then null else $scope end),
+      risks: (if $risks == "" then null else $risks end),
+      item_briefs: $item_briefs,
+      prepared_at: $at,
+      materialization: $materialization
+    }' >"$path"
+  echo "Prepared trunk brief written: $path"
+  echo "Now ask the user to run:  pg -C $repo_root trunk --stack $stack_name"
+}
+
+pg_render_trunk_summary() {
+  local draft="$1"
+  jq -r '
+    def item_bullets($label; $value):
+      if ($value | type) == "array" then
+        "    - " + $label + ":",
+        ($value[] | "      - " + .)
+      else
+        "    - " + $label + ": " + (($value // "") | tostring)
+      end;
+    "Stack trunk approval",
+    "",
+    "Stack: " + .stack,
+    "Trunk tip: " + .materialization.trunk_tip,
+    "Manifest hash: " + .materialization.manifest_hash,
+    "",
+    "Brief:",
+    "  What: " + (.brief.what // ""),
+    "  Why: " + (.brief.why // ""),
+    "  Approach: " + (.brief.approach // ""),
+    "",
+    "Items:",
+    (if (((.stack_items // .item_details // [])) | length) > 0 then
+      ((.stack_items // .item_details)[] |
+        "  - Stack item: " + .id
+          + (if (.pr // null) == null then "" else " (#" + (.pr | tostring) + ")" end)
+          + ":",
+        item_bullets("What"; .brief.what),
+        item_bullets("Why"; .brief.why),
+        item_bullets("Approach"; .brief.approach),
+        (if (.brief.risks // "") != "" then item_bullets("Risks"; .brief.risks) else empty end),
+        (if (.brief.verification // "") != "" then "    - Verification: " + (if (.brief.verification | type) == "array" then (.brief.verification | join("; ")) else (.brief.verification | tostring) end) else empty end),
+        "    - Branch: " + .branch,
+        "    - Pointer commit: " + ((.pointer_commit // .commit)[0:12]) + " " + (.pointer_subject // .subject // ""),
+        "    - Base: " + ((.base_label // .review_base_label // .base_commit // .review_base // "(unknown)") | tostring)
+          + (if ((.base_commit // .review_base // "") != "") then " @ " + ((.base_commit // .review_base)[0:12]) else "" end),
+        "    - Diff: " + (.shortstat // "no diff"),
+        (if (((.contained_commits // .commits // [])) | length) > 0 then
+          "    - Contained commits:",
+          ((.contained_commits // .commits)[] | "      - " + .short + " " + .subject)
+        else empty end),
+        (if ((.changed_files // []) | length) > 0 then
+          "    - Changed files:",
+          (.changed_files[] | "      - " + .change + ":", (.paths[0:12][] | "        - " + .), (if (.paths | length) > 12 then "        - ... " + (((.paths | length) - 12) | tostring) + " more" else empty end))
+        else empty end),
+        (if ((.pointer_body // .body // "") != "") then "    - Pointer commit body:\n" + ((.pointer_body // .body) | split("\n") | map("      " + .) | join("\n")) else empty end)
+      )
+    else
+      (.materialization.items[] | "  - " + .id + " " + .branch + " @ " + (.commit[0:12]))
+    end)
+  ' "$draft"
+}
+
+pg_cmd_trunk() {
+  local stack_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      *) pg_fail "Unknown trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg trunk requires --stack NAME"
+  local prepare_path draft_file script_file materialization stack_items what why approach scope risks
+  prepare_path=$(pg_trunk_prepare_path "$stack_name")
+  [[ -f "$prepare_path" ]] || pg_fail "No prepared trunk brief for $stack_name. Run pg prepare-trunk first."
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name") || {
+    pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."
+    return 1
+  }
+  local item_briefs
+  item_briefs=$(jq -c '.item_briefs // []' "$prepare_path")
+  stack_items=$(pg_trunk_stack_items_json "$stack_name" "$materialization" "$item_briefs")
+  what=$(jq -r '.what // ""' "$prepare_path")
+  why=$(jq -r '.why // ""' "$prepare_path")
+  approach=$(jq -r '.approach // ""' "$prepare_path")
+  scope=$(jq -r '.scope // ""' "$prepare_path")
+  risks=$(jq -r '.risks // ""' "$prepare_path")
+  draft_file=$(pg_trunk_draft_path "$stack_name")
+  script_file="${draft_file%.json}.sh"
+  jq -n \
+    --arg repo_key "$(pg_repo_key)" \
+    --arg repo_root "$(pg_repo_root)" \
+    --arg common_dir "$(pg_git_common_dir)" \
+    --arg stack "$stack_name" \
+    --arg what "$what" \
+    --arg why "$why" \
+    --arg approach "$approach" \
+    --arg scope "$scope" \
+    --arg risks "$risks" \
+    --arg created_by "${USER:-unknown}" \
+    --arg created_at "$(pg_now_utc)" \
+    --argjson materialization "$materialization" \
+    --argjson stack_items "$stack_items" \
+    '{
+      schema_version: 1,
+      repo_key: $repo_key,
+      repo_root: $repo_root,
+      common_dir: $common_dir,
+      stack: $stack,
+      materialization: $materialization,
+      stack_items: $stack_items,
+      brief: {
+        what: $what,
+        why: $why,
+        approach: $approach,
+        scope: (if $scope == "" then null else $scope end),
+        risks: (if $risks == "" then null else $risks end)
+      },
+      approved_scope: null,
+      created_by: $created_by,
+      created_at: $created_at,
+      status: "active"
+    }' >"$draft_file"
+  cat >"$script_file" <<EOF
+#!/bin/bash
+set -euo pipefail
+DRAFT_FILE="$draft_file"
+HELPER="$(pg_helper_path)"
+editor="\${EDITOR:-vi}"
+if command -v yq >/dev/null 2>&1; then
+  yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml > "\$DRAFT_FILE.yaml"
+  "\$editor" "\$DRAFT_FILE.yaml"
+  yq eval '.' "\$DRAFT_FILE.yaml" --output-format=json > "\$DRAFT_FILE.new"
+  jq empty "\$DRAFT_FILE.new"
+  mv "\$DRAFT_FILE.new" "\$DRAFT_FILE"
+else
+  "\$editor" "\$DRAFT_FILE"
+  jq empty "\$DRAFT_FILE"
+fi
+"\$HELPER" preview-trunk --draft "\$DRAFT_FILE"
+echo
+printf 'Proceed? [Y/n] '
+read -r answer
+case "\$answer" in
+  ""|y|Y|yes|YES) "\$HELPER" approve-trunk --draft "\$DRAFT_FILE" ;;
+  *) echo "Canceled"; exit 1 ;;
+esac
+EOF
+  chmod +x "$script_file"
+  echo "Trunk approval script: $script_file"
+  echo "Draft file: $draft_file"
+  if [[ "${PG_AUTO_RUN_APPROVAL:-1}" == "1" ]] && [[ -t 0 || -t 1 ]]; then
+    bash "$script_file"
+  fi
+}
+
+pg_cmd_preview_trunk() {
+  local draft=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) draft="$2"; shift 2 ;;
+      *) pg_fail "Unknown preview-trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  pg_render_trunk_summary "$draft"
+}
+
+pg_cmd_approve_trunk() {
+  local draft=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) draft="$2"; shift 2 ;;
+      *) pg_fail "Unknown approve-trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  local brief_what brief_why brief_approach
+  brief_what=$(jq -r '.brief.what // ""' "$draft")
+  brief_why=$(jq -r '.brief.why // ""' "$draft")
+  brief_approach=$(jq -r '.brief.approach // ""' "$draft")
+  if [[ -z "$brief_what" || -z "$brief_why" || -z "$brief_approach" ]]; then
+    pg_fail "Approval blocked: trunk brief requires brief.what, brief.why, and brief.approach."
+    return 1
+  fi
+  local missing_item_briefs
+  missing_item_briefs=$(jq -r '
+    def filled:
+      if type == "array" then length > 0 and all(.[]; type == "string" and length > 0)
+      elif type == "string" then length > 0
+      else false
+      end;
+    [
+      (.stack_items // [])[]
+      | select(
+          ((.brief.what // null) | filled | not)
+          or ((.brief.why // null) | filled | not)
+          or ((.brief.approach // null) | filled | not)
+        )
+      | .id
+    ]
+    | join(", ")
+  ' "$draft")
+  if [[ -n "$missing_item_briefs" ]]; then
+    pg_fail "Approval blocked: each stack item requires brief.what, brief.why, and brief.approach. Missing: $missing_item_briefs"
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    pg_fail "Blocked: pg approve-trunk requires an interactive terminal. Run the approval script printed by pg trunk instead."
+    return 1
+  fi
+  local stack_name repo_key now materialization_id manifest_hash trunk_tip brief_json scope_json created_by
+  stack_name=$(jq -r '.stack' "$draft")
+  local current_materialization draft_materialization
+  current_materialization=$(pg_trunk_latest_materialization_json "$stack_name") \
+    || { pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."; return 1; }
+  draft_materialization=$(jq -c '.materialization' "$draft")
+  if [[ "$(jq -c '{manifest_hash,trunk_tip,items:[.items[] | {id,branch,commit}]}' <<<"$current_materialization")" != "$(jq -c '{manifest_hash,trunk_tip,items:[.items[] | {id,branch,commit}]}' <<<"$draft_materialization")" ]]; then
+    pg_fail "Stack trunk changed after the approval draft was created. Re-run pg prepare-trunk and pg trunk."
+    return 1
+  fi
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  materialization_id=$(jq -r '.materialization.materialization_id' "$draft")
+  manifest_hash=$(jq -r '.materialization.manifest_hash' "$draft")
+  trunk_tip=$(jq -r '.materialization.trunk_tip' "$draft")
+  brief_json=$(jq -c '.brief' "$draft")
+  scope_json=$(jq -c '.approved_scope // null' "$draft")
+  created_by=$(jq -r '.created_by // "unknown"' "$draft")
+  pg_dolt_sql "
+REPLACE INTO trunk_leases (repo_key, stack_name, manifest_hash, materialization_id, trunk_tip, approved_scope_json, brief_json, status, created_by, created_at, updated_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$scope_json"), $(pg_sql_quote "$brief_json"), 'active', $(pg_sql_quote "$created_by"), $(pg_sql_quote "$now"), $(pg_sql_quote "$now"));
+DELETE FROM trunk_lease_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" >/dev/null
+  local item_id order_index branch commit_sha pr_number pr_sql
+  while IFS=$'\t' read -r item_id order_index branch commit_sha pr_number; do
+    [[ -z "$item_id" ]] && continue
+    pr_sql=$(pg_sql_int_or_null "$pr_number")
+    pg_dolt_sql "
+REPLACE INTO trunk_lease_items (repo_key, stack_name, item_id, order_index, branch, commit_sha, pr_number)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$item_id"), $order_index, $(pg_sql_quote "$branch"), $(pg_sql_quote "$commit_sha"), $pr_sql);
+" >/dev/null
+  done < <(jq -r '.materialization.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' "$draft")
+  pg_dolt_commit "trunk lease $stack_name"
+  rm -f "$(pg_trunk_prepare_path "$stack_name")"
+  echo "Trunk lease approved: $stack_name"
+}
+
+pg_cmd_check_trunk() {
+  local stack_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      *) pg_fail "Unknown check-trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg check-trunk requires --stack NAME"
+  pg_trunk_check_json "$stack_name"
+}
+
+pg_trunk_record_pending_assertion() {
+  local stack_name="$1" branch="$2" remote="$3" source_ref="$4" commit_sha="$5" assert_flow="$6" repo_key now
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  pg_dolt_sql "
+REPLACE INTO pending_trunk_assertions (repo_key, stack_name, branch, remote, source_ref, commit_sha, assert_flow, created_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$branch"), $(pg_sql_quote "$remote"), $(pg_sql_quote "$source_ref"), $(pg_sql_quote "$commit_sha"), $(pg_sql_quote "$assert_flow"), $(pg_sql_quote "$now"));
+" >/dev/null
+}
+
+pg_trunk_clear_pending_assertion() {
+  local stack_name="$1" branch="$2" repo_key
+  repo_key=$(pg_repo_key) || return 0
+  pg_dolt_sql "DELETE FROM pending_trunk_assertions WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND branch = $(pg_sql_quote "$branch");" >/dev/null || true
+}
+
+pg_trunk_pending_allows_push() {
+  local branch="$1" remote="$2" source_ref="$3" commit_sha="$4" repo_key row stack_name
+  repo_key=$(pg_repo_key) || return 1
+  row=$(pg_dolt_sql_csv "
+SELECT stack_name
+FROM pending_trunk_assertions
+WHERE repo_key = $(pg_sql_quote "$repo_key")
+  AND branch = $(pg_sql_quote "$branch")
+  AND remote = $(pg_sql_quote "$remote")
+  AND commit_sha = $(pg_sql_quote "$commit_sha")
+LIMIT 1;
+" 2>/dev/null | tail -n +2 | head -1)
+  [[ -n "$row" ]] || return 1
+  stack_name="$row"
+  local check allowed
+  check=$(pg_trunk_check_json "$stack_name")
+  allowed=$(jq -r '.allowed' <<<"$check")
+  [[ "$allowed" == "true" ]] || return 1
+  jq -e --arg branch "$branch" --arg commit "$commit_sha" \
+    '.lease.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null \
+    && return 0
+
+  local manifest trunk_branch trunk_tip
+  manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
+  trunk_branch=$(jq -r '.trunk // ""' <<<"$manifest" 2>/dev/null || true)
+  trunk_tip=$(jq -r '.lease.trunk_tip // ""' <<<"$check")
+  [[ -n "$trunk_branch" && "$branch" == "$trunk_branch" && "$commit_sha" == "$trunk_tip" ]]
+}
+
+pg_cmd_push_trunk() {
+  local stack_name="$1" assert_flow="$2" remote="$3" branch="$4" source_ref="$5" force_with_lease="$6" set_upstream="$7"
+  [[ -n "$assert_flow" ]] || pg_fail "pg push --trunk-stack requires --assert-flow."
+  [[ -n "$branch" ]] || pg_fail "pg push --trunk-stack requires --branch."
+  [[ -n "$source_ref" ]] || pg_fail "pg push --trunk-stack requires --source-ref."
+  remote="${remote:-origin}"
+  local commit_sha check allowed reason refspec result use_upstream="false"
+  commit_sha=$(git rev-parse --verify "${source_ref}^{commit}") \
+    || { pg_fail "source ref is not a commit: $source_ref"; return 1; }
+  check=$(pg_trunk_check_json "$stack_name")
+  allowed=$(jq -r '.allowed' <<<"$check")
+  if [[ "$allowed" != "true" ]]; then
+    reason=$(jq -r '.reason' <<<"$check")
+    pg_fail "$reason"
+  fi
+  if ! jq -e --arg branch "$branch" --arg commit "$commit_sha" \
+    '.lease.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null; then
+    local manifest trunk_branch trunk_tip
+    manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
+    trunk_branch=$(jq -r '.trunk // ""' <<<"$manifest" 2>/dev/null || true)
+    trunk_tip=$(jq -r '.lease.trunk_tip // ""' <<<"$check")
+    [[ -n "$trunk_branch" && "$branch" == "$trunk_branch" && "$commit_sha" == "$trunk_tip" ]] \
+      || pg_fail "Trunk lease for $stack_name does not approve $branch at $commit_sha"
+  fi
+  pg_trunk_record_pending_assertion "$stack_name" "$branch" "$remote" "$source_ref" "$commit_sha" "$assert_flow"
+  cleanup_trunk_pending() {
+    pg_trunk_clear_pending_assertion "$stack_name" "$branch"
+  }
+  trap cleanup_trunk_pending EXIT
+  refspec="$source_ref:$branch"
+  [[ "$set_upstream" == "true" ]] && use_upstream="true"
+  if [[ "$force_with_lease" == "true" && "$use_upstream" == "true" ]]; then
+    git push --force-with-lease -u "$remote" "$refspec"
+  elif [[ "$force_with_lease" == "true" ]]; then
+    git push --force-with-lease "$remote" "$refspec"
+  elif [[ "$use_upstream" == "true" ]]; then
+    git push -u "$remote" "$refspec"
+  else
+    git push "$remote" "$refspec"
+  fi
+  result=$?
+  trap - EXIT
+  pg_trunk_clear_pending_assertion "$stack_name" "$branch"
+  return "$result"
+}
+
 # Shell-quote a string for SQL: escape single quotes and wrap in quotes.
 pg_sql_quote() {
   local s="$1"
@@ -1330,6 +2651,17 @@ pg_validate_push_guard() {
     return 0
   fi
 
+  local pushed_commit
+  if [[ -n "$source_ref" ]]; then
+    pushed_commit=$(git rev-parse --verify "${source_ref}^{commit}" 2>/dev/null || true)
+  else
+    pushed_commit="$current_head"
+  fi
+  if [[ -n "$target_branch" && -n "$pushed_commit" ]] && pg_trunk_pending_allows_push "$target_branch" "$remote" "$source_ref" "$pushed_commit" 2>/dev/null; then
+    jq -n '{allowed:true, verdict:"trunk-lease"}'
+    return 0
+  fi
+
   branch_upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
   if [[ -n "$current_branch" && "$lease_branch" == "$current_branch" && "$branch_upstream" =~ ^(origin|upstream)/(main|master)$ && ! "$current_branch" =~ ^(main|master)$ ]]; then
     jq -n --arg reason "Blocked: branch '$current_branch' tracks $branch_upstream. Re-set upstream first: git branch --set-upstream-to=origin/$current_branch" '{allowed:false, reason:$reason}'
@@ -2365,10 +3697,14 @@ pg_cmd_bind_pr() {
 }
 
 pg_cmd_push() {
-  local assert_flow="" remote="" branch="" source_ref="" force_with_lease="false" set_upstream="false"
+  local assert_flow="" remote="" branch="" source_ref="" force_with_lease="false" set_upstream="false" trunk_stack=""
   local current_branch branch_ref lease_json pending_path result refspec use_upstream="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --trunk-stack)
+        trunk_stack="$2"
+        shift 2
+        ;;
       --assert-flow)
         assert_flow="$2"
         shift 2
@@ -2399,6 +3735,11 @@ pg_cmd_push() {
         ;;
     esac
   done
+
+  if [[ -n "$trunk_stack" ]]; then
+    pg_cmd_push_trunk "$trunk_stack" "$assert_flow" "$remote" "$branch" "$source_ref" "$force_with_lease" "$set_upstream"
+    return $?
+  fi
 
   [[ -n "$assert_flow" ]] || pg_fail "pg push requires --assert-flow with caveman text."
   current_branch=$(pg_branch_name || true)
@@ -2504,11 +3845,23 @@ pg_main() {
     prepare)
       pg_cmd_prepare "$@"
       ;;
+    prepare-trunk)
+      pg_cmd_prepare_trunk "$@"
+      ;;
+    trunk)
+      pg_cmd_trunk "$@"
+      ;;
     approve)
       pg_cmd_approve "$@"
       ;;
+    approve-trunk)
+      pg_cmd_approve_trunk "$@"
+      ;;
     preview-draft)
       pg_cmd_preview_draft "$@"
+      ;;
+    preview-trunk)
+      pg_cmd_preview_trunk "$@"
       ;;
     push)
       pg_cmd_push "$@"
@@ -2528,6 +3881,9 @@ pg_main() {
     check)
       pg_cmd_check "$@"
       ;;
+    check-trunk)
+      pg_cmd_check_trunk "$@"
+      ;;
     check-intent)
       pg_cmd_check_intent "$@"
       ;;
@@ -2539,6 +3895,27 @@ pg_main() {
       ;;
     bind-pr)
       pg_cmd_bind_pr "$@"
+      ;;
+    stack-store-init)
+      pg_cmd_stack_store_init "$@"
+      ;;
+    stack-store-add)
+      pg_cmd_stack_store_add "$@"
+      ;;
+    stack-store-move)
+      pg_cmd_stack_store_move "$@"
+      ;;
+    stack-store-remove)
+      pg_cmd_stack_store_remove "$@"
+      ;;
+    stack-store-manifest)
+      pg_cmd_stack_store_manifest "$@"
+      ;;
+    stack-store-record-materialization)
+      pg_cmd_stack_store_record_materialization "$@"
+      ;;
+    stack-store-branch-materialization)
+      pg_cmd_stack_store_branch_materialization "$@"
       ;;
     guard-check)
       local command_text=""
@@ -2578,14 +3955,30 @@ Status / inspection:
 Useful inspection:
 
   pg check [branch]         Is HEAD within the approved scope? (JSON)
+  pg check-trunk --stack S  Is the materialized stack trunk still approved? (JSON)
   pg check-intent [branch]  LLM: does the diff match user_intent? (JSON)
   pg show   [branch]        Full lease dump for a branch.
   pg revoke [branch]        Drop a lease (new approval required).
+
+Stack trunks:
+
+  pg prepare-trunk --stack S --what "..." --why "..." --approach "..." [--item-briefs FILE]
+                         Agent handoff for approving a materialized trunk.
+  pg trunk --stack S      Human review/approval for the whole stack trunk.
+                         Draft uses stack items with pointer commits, contained commits, and file groups.
+  pg push --trunk-stack S --branch B --source-ref COMMIT --assert-flow "..."
+                         Push one approved item commit, or the approved private
+                         trunk ref at trunk_tip, from that trunk.
+  Dolt is required for trunk manifests/leases:
+                         brew install dolt && dolt version
+                         Store defaults to ~/.push-gate/dolt-store; PG_STORE_DIR overrides it.
 
 Plumbing (called by pg itself — you rarely invoke these directly):
 
   pg draft-approve      First half of pg: writes the YAML draft.
   pg approve --draft F  Second half: writes the lease after y/N.
+  pg stack-store-*      Dolt-backed stack manifest/materialization storage,
+                         including init/add/move/remove/materialization.
   pg preview-draft      Renders the summary the approval script shows.
   pg guard-check        Called by bash-safety-guard on every git push.
 
