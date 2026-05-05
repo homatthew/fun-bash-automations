@@ -61,8 +61,8 @@ workaround when a push is blocked:
   — agents must run `pg prepare` instead)
 - Piping `yes`, `echo y`, or any non-interactive confirmation into the
   approval prompt
-- Manually editing `~/.push-gate/` lease state or `/tmp/pg-approve-*.json`
-  outside the intended editor flow
+- Manually editing `~/.push-gate/` lease state, the Dolt stack-trunk store, or
+  `/tmp/pg-approve-*.json` outside the intended editor flow
 - Calling `git push` after the hook blocks, expecting the bypass envs above
   to unblock it
 
@@ -76,6 +76,14 @@ response has two parts:
 
 The `--assert-flow TEXT` argument on `pg push` is the semantic-scope
 assertion checked against the approved template — it is NOT a bypass.
+
+Stack trunks use the same policy at stack scope. `stack trunk init/add` writes
+the manifest to push-gate's Dolt store, `stack trunk materialize --stack <name>`
+records the generated trunk tip and item commits, the agent runs
+`pg prepare-trunk --stack <name> ...`, the human reviews with
+`pg trunk --stack <name>`, and the agent pushes approved item commits with
+`pg push --trunk-stack <name> --branch <branch> --source-ref <commit>
+--assert-flow "..."`.
 
 ### Semantic self-check: `pg check`
 
@@ -95,10 +103,20 @@ lease, and never bypass the failure with an override env.
 
 ### Git config and bypasses
 
-- Block `git config` mutations from agents
+- Block `git config` mutations from agents except repo-local rerere enablement:
+  `git config --local rerere.enabled true` and
+  `git config --local rerere.autoupdate true`, with or without `git -C <repo>`.
+  Read-only queries such as `git config --get ...` and `git config --list` are
+  allowed.
 - Block `--no-verify`
-- Block `git commit --amend`
+- Allow `git commit --amend` on feature/stack branches; it only rewrites local
+  history and push-gate requires a fresh approval before any rewritten tip can
+  be pushed
+- Block `git commit --amend` on protected branches (`main`/`master`)
 - Block disabling signing or pre-commit checks
+- Block feature/stack branches from tracking `origin/main` or
+  `upstream/main`; a plain `git push` from such a branch could target the
+  protected integration branch under some git push modes.
 
 ### Broad staging
 

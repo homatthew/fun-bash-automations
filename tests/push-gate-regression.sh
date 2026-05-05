@@ -214,7 +214,7 @@ extract_path() {
   echo "$output" | awk -v prefix="$prefix" '$0 ~ prefix {print $NF}'
 }
 
-echo "1..20"
+echo "1..21"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -341,7 +341,17 @@ echo "ok 10 - protected main pushes are blocked on origin and upstream"
 (
   cd "$REPO"
   git remote add upstream "$ORIGIN"
+  git fetch upstream main >/dev/null 2>&1
+  git branch --set-upstream-to=upstream/main mho/existing-pr >/dev/null
 )
+plain_main_upstream=$(run_guard "$REPO" "git push")
+expect_contains "$plain_main_upstream" "tracks upstream/main"
+(
+  cd "$REPO"
+  git branch --set-upstream-to=origin/mho/existing-pr mho/existing-pr >/dev/null
+)
+echo "ok 11 - plain push is blocked when feature branch tracks upstream main"
+
 upstream_draft=$(run_helper "$REPO" draft-approve \
   --remote upstream \
   --intent $'allow upstream branch push\nsame branch\nsame pr' \
@@ -354,7 +364,7 @@ jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$upstre
 write_pending "$REPO" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 upstream_feature=$(run_guard "$REPO" "git push upstream mho/existing-pr")
 [[ -z "$upstream_feature" ]] || fail "expected upstream feature push to be allowed, got: $upstream_feature"
-echo "ok 11 - upstream feature push allowed with matching lease"
+echo "ok 12 - upstream feature push allowed with matching lease"
 
 (
   cd "$REPO"
@@ -365,7 +375,7 @@ WORKTREE="$TEST_TMP/upstream-worktree"
 write_pending "$WORKTREE" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$WORKTREE")" "123"
 worktree_refspec=$(run_guard "$WORKTREE" "git push upstream temp/upstream-source:mho/existing-pr")
 [[ -z "$worktree_refspec" ]] || fail "expected worktree explicit refspec push to be allowed, got: $worktree_refspec"
-echo "ok 12 - worktree explicit refspec push is allowed"
+echo "ok 13 - worktree explicit refspec push is allowed"
 
 (
   cd "$WORKTREE"
@@ -374,12 +384,12 @@ echo "ok 12 - worktree explicit refspec push is allowed"
 write_pending "$WORKTREE" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$WORKTREE")" "123"
 detached_refspec=$(run_guard "$WORKTREE" "git push upstream HEAD:mho/existing-pr")
 [[ -z "$detached_refspec" ]] || fail "expected detached HEAD explicit refspec push to be allowed, got: $detached_refspec"
-echo "ok 13 - detached HEAD explicit refspec push is allowed"
+echo "ok 14 - detached HEAD explicit refspec push is allowed"
 
 detached_head=$(run_guard "$WORKTREE" "git push upstream HEAD")
 expect_contains "$detached_head" "explicit target branch"
 [[ "$detached_head" != *"git branch context"* ]] || fail "expected detached HEAD denial to avoid generic branch-context message, got: $detached_head"
-echo "ok 14 - detached HEAD without explicit target gets accurate denial"
+echo "ok 15 - detached HEAD without explicit target gets accurate denial"
 
 (
   cd "$REPO"
@@ -388,7 +398,7 @@ echo "ok 14 - detached HEAD without explicit target gets accurate denial"
 shared_view=$(run_helper "$TEST_TMP/existing-pr-view" show mho/existing-pr)
 expect_contains "$shared_view" "mho/existing-pr"
 expect_contains "$shared_view" "123"
-echo "ok 15 - leases are visible across worktrees via git-common-dir"
+echo "ok 16 - leases are visible across worktrees via git-common-dir"
 
 IFS='|' read -r TOPO_REPO TOPO_BIN TOPO_ORIGIN <<<"$(make_repo topology-write)"
 FAKE_BIN="$TOPO_BIN"
@@ -409,7 +419,7 @@ topo_output=$(run_helper "$TOPO_REPO" draft-approve \
 topo_draft=$(extract_path "$topo_output" "^Draft file:")
 [[ "$(jq -r '.remote' "$topo_draft")" == "upstream" ]] || fail "expected writable-upstream default remote to be upstream"
 [[ "$(jq -r '.pr_repo' "$topo_draft")" == "example.test/Netflix-Skunkworks/topology-write" ]] || fail "expected pr_repo to default to upstream topology"
-echo "ok 16 - topology picks upstream PR repo and upstream push remote when writable"
+echo "ok 17 - topology picks upstream PR repo and upstream push remote when writable"
 
 IFS='|' read -r TOPO_READ_REPO TOPO_READ_BIN TOPO_READ_ORIGIN <<<"$(make_repo topology-read)"
 FAKE_BIN="$TOPO_READ_BIN"
@@ -428,7 +438,7 @@ topo_read_output=$(run_helper "$TOPO_READ_REPO" draft-approve \
 topo_read_draft=$(extract_path "$topo_read_output" "^Draft file:")
 [[ "$(jq -r '.remote' "$topo_read_draft")" == "origin" ]] || fail "expected non-writable upstream to fall back to origin push remote"
 [[ "$(jq -r '.pr_repo' "$topo_read_draft")" == "example.test/Netflix-Skunkworks/topology-read" ]] || fail "expected pr_repo to stay on upstream even when push remote falls back"
-echo "ok 17 - topology falls back to origin push remote when upstream is not writable"
+echo "ok 18 - topology falls back to origin push remote when upstream is not writable"
 
 IFS='|' read -r TOPO_TRACK_REPO TOPO_TRACK_BIN TOPO_TRACK_ORIGIN <<<"$(make_repo topology-track)"
 FAKE_BIN="$TOPO_TRACK_BIN"
@@ -447,7 +457,7 @@ topo_track_output=$(run_helper "$TOPO_TRACK_REPO" draft-approve \
   --assert-flow $'update pr line\nbranch mho/topology-track\nno rewrite')
 topo_track_draft=$(extract_path "$topo_track_output" "^Draft file:")
 [[ "$(jq -r '.remote' "$topo_track_draft")" == "origin" ]] || fail "expected tracked branch to keep origin remote"
-echo "ok 18 - tracked branch keeps existing remote instead of auto-flipping to upstream"
+echo "ok 19 - tracked branch keeps existing remote instead of auto-flipping to upstream"
 
 IFS='|' read -r PR_BASE_REPO PR_BASE_BIN PR_BASE_ORIGIN <<<"$(make_repo pr-base-scope)"
 FAKE_BIN="$PR_BASE_BIN"
@@ -478,7 +488,7 @@ pr_base_output=$(run_helper "$PR_BASE_REPO" draft-approve \
 pr_base_draft=$(extract_path "$pr_base_output" "^Draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$pr_base_draft")" == "refs/remotes/origin/main" ]] \
   || fail "expected PR approval scope to use PR base origin/main, got $(jq -r '.approved_scope.base_ref' "$pr_base_draft")"
-echo "ok 19 - existing PR approval scope uses GitHub PR base instead of tracking branch"
+echo "ok 20 - existing PR approval scope uses GitHub PR base instead of tracking branch"
 
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"
@@ -508,4 +518,4 @@ export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/
 run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
 [[ "$(jq -r '.pr_number' "$topo_bind_lease")" == "77" ]] || fail "expected bind-pr to use upstream pr_repo and bind PR #77"
 [[ "$(jq -r '.pr_repo' "$topo_bind_lease")" == "example.test/Netflix-Skunkworks/topology-bind" ]] || fail "expected bound lease to retain upstream pr_repo"
-echo "ok 20 - bind-pr uses topology-selected upstream PR repo"
+echo "ok 21 - bind-pr uses topology-selected upstream PR repo"
