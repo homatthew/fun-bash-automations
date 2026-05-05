@@ -30,7 +30,7 @@ write_payload() {
   jq -n --argjson files "$files_json" '{files:$files}' >"$path"
 }
 
-echo "1..10"
+echo "1..22"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -76,3 +76,51 @@ echo "ok 9 - ordered gist payload keys are allowed"
 payload_block=$(run_guard "GH_HOST=git.netflix.net gh api /gists --method POST --input $unordered_payload")
 expect_contains "$payload_block" "gist uploads must use contiguous ordered filenames"
 echo "ok 10 - unordered gist payload keys are blocked"
+
+main_tracking_block=$(run_guard "git branch -u upstream/main")
+expect_contains "$main_tracking_block" "must not track origin/main or upstream/main"
+echo "ok 11 - setting a feature branch upstream to upstream/main is blocked"
+
+main_track_create_block=$(run_guard "git branch --track mho/trunk/scm-cassandra-dev upstream/main")
+expect_contains "$main_track_create_block" "would track origin/main or upstream/main"
+echo "ok 12 - creating a branch that tracks upstream/main is blocked"
+
+config_read_allow=$(run_guard "git config --get remote.origin.url")
+[[ -z "$config_read_allow" ]] || fail "expected read-only git config to be allowed, got: $config_read_allow"
+echo "ok 13 - read-only git config is allowed"
+
+config_rerere_allow=$(run_guard "git config --local rerere.enabled true")
+[[ -z "$config_rerere_allow" ]] || fail "expected local rerere.enabled=true to be allowed, got: $config_rerere_allow"
+echo "ok 14 - local rerere.enabled=true is allowed"
+
+config_rerere_c_allow=$(run_guard "git -C /tmp/repo config --local rerere.autoupdate true")
+[[ -z "$config_rerere_c_allow" ]] || fail "expected git -C local rerere.autoupdate=true to be allowed, got: $config_rerere_c_allow"
+echo "ok 15 - git -C local rerere.autoupdate=true is allowed"
+
+config_global_block=$(run_guard "git config --global rerere.enabled true")
+expect_contains "$config_global_block" "git config mutations are not allowed"
+echo "ok 16 - global git config mutation is blocked"
+
+config_system_block=$(run_guard "git config --system rerere.enabled true")
+expect_contains "$config_system_block" "git config mutations are not allowed"
+echo "ok 17 - system git config mutation is blocked"
+
+config_rerere_false_block=$(run_guard "git config --local rerere.enabled false")
+expect_contains "$config_rerere_false_block" "git config mutations are not allowed"
+echo "ok 18 - disabling local rerere is blocked"
+
+config_unset_block=$(run_guard "git config --unset rerere.enabled")
+expect_contains "$config_unset_block" "git config mutations are not allowed"
+echo "ok 19 - git config unset is blocked"
+
+config_arbitrary_block=$(run_guard "git config --local core.hooksPath /tmp/hooks")
+expect_contains "$config_arbitrary_block" "git config mutations are not allowed"
+echo "ok 20 - arbitrary local git config mutation is blocked"
+
+config_chained_block=$(run_guard "true; git config --global rerere.enabled true")
+expect_contains "$config_chained_block" "git config mutations are not allowed"
+echo "ok 21 - chained global git config mutation is blocked"
+
+config_chained_after_allow_block=$(run_guard "git config --local rerere.enabled true; git config --global rerere.enabled true")
+expect_contains "$config_chained_after_allow_block" "git config mutations are not allowed"
+echo "ok 22 - chained git config mutation after allowed rerere is blocked"

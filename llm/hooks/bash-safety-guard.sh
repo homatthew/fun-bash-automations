@@ -40,7 +40,9 @@ import sys
 command = sys.argv[1]
 
 try:
-    tokens = shlex.split(command, posix=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
 except ValueError:
     sys.exit(0)
 
@@ -237,16 +239,103 @@ check_push_guard() {
 # --- 2b. Branch Creation Tracking Guard ---
 # Prevent creating branches that auto-track origin/main or origin/master.
 check_branch_tracking() {
-  echo "$COMMAND" | grep -qE 'git\s+(checkout\s+-b|switch\s+-c)' || return
-  echo "$COMMAND" | grep -qE -- '--no-track' && return
-  echo "$COMMAND" | grep -qE '(origin|upstream)/(main|master)(\s|$)' &&
-    deny "Blocked: branch would auto-track main. Add --no-track: git checkout -b <branch> origin/main --no-track"
+  if echo "$COMMAND" | grep -qE 'git\s+(checkout\s+-b|switch\s+-c)'; then
+    echo "$COMMAND" | grep -qE -- '--no-track' && return
+    echo "$COMMAND" | grep -qE '(origin|upstream)/(main|master)(\s|$)' &&
+      deny "Blocked: branch would auto-track main. Add --no-track: git checkout -b <branch> origin/main --no-track"
+  fi
+
+  echo "$COMMAND" | grep -qE 'git\s+branch\s+.*(--set-upstream-to(=|[[:space:]]+)|-u[[:space:]]+)(origin|upstream)/(main|master)([[:space:]]|$)' &&
+    deny "Blocked: feature branches must not track origin/main or upstream/main. Use --set-upstream-to=origin/<branch> instead."
+
+  echo "$COMMAND" | grep -qE 'git\s+branch\s+.*--track[[:space:]]+[^[:space:]]+[[:space:]]+(origin|upstream)/(main|master)([[:space:]]|$)' &&
+    deny "Blocked: branch would track origin/main or upstream/main. Add --no-track and push only through pg/stack."
 }
 
 # --- 3. Git Config & Hook Bypass ---
 check_git_config() {
-  echo "$COMMAND" | grep -qE 'git\s+config(\s|$)' &&
-    deny "Blocked: git config changes are not allowed."
+  local git_config_block
+  git_config_block=$(python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+read_flags = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+rerere_keys = {"rerere.enabled", "rerere.autoupdate"}
+
+
+def git_config_args(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-C":
+            idx += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            idx += 1
+            continue
+        if token in {"--git-dir", "--work-tree"}:
+            idx += 2
+            continue
+        if token == "config":
+            return segment[idx + 1 :]
+        return None
+    return None
+
+
+def allowed_git_config(args):
+    if not args:
+        return False
+    if args[0] in read_flags:
+        return True
+    return (
+        len(args) == 3
+        and args[0] == "--local"
+        and args[1] in rerere_keys
+        and args[2] == "true"
+    )
+
+
+for segment in segments:
+    args = git_config_args(segment)
+    if args is not None and not allowed_git_config(args):
+        print("Blocked: git config mutations are not allowed except read-only queries and local rerere enablement.")
+        break
+PY
+  )
+  [[ -n "$git_config_block" ]] && deny "$git_config_block"
   echo "$COMMAND" | grep -qE -- '--no-verify' &&
     deny "Blocked: --no-verify bypasses safety hooks."
   echo "$COMMAND" | grep -qE -- 'git\s+commit\s+.*--amend' &&
