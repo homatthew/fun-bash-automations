@@ -177,9 +177,11 @@ the composed stack: it pushes only the private trunk ref at the approved
 `trunk_tip` and leaves item branches untouched.
 
 The push-gate trunk approval draft uses explicit stack vocabulary:
+- `description`: PR-description-style human review text at the top of YAML.
 - `stack_items`: ordered review/push units.
-- `stack_items[].brief`: required item-level `what`, `why`, and `approach`;
-  use YAML bullet lists for reviewable detail.
+- `stack_items[].description`: required item-level summary, motivation, and
+  approach; use YAML bullet lists for reviewable detail.
+- `stack_items[].brief`: compatibility mirror derived from `description`.
 - `pointer_commit`: exact commit approved for that stack item.
 - `base_commit`: effective review base for that stack item.
 - `contained_commits`: commits included in the item patch range.

@@ -239,6 +239,14 @@ draft_script=$(extract_path "$draft_output" "^Approval script:")
 draft_file=$(extract_path "$draft_output" "^Draft file:")
 expect_file "$draft_script"
 expect_file "$draft_file"
+[[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,description,user_intent,agent_assertion_template" ]] \
+  || fail "expected human-readable fields at top of lease draft: $(jq -r 'keys_unsorted[0:6] | join(",")' "$draft_file")"
+[[ "$(jq -r '.description.summary' "$draft_file")" == "feature start" ]] \
+  || fail "expected description summary in draft"
+[[ "$(jq -r '.description.motivation' "$draft_file")" == "exercise durable push-gate lease approval" ]] \
+  || fail "expected description motivation in draft"
+[[ "$(jq -r '.description.approach' "$draft_file")" == "use prepared semantic brief before approval" ]] \
+  || fail "expected description approach in draft"
 preview_output=$(printf 'n\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$preview_output" "Push lease approval"
 expect_contains "$preview_output" "PR: #123"
@@ -247,13 +255,20 @@ echo "ok 2 - draft script renders readable approval summary"
 
 common_dir=$(current_common_dir "$REPO")
 lease_path="$common_dir/push-gate/leases/refs/heads/mho/existing-pr.json"
+jq '.description.summary = "feature start from edited description" | .brief.what = "stale brief field"' \
+  "$draft_file" >"$draft_file.tmp"
+mv "$draft_file.tmp" "$draft_file"
 approval_block=$(printf 'y\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$approval_block" "pg approve requires an interactive terminal"
+[[ "$(jq -r '.brief.what' "$draft_file")" == "feature start from edited description" ]] \
+  || fail "expected approve to normalize brief from edited description"
 mkdir -p "$(dirname "$lease_path")"
 jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$draft_file" >"$lease_path"
 expect_file "$lease_path"
 lease_pr=$(jq -r '.pr_number' "$lease_path")
 [[ "$lease_pr" == "123" ]] || fail "expected PR number 123 in lease, got $lease_pr"
+[[ "$(jq -r '.description.summary' "$lease_path")" == "feature start from edited description" ]] \
+  || fail "expected PR-description-style description to be stored in lease"
 echo "ok 3 - noninteractive approval is blocked; lease fixture installed"
 
 raw_output=$(run_guard "$REPO" "git push -u origin mho/existing-pr")

@@ -130,9 +130,16 @@ mkdir -p "$REPO"
   expect_contains "$trunk_out" "Draft file:"
   draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/Draft file:/ {print $2; exit}')
   [[ -f "$draft_file" ]] || fail "expected trunk draft file: $trunk_out"
+  [[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,stack,description,stack_items" ]] \
+    || fail "expected human-readable fields at top of trunk draft: $(jq -r 'keys_unsorted[0:6] | join(",")' "$draft_file")"
+  expect_contains "$(jq -r '.description.summary' "$draft_file")" "ship demo stack"
+  expect_contains "$(jq -r '.description.motivation' "$draft_file")" "verify rich trunk review details"
   [[ "$(jq '.stack_items | length' "$draft_file")" == "2" ]] \
     || fail "expected stack items in trunk draft: $(cat "$draft_file")"
   expect_contains "$(jq -r '.stack_items[0].pointer_subject' "$draft_file")" "feature base"
+  expect_contains "$(jq -r '.stack_items[0].description.summary[0]' "$draft_file")" "Add the base stack item."
+  expect_contains "$(jq -r '.stack_items[0].description.motivation[0]' "$draft_file")" "Provide the first review unit."
+  expect_contains "$(jq -r '.stack_items[0].description.approach[0]' "$draft_file")" "Commit base.txt as the item patch."
   expect_contains "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" "Add the base stack item."
   expect_contains "$(jq -r '.stack_items[0].brief.why[0]' "$draft_file")" "Provide the first review unit."
   expect_contains "$(jq -r '.stack_items[0].brief.approach[0]' "$draft_file")" "Commit base.txt as the item patch."
@@ -146,17 +153,29 @@ mkdir -p "$REPO"
   expect_contains "$(jq -r '.stack_items[1].contained_commits[0].subject' "$draft_file")" "feature api"
   preview_out=$(bash "$PG" preview-trunk --draft "$draft_file" 2>&1)
   expect_contains "$preview_out" "Stack item: base"
-  expect_contains "$preview_out" "What:"
+  expect_contains "$preview_out" "Description:"
+  expect_contains "$preview_out" "Summary:"
   expect_contains "$preview_out" "- Add the base stack item."
-  expect_contains "$preview_out" "Why:"
+  expect_contains "$preview_out" "Motivation:"
   expect_contains "$preview_out" "- Provide the first review unit."
   expect_contains "$preview_out" "Approach:"
   expect_contains "$preview_out" "- Commit base.txt as the item patch."
+  expect_contains "$preview_out" "Testing:"
   expect_contains "$preview_out" "Pointer commit:"
   expect_contains "$preview_out" "Contained commits:"
   expect_contains "$preview_out" "Changed files:"
   expect_contains "$preview_out" "added:"
   expect_contains "$preview_out" "api.txt"
+  jq '.stack_items[0].description.summary = ["Edited base item description."] | .stack_items[0].brief.what = ["stale brief field"]' \
+    "$draft_file" >"$draft_file.tmp"
+  mv "$draft_file.tmp" "$draft_file"
+  set +e
+  approve_trunk_out=$(bash "$PG" approve-trunk --draft "$draft_file" 2>&1)
+  approve_trunk_rc=$?
+  set -e
+  [[ "$approve_trunk_rc" != "0" ]] || fail "expected noninteractive trunk approval to fail"
+  expect_contains "$approve_trunk_out" "requires an interactive terminal"
+  expect_contains "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" "Edited base item description."
 
   bad_item_briefs="$TEST_TMP/bad-item-briefs.json"
   jq -n '[{id:"base", what:"missing peers", why:"incomplete", approach:"incomplete"}]' >"$bad_item_briefs"

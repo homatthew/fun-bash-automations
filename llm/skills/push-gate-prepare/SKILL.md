@@ -97,7 +97,8 @@ Tell the user, with an explicit path:
 
 > Run in your terminal: `pg -C <absolute-repo-path>`
 
-They will see the brief you wrote rendered inside the approval YAML.
+They will see the brief you wrote rendered as the top-level
+PR-description-style `description` block inside the approval YAML.
 They can edit it, accept it, or reject it. Trust their edits — they
 are authoritative.
 

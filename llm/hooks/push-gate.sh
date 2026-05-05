@@ -969,11 +969,15 @@ pg_normalize_item_briefs_json() {
     end
     | map({
         id: (.id // error("item brief missing id")),
-        what: (.what // null),
-        why: (.why // null),
+        summary: (.summary // .what // null),
+        motivation: (.motivation // .why // null),
         approach: (.approach // null),
+        scope: (.scope // null),
         risks: (.risks // null),
-        verification: (.verification // null)
+        testing: (.testing // .verification // null),
+        what: (.what // .summary // null),
+        why: (.why // .motivation // null),
+        verification: (.verification // .testing // null)
       })
   ' <<<"$raw"
 }
@@ -1055,12 +1059,20 @@ pg_trunk_stack_items_json() {
         order_index: $order_index,
         branch: $branch,
         pr: (if $pr == "" then null else ($pr | tonumber) end),
+        description: {
+          summary: ($item_brief.summary // $item_brief.what // $pointer_subject // null),
+          motivation: ($item_brief.motivation // $item_brief.why // null),
+          approach: ($item_brief.approach // null),
+          scope: ($item_brief.scope // null),
+          risks: ($item_brief.risks // null),
+          testing: ($item_brief.testing // $item_brief.verification // null)
+        },
         brief: {
-          what: ($item_brief.what // $pointer_subject // null),
-          why: ($item_brief.why // null),
+          what: ($item_brief.what // $item_brief.summary // $pointer_subject // null),
+          why: ($item_brief.why // $item_brief.motivation // null),
           approach: ($item_brief.approach // null),
           risks: ($item_brief.risks // null),
-          verification: ($item_brief.verification // null)
+          verification: ($item_brief.verification // $item_brief.testing // null)
         },
         pointer_commit: $pointer_commit,
         pointer_subject: $pointer_subject,
@@ -1154,16 +1166,24 @@ pg_render_trunk_summary() {
       else
         "    - " + $label + ": " + (($value // "") | tostring)
       end;
+    def desc: .description // {
+      summary: .brief.what,
+      motivation: .brief.why,
+      approach: .brief.approach,
+      scope: .brief.scope,
+      risks: .brief.risks,
+      testing: .brief.verification
+    };
     "Stack trunk approval",
     "",
     "Stack: " + .stack,
     "Trunk tip: " + .materialization.trunk_tip,
     "Manifest hash: " + .materialization.manifest_hash,
     "",
-    "Brief:",
-    "  What: " + (.brief.what // ""),
-    "  Why: " + (.brief.why // ""),
-    "  Approach: " + (.brief.approach // ""),
+    "Description:",
+    "  Summary: " + (desc.summary // ""),
+    "  Motivation: " + (desc.motivation // ""),
+    "  Approach: " + (desc.approach // ""),
     "",
     "Items:",
     (if (((.stack_items // .item_details // [])) | length) > 0 then
@@ -1171,11 +1191,12 @@ pg_render_trunk_summary() {
         "  - Stack item: " + .id
           + (if (.pr // null) == null then "" else " (#" + (.pr | tostring) + ")" end)
           + ":",
-        item_bullets("What"; .brief.what),
-        item_bullets("Why"; .brief.why),
-        item_bullets("Approach"; .brief.approach),
-        (if (.brief.risks // "") != "" then item_bullets("Risks"; .brief.risks) else empty end),
-        (if (.brief.verification // "") != "" then "    - Verification: " + (if (.brief.verification | type) == "array" then (.brief.verification | join("; ")) else (.brief.verification | tostring) end) else empty end),
+        item_bullets("Summary"; (desc.summary // .brief.what)),
+        item_bullets("Motivation"; (desc.motivation // .brief.why)),
+        item_bullets("Approach"; (desc.approach // .brief.approach)),
+        (if ((desc.scope // "") != "") then item_bullets("Scope"; desc.scope) else empty end),
+        (if ((desc.risks // .brief.risks // "") != "") then item_bullets("Risks"; (desc.risks // .brief.risks)) else empty end),
+        (if ((desc.testing // .brief.verification // "") != "") then item_bullets("Testing"; (desc.testing // .brief.verification)) else empty end),
         "    - Branch: " + .branch,
         "    - Pointer commit: " + ((.pointer_commit // .commit)[0:12]) + " " + (.pointer_subject // .subject // ""),
         "    - Base: " + ((.base_label // .review_base_label // .base_commit // .review_base // "(unknown)") | tostring)
@@ -1239,12 +1260,21 @@ pg_cmd_trunk() {
     --argjson stack_items "$stack_items" \
     '{
       schema_version: 1,
+      stack: $stack,
+      description: {
+        summary: $what,
+        motivation: $why,
+        approach: $approach,
+        scope: (if $scope == "" then null else $scope end),
+        risks: (if $risks == "" then null else $risks end),
+        testing: null
+      },
+      stack_items: $stack_items,
+      approved_scope: null,
       repo_key: $repo_key,
       repo_root: $repo_root,
       common_dir: $common_dir,
-      stack: $stack,
       materialization: $materialization,
-      stack_items: $stack_items,
       brief: {
         what: $what,
         why: $why,
@@ -1252,7 +1282,6 @@ pg_cmd_trunk() {
         scope: (if $scope == "" then null else $scope end),
         risks: (if $risks == "" then null else $risks end)
       },
-      approved_scope: null,
       created_by: $created_by,
       created_at: $created_at,
       status: "active"
@@ -1264,7 +1293,11 @@ DRAFT_FILE="$draft_file"
 HELPER="$(pg_helper_path)"
 editor="\${EDITOR:-vi}"
 if command -v yq >/dev/null 2>&1; then
-  yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml > "\$DRAFT_FILE.yaml"
+  {
+    echo "# pg trunk approval draft — edit description and stack_items[].description."
+    echo "# Machine fields stay below the human review text."
+    yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml
+  } > "\$DRAFT_FILE.yaml"
   "\$editor" "\$DRAFT_FILE.yaml"
   yq eval '.' "\$DRAFT_FILE.yaml" --output-format=json > "\$DRAFT_FILE.new"
   jq empty "\$DRAFT_FILE.new"
@@ -1311,6 +1344,42 @@ pg_cmd_approve_trunk() {
     esac
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  local normalized_draft
+  normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-trunk-draft.XXXXXX")
+  jq '
+    def from_brief:
+      {
+        summary: .brief.what,
+        motivation: .brief.why,
+        approach: .brief.approach,
+        scope: .brief.scope,
+        risks: .brief.risks,
+        testing: .brief.verification
+      };
+    .description = (from_brief + (.description // {}))
+    | .brief = {
+        what: .description.summary,
+        why: .description.motivation,
+        approach: .description.approach,
+        scope: .description.scope,
+        risks: .description.risks
+      }
+    | .stack_items = ((.stack_items // []) | map(
+        .description = (from_brief + (.description // {}))
+        | .brief = {
+            what: .description.summary,
+            why: .description.motivation,
+            approach: .description.approach,
+            risks: .description.risks,
+            verification: .description.testing
+          }
+      ))
+  ' "$draft" >"$normalized_draft" || {
+    rm -f "$normalized_draft"
+    pg_fail "Draft file is not valid JSON: $draft"
+    return 1
+  }
+  mv "$normalized_draft" "$draft"
   local brief_what brief_why brief_approach
   brief_what=$(jq -r '.brief.what // ""' "$draft")
   brief_why=$(jq -r '.brief.why // ""' "$draft")
@@ -2184,6 +2253,14 @@ pg_ensure_parent_dir() {
 pg_render_lease_summary() {
   local file="$1"
   jq -r '
+    def desc: .description // {
+      summary: .brief.what,
+      motivation: .brief.why,
+      approach: .brief.approach,
+      scope: .brief.scope,
+      risks: .brief.risks,
+      testing: null
+    };
     "Push lease approval",
     "",
     "Repo: " + .repo_name,
@@ -2192,6 +2269,14 @@ pg_render_lease_summary() {
     "PR Repo: " + (.pr_repo // "(default)"),
     "Remote: " + .remote,
     "Anchor: " + .approved_anchor,
+    "",
+    "Description:",
+    "  Summary: " + (desc.summary // ""),
+    "  Motivation: " + (desc.motivation // ""),
+    "  Approach: " + (desc.approach // ""),
+    (if ((desc.scope // "") != "") then "  Scope: " + (desc.scope | tostring) else empty end),
+    (if ((desc.risks // "") != "") then "  Risks: " + (desc.risks | tostring) else empty end),
+    (if ((desc.testing // "") != "") then "  Testing: " + (desc.testing | tostring) else empty end),
     "",
     "User intent:",
     (.user_intent // ""),
@@ -3075,6 +3160,17 @@ EOF
     --arg created_at "$(pg_now_utc)" \
     '{
       schema_version: ($schema_version | tonumber),
+      description: {
+        summary: (if $brief_what == "" then null else $brief_what end),
+        motivation: (if $brief_why == "" then null else $brief_why end),
+        approach: (if $brief_approach == "" then null else $brief_approach end),
+        scope: (if $brief_scope == "" then null else $brief_scope end),
+        risks: (if $brief_risks == "" then null else $brief_risks end),
+        testing: null
+      },
+      user_intent: $user_intent,
+      agent_assertion_template: $agent_assertion_template,
+      approved_scope: $approved_scope,
       repo_name: $repo_name,
       repo_root: $repo_root,
       common_dir: $common_dir,
@@ -3087,9 +3183,6 @@ EOF
       pr_url: (if $pr_url == "" then null else $pr_url end),
       approved_anchor: $approved_anchor,
       base_ref_snapshot: (if $base_ref_snapshot == "" then null else $base_ref_snapshot end),
-      user_intent: $user_intent,
-      agent_assertion_template: $agent_assertion_template,
-      approved_scope: $approved_scope,
       brief: {
         what: (if $brief_what == "" then null else $brief_what end),
         why: (if $brief_why == "" then null else $brief_why end),
@@ -3152,8 +3245,8 @@ if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
   if command -v yq >/dev/null 2>&1; then
     # JSON → YAML with a helpful header + change-context comment.
     {
-      echo "# pg approval draft — edit user_intent, agent_assertion_template,"
-      echo "# and approved_scope (paths / subjects / max_commits / max_added_lines)."
+      echo "# pg approval draft — edit description first."
+      echo "# Then adjust user_intent, agent_assertion_template, or approved_scope if needed."
       echo "# Save + quit to continue, :cq or empty file to abort."
       echo "#"
       [ -n "\$CONTEXT_BLOCK" ] && printf '%s\n' "\$CONTEXT_BLOCK"
@@ -3248,6 +3341,33 @@ pg_cmd_approve() {
     esac
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+
+  local normalized_draft
+  normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-approve-draft.XXXXXX")
+  jq '
+    def from_brief:
+      {
+        summary: .brief.what,
+        motivation: .brief.why,
+        approach: .brief.approach,
+        scope: .brief.scope,
+        risks: .brief.risks,
+        testing: null
+      };
+    .description = (from_brief + (.description // {}))
+    | .brief = {
+        what: .description.summary,
+        why: .description.motivation,
+        approach: .description.approach,
+        scope: .description.scope,
+        risks: .description.risks
+      }
+  ' "$draft" >"$normalized_draft" || {
+    rm -f "$normalized_draft"
+    pg_fail "Draft file is not valid JSON: $draft"
+    return 1
+  }
+  mv "$normalized_draft" "$draft"
 
   # Enforce that the semantic brief was actually filled in. If the LLM
   # interview failed AND the user saved without editing, the draft will

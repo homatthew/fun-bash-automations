@@ -85,7 +85,7 @@ For stack trunks, the same split applies at trunk scope:
 ```
 1. Agent: pg prepare-trunk --stack S --what "..." --why "..." --approach "..." --item-briefs FILE
 2. Human: pg trunk --stack S
-3. Agent: pg push --trunk-stack S --branch B --source-ref COMMIT --assert-flow "..."
+3. Agent: pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
 ```
 
 The stack manifest and trunk materialization live in the Dolt store under
@@ -95,8 +95,12 @@ source of truth.
 
 Trunk approval drafts use this vocabulary:
 
+- `description`: PR-description-style human review text shown first in YAML.
 - `stack_items`: ordered review/push units in the stack.
+- `stack_items[].description`: item-level PR-description-style summary,
+  motivation, approach, scope, risks, and testing.
 - `stack_items[].brief`: required item-level `what`, `why`, and `approach`.
+  Kept for compatibility; approval derives it from `description`.
 - `pointer_commit`: exact branch tip approved for that stack item.
 - `base_commit`: effective review base for that stack item.
 - `contained_commits`: commits included in the item patch range.
@@ -113,15 +117,15 @@ The item briefs file may be JSON or YAML:
 ```yaml
 item_briefs:
   - id: pr266
-    what:
+    summary:
       - Fix Cassandra page-cache memory attribution.
-    why:
+    motivation:
       - Avoid false memory-driven node-count explanations.
     approach:
       - Keep the attribution behavior in PR266.
     risks:
       - Baseline churn needs review.
-    verification:
+    testing:
       - tox -e py312 -- tests/netflix/test_cassandra_memory.py
 ```
 
