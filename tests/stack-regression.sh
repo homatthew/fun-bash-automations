@@ -328,6 +328,21 @@ case "${1:-}" in
     exit 0
     ;;
   push)
+    is_trunk=""
+    source_ref=""
+    saved=("$@")
+    for ((i = 1; i <= $#; i++)); do
+      arg="${saved[$((i - 1))]}"
+      if [[ "$arg" == "--trunk-stack" ]]; then
+        is_trunk=1
+      elif [[ "$arg" == "--source-ref" && $i -lt $# ]]; then
+        source_ref="${saved[$i]}"
+      fi
+    done
+    if [[ -n "$is_trunk" && "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "raw commit source-ref is not a pushable branch ref: $source_ref" >&2
+      exit 1
+    fi
     log "push $*"
     echo "(fake) git push ok"
     exit 0
@@ -1452,8 +1467,10 @@ tip_push_calls=$(grep -c "^push push --trunk-stack dolt-demo" "$PG_LOG" || true)
 [[ "$tip_push_calls" == "1" ]] \
   || fail "expected 1 trunk tip pg push call, got $tip_push_calls: $(cat "$PG_LOG")"
 expect_contains "$(cat "$PG_LOG")" "--branch mho/dolt-demo.trunk"
+expect_contains "$(cat "$PG_LOG")" "--source-ref mho/dolt-demo.trunk"
 expect_contains "$(cat "$PG_LOG")" "--remote upstream"
 expect_not_contains "$(cat "$PG_LOG")" "--branch mho/feature-ui"
+expect_not_contains "$(cat "$PG_LOG")" "--source-ref $(git -C "$REPO" rev-parse mho/dolt-demo.trunk)"
 
 : >"$PG_LOG"
 set +e
@@ -1472,6 +1489,10 @@ trunk_push_calls=$(grep -c "^push push --trunk-stack dolt-demo" "$PG_LOG" || tru
 remote_push_calls=$(grep -c -- "--remote upstream" "$PG_LOG" || true)
 [[ "$remote_push_calls" == "4" ]] \
   || fail "expected each trunk push to preserve --remote upstream, got: $(cat "$PG_LOG")"
+expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-base"
+expect_contains "$(cat "$PG_LOG")" "--source-ref mho/dolt-insert"
+expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-api"
+expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-ui"
 REPO="$OLD_REPO"
 echo "ok 31 - trunk commands use push-gate stack store as source of truth"
 

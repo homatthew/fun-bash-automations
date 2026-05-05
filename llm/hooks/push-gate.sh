@@ -3966,9 +3966,9 @@ Stack trunks:
                          Agent handoff for approving a materialized trunk.
   pg trunk --stack S      Human review/approval for the whole stack trunk.
                          Draft uses stack items with pointer commits, contained commits, and file groups.
-  pg push --trunk-stack S --branch B --source-ref COMMIT --assert-flow "..."
-                         Push one approved item commit, or the approved private
-                         trunk ref at trunk_tip, from that trunk.
+  pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
+                         Push one approved item ref, or the approved private
+                         trunk ref at trunk_tip.
   Dolt is required for trunk manifests/leases:
                          brew install dolt && dolt version
                          Store defaults to ~/.push-gate/dolt-store; PG_STORE_DIR overrides it.

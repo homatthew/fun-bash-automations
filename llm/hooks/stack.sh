@@ -2183,8 +2183,8 @@ ${detail}"
     fi
 
     local assert_flow
-    assert_flow=$(printf 'push stack trunk tip %s\nbranch %s\nsource %s\n' "$stack_name" "$trunk_ref" "$trunk_tip")
-    local args=(push --trunk-stack "$stack_name" --branch "$trunk_ref" --source-ref "$trunk_tip" --force-with-lease --assert-flow "$assert_flow")
+    assert_flow=$(printf 'push stack trunk tip %s\nbranch %s\nsource %s\napproved tip %s\n' "$stack_name" "$trunk_ref" "$trunk_ref" "$trunk_tip")
+    local args=(push --trunk-stack "$stack_name" --branch "$trunk_ref" --source-ref "$trunk_ref" --force-with-lease --assert-flow "$assert_flow")
     [[ -n "$remote" ]] && args+=(--remote "$remote")
     bash "$helper" "${args[@]}"
 
@@ -2208,8 +2208,8 @@ ${detail}"
   while IFS=$'\t' read -r id branch commit_sha; do
     [[ -z "$branch" ]] && continue
     local assert_flow
-    assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\n' "$stack_name" "$id" "$branch" "$commit_sha")
-    local args=(push --trunk-stack "$stack_name" --branch "$branch" --source-ref "$commit_sha" --force-with-lease --assert-flow "$assert_flow")
+    assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\napproved commit %s\n' "$stack_name" "$id" "$branch" "$branch" "$commit_sha")
+    local args=(push --trunk-stack "$stack_name" --branch "$branch" --source-ref "$branch" --force-with-lease --assert-flow "$assert_flow")
     [[ -n "$remote" ]] && args+=(--remote "$remote")
     bash "$helper" "${args[@]}"
   done
