@@ -564,13 +564,18 @@ dispatch_input_summary() {
 
 pick_backend() {
   [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && { printf 'suppressed'; return; }
-  [ "${TERM_PROGRAM:-}" = "ghostty" ] && { printf 'ghostty'; return; }
+  [ "${TERM_PROGRAM:-}" = "ghostty" ] && can_use_tty_backend && { printf 'ghostty'; return; }
   if command -v alerter >/dev/null 2>&1; then
     [ "${TERM_PROGRAM:-}" = "vscode" ] && { printf 'vscode'; return; }
     printf 'alerter'
     return
   fi
   printf 'suppressed'
+}
+
+can_use_tty_backend() {
+  [ "${NOTIFY_ASSUME_TTY:-0}" = "1" ] && return 0
+  tty >/dev/null 2>/dev/null </dev/tty
 }
 
 backend_alerter() {
@@ -919,7 +924,13 @@ STICKY_AFTER_CLICK="0"
 [ "$DISPLAY_STATE" = "input" ] && STICKY_AFTER_CLICK="1"
 nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
-  ghostty)           backend_ghostty            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$SOUND" ;;
+  ghostty)
+    if ! backend_ghostty "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$SOUND"; then
+      nlog "ghostty failed; falling back to alerter"
+      _chosen_backend="alerter"
+      backend_alerter "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK"
+    fi
+    ;;
   vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
   alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
