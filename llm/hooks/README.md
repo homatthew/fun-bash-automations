@@ -40,7 +40,7 @@ The main hook must not wait on `alerter --json`; that can keep the hook alive un
 ```
 pick_backend()
   NOTIFY_SUPPRESS=1           → suppressed
-  TERM_PROGRAM=ghostty        → ghostty   (native OSC 9)
+  TERM_PROGRAM=ghostty + tty  → ghostty   (native OSC 9)
   TERM_PROGRAM=vscode         → vscode    (PID scrape + alerter)
   alerter in $PATH            → alerter
   else                        → suppressed
@@ -54,6 +54,12 @@ pick_backend()
 | `backend_suppressed` | – | no-op |
 
 `notify-slack.sh` predates the launchd-detached helper and may lag this shape. Do not copy behavior from it back into `notify.sh` without rechecking this section.
+
+Codex Desktop/App-originated turns can inherit `TERM_PROGRAM=ghostty` without a
+controlling TTY. In that case `notify.sh` must skip the Ghostty backend and use
+`alerter`; otherwise the `/dev/tty` write fails before any macOS notification is
+posted. Tests can set `NOTIFY_ASSUME_TTY=1` to exercise the Ghostty branch from
+non-interactive shells.
 
 ## Event Semantics
 

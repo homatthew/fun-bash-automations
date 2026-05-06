@@ -81,6 +81,7 @@ run_notify_term() {
   NOTIFY_RUNTIME="$runtime" \
     NOTIFY_SESSION_KEY="$DEFAULT_SESSION" \
     NOTIFY_MACOS_DRY_RUN=1 \
+    NOTIFY_ASSUME_TTY=1 \
     NOTIFY_LOG="$LOG" \
     TERM_PROGRAM="$term_program" \
     bash "$HOOK" <<<"$payload" 2>&1
@@ -90,6 +91,16 @@ run_notify_session() {
   local runtime="$1" term_program="$2" session="$3" payload="$4"
   NOTIFY_RUNTIME="$runtime" \
     NOTIFY_SESSION_KEY="$session" \
+    NOTIFY_MACOS_DRY_RUN=1 \
+    NOTIFY_LOG="$LOG" \
+    TERM_PROGRAM="$term_program" \
+    bash "$HOOK" <<<"$payload" 2>&1
+}
+
+run_notify_no_tty_term() {
+  local runtime="$1" term_program="$2" payload="$3"
+  NOTIFY_RUNTIME="$runtime" \
+    NOTIFY_SESSION_KEY="$DEFAULT_SESSION" \
     NOTIFY_MACOS_DRY_RUN=1 \
     NOTIFY_LOG="$LOG" \
     TERM_PROGRAM="$term_program" \
@@ -216,6 +227,19 @@ assert_contains "$out" "state=done"
 assert_contains "$out" "open=<ghostty-native>"
 assert_file_equals "$CODEX_STATE" "final:notify-ghostty"
 echo "ok 6 - Ghostty uses native notification backend"
+
+payload="$(jq -n --arg cwd "$WORKSPACE" '{
+  hook_event_name: "UserPromptSubmit",
+  turn_id: "notify-gui-ghostty",
+  cwd: $cwd,
+  prompt: "Fix notification from Codex GUI"
+}')"
+out="$(run_notify_no_tty_term codex ghostty "$payload")"
+assert_contains "$out" "backend=alerter"
+assert_contains "$out" "state=running"
+assert_contains "$out" "title=⏳ $REPO_NAME"
+assert_file_equals "$CODEX_STATE" "notify-gui-ghostty"
+echo "ok 6b - Codex GUI-style Ghostty environment falls back to alerter"
 
 TRANSCRIPT="$(mktemp -t fba-notify-regression-transcript)"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Please confirm the hook deployment."}]}}' > "$TRANSCRIPT"
