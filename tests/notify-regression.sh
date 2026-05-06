@@ -8,7 +8,9 @@ LOG="$TMPDIR/fba-notify-regression.log"
 WORKSPACE="$TMPDIR/fba-notify-regression-workspace"
 REPO_NAME="$(basename "$WORKSPACE")"
 DEFAULT_SESSION="notify-regression"
+GUI_SESSION="notify-gui"
 CODEX_STATE="/tmp/fba-notify-state-codex-$REPO_NAME-$DEFAULT_SESSION"
+CODEX_GUI_STATE="/tmp/fba-notify-state-codex-$REPO_NAME-$GUI_SESSION"
 CODEX_SUMMARY="/tmp/fba-notify-summary-codex-$REPO_NAME-$DEFAULT_SESSION"
 CODEX_CONTEXT="/tmp/fba-notify-context-codex-$REPO_NAME-$DEFAULT_SESSION"
 CLAUDE_STATE="/tmp/fba-notify-state-claude-$REPO_NAME-$DEFAULT_SESSION"
@@ -36,6 +38,16 @@ fail() {
 assert_contains() {
   local haystack="$1" needle="$2"
   [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain [$needle], got: $haystack"
+}
+
+assert_not_contains() {
+  local haystack="$1" needle="$2"
+  [[ "$haystack" != *"$needle"* ]] || fail "expected output not to contain [$needle], got: $haystack"
+}
+
+assert_file_missing() {
+  local file="$1"
+  [[ ! -e "$file" ]] || fail "expected file to be absent: $file"
 }
 
 assert_file_equals() {
@@ -71,6 +83,7 @@ run_notify() {
   NOTIFY_RUNTIME="$runtime" \
     NOTIFY_SESSION_KEY="$DEFAULT_SESSION" \
     NOTIFY_MACOS_DRY_RUN=1 \
+    NOTIFY_SUPPRESS_CODEX_GUI=0 \
     NOTIFY_LOG="$LOG" \
     TERM_PROGRAM=not-vscode \
     bash "$HOOK" <<<"$payload" 2>&1
@@ -82,6 +95,7 @@ run_notify_term() {
     NOTIFY_SESSION_KEY="$DEFAULT_SESSION" \
     NOTIFY_MACOS_DRY_RUN=1 \
     NOTIFY_ASSUME_TTY=1 \
+    NOTIFY_SUPPRESS_CODEX_GUI=0 \
     NOTIFY_LOG="$LOG" \
     TERM_PROGRAM="$term_program" \
     bash "$HOOK" <<<"$payload" 2>&1
@@ -92,18 +106,20 @@ run_notify_session() {
   NOTIFY_RUNTIME="$runtime" \
     NOTIFY_SESSION_KEY="$session" \
     NOTIFY_MACOS_DRY_RUN=1 \
+    NOTIFY_SUPPRESS_CODEX_GUI=0 \
     NOTIFY_LOG="$LOG" \
     TERM_PROGRAM="$term_program" \
     bash "$HOOK" <<<"$payload" 2>&1
 }
 
-run_notify_no_tty_term() {
-  local runtime="$1" term_program="$2" payload="$3"
-  NOTIFY_RUNTIME="$runtime" \
-    NOTIFY_SESSION_KEY="$DEFAULT_SESSION" \
+run_notify_codex_gui() {
+  local payload="$1"
+  NOTIFY_RUNTIME=codex \
+    NOTIFY_SESSION_KEY="$GUI_SESSION" \
     NOTIFY_MACOS_DRY_RUN=1 \
     NOTIFY_LOG="$LOG" \
-    TERM_PROGRAM="$term_program" \
+    TERM_PROGRAM=ghostty \
+    __CFBundleIdentifier=com.openai.codex \
     bash "$HOOK" <<<"$payload" 2>&1
 }
 
@@ -234,12 +250,12 @@ payload="$(jq -n --arg cwd "$WORKSPACE" '{
   cwd: $cwd,
   prompt: "Fix notification from Codex GUI"
 }')"
-out="$(run_notify_no_tty_term codex ghostty "$payload")"
-assert_contains "$out" "backend=alerter"
-assert_contains "$out" "state=running"
-assert_contains "$out" "title=⏳ $REPO_NAME"
-assert_file_equals "$CODEX_STATE" "notify-gui-ghostty"
-echo "ok 6b - Codex GUI-style Ghostty environment falls back to alerter"
+out="$(run_notify_codex_gui "$payload")"
+assert_equals "$out" "{}" "Codex GUI hook output"
+assert_not_contains "$out" "backend="
+assert_not_contains "$out" "vscode:"
+assert_file_missing "$CODEX_GUI_STATE"
+echo "ok 6b - Codex GUI invocation suppresses custom hook notification"
 
 TRANSCRIPT="$(mktemp -t fba-notify-regression-transcript)"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Please confirm the hook deployment."}]}}' > "$TRANSCRIPT"
