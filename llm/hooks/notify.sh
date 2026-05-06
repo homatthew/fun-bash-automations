@@ -18,6 +18,31 @@ cleanup_and_exit() {
   exit 0
 }
 
+ancestor_process_mentions() {
+  local pattern="$1" pid="$PPID" ppid command
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ -n "$pid" ] && [ "$pid" != "1" ] || break
+    command=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    printf '%s' "$command" | grep -Eq "$pattern" && return 0
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    [ -n "$ppid" ] && [ "$ppid" != "$pid" ] || break
+    pid="$ppid"
+  done
+  return 1
+}
+
+is_codex_gui_invocation() {
+  [ "${NOTIFY_SUPPRESS_CODEX_GUI:-1}" = "1" ] || return 1
+  case "${RUNTIME:-$0}" in
+    *codex*) ;;
+    *) return 1 ;;
+  esac
+  can_use_tty_backend && return 1
+  [ "${__CFBundleIdentifier:-}" = "com.openai.codex" ] && return 0
+  ancestor_process_mentions 'Codex\.app|codex app-server' && return 0
+  return 1
+}
+
 # Suppress when the caller is an internal LLM invocation (e.g. pg
 # running `codex exec` for its semantic brief/intent check). Parent
 # sets NOTIFY_SUPPRESS=1 which propagates through into this hook.
@@ -701,6 +726,8 @@ else
     *) RUNTIME="$(printf '%s' "$INPUT" | jq -r 'if has("turn_id") then "codex" else "claude" end' 2>/dev/null || echo claude)" ;;
   esac
 fi
+
+is_codex_gui_invocation && cleanup_and_exit
 
 eval "$(printf '%s' "$INPUT" | jq -r '
   @sh "EVENT=\(.hook_event_name // "")",
