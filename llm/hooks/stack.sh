@@ -10,6 +10,7 @@
 #   trunk  add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--base REF]
 #   trunk  move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
 #   trunk  remove --stack NAME --id ID [--dry-run]
+#   trunk  list [--json] [--base REF] [--prefix PREFIX]
 #   trunk  materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   trunk  push --stack NAME [--tip] [--dry-run] [--remote NAME]
 #   trunk  status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
@@ -1706,6 +1707,180 @@ stack_trunk_record_materialization() {
   stack_run_pg_store_command "$helper" stack-store-record-materialization --stack "$stack_name" --json "$materialization_json" >/dev/null
 }
 
+stack_trunk_list_store_json() {
+  local helper err list_json detail
+  helper=$(stack_pg_helper)
+  err=$(mktemp "${TMPDIR:-/tmp}/stack-pg.XXXXXX")
+  if ! list_json=$(bash "$helper" stack-store-list --json 2>"$err"); then
+    detail=$(cat "$err")
+    rm -f "$err"
+    if stack_is_dolt_missing_output "$detail"; then
+      stack_fail "$(stack_dolt_required_message)"
+    fi
+    stack_fail "failed to list Dolt stacks
+${detail}"
+  fi
+  rm -f "$err"
+  printf '%s\n' "$list_json"
+}
+
+stack_trunk_approval_json() {
+  local check="$1" allowed reason state async
+  allowed=$(jq -r '.allowed // false' <<<"$check")
+  reason=$(jq -r '.reason // ""' <<<"$check")
+  async=$(jq -c '.async_iteration // {enabled:false}' <<<"$check")
+  if [[ "$allowed" == "true" ]]; then
+    state="approved"
+    [[ -n "$reason" ]] || reason="Trunk approval is current."
+  elif grep -qi 'expired' <<<"$reason"; then
+    state="expired"
+  elif grep -qiE 'changed|stale|not active' <<<"$reason"; then
+    state="stale"
+  elif grep -qiE 'No active trunk lease|prepare-trunk|pg trunk|approval' <<<"$reason"; then
+    state="needs_approval"
+  else
+    state="unknown"
+  fi
+  jq -n --arg state "$state" --arg reason "$reason" --argjson async_iteration "$async" \
+    '{state:$state, reason:(if $reason == "" then null else $reason end), async_iteration:$async_iteration}'
+}
+
+stack_remote_tip_state_json() {
+  local branch="$1" local_tip="$2" remote_ref remote_tip="" state
+  remote_ref=$(stack_push_remote_ref "$branch" || true)
+  if [[ -n "$remote_ref" ]]; then
+    remote_tip=$(git rev-parse --verify "$remote_ref" 2>/dev/null || echo "")
+  fi
+  if [[ -z "$local_tip" ]]; then
+    state="unknown"
+  elif [[ -z "$remote_tip" ]]; then
+    state="not_pushed"
+  elif [[ "$local_tip" == "$remote_tip" ]]; then
+    state="synced"
+  elif git merge-base --is-ancestor "$remote_tip" "$local_tip" 2>/dev/null; then
+    state="local_ahead"
+  elif git merge-base --is-ancestor "$local_tip" "$remote_tip" 2>/dev/null; then
+    state="remote_ahead"
+  else
+    state="diverged"
+  fi
+  jq -n --arg remote_tip "$remote_tip" --arg state "$state" \
+    '{remote_tip:(if $remote_tip == "" then null else $remote_tip end), remote_state:$state}'
+}
+
+stack_cmd_trunk_list() {
+  local format="table" base_override="" prefix_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) format="json"; shift ;;
+      --base) base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
+      --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk list flag: $1" ;;
+    esac
+  done
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local store repo prefix prs stacks='[]' first_base=""
+  store=$(stack_trunk_list_store_json)
+  repo=$(jq -r '.repo // ""' <<<"$store")
+  prefix=$(stack_prefix "$prefix_override")
+  prs=$(stack_fetch_prs)
+
+  local stack_entry manifest materialization approval_raw approval stack_name manifest_base base trunk trunk_head alignment_state
+  while IFS= read -r stack_entry; do
+    [[ -z "$stack_entry" ]] && continue
+    manifest=$(jq -c '.manifest' <<<"$stack_entry")
+    materialization=$(jq -c '.materialization // null' <<<"$stack_entry")
+    approval_raw=$(jq -c '.approval // {}' <<<"$stack_entry")
+    approval=$(stack_trunk_approval_json "$approval_raw")
+    stack_name=$(stack_trunk_manifest_field "$manifest" "name")
+    manifest_base=$(stack_trunk_manifest_field "$manifest" "base")
+    base=$(stack_upstream_ref "${base_override:-$manifest_base}")
+    [[ -n "$first_base" ]] || first_base="$base"
+    trunk=$(stack_trunk_manifest_field "$manifest" "trunk")
+    trunk_head=$(git rev-parse --verify "$trunk" 2>/dev/null || echo "")
+    alignment_state=$(stack_trunk_alignment_state "$manifest")
+
+    local items='[]' id branch pr_manifest item_base local_tip remote pr pr_number pr_title pr_base mat_item commit approval_state item
+    approval_state=$(jq -r '.state' <<<"$approval")
+    while IFS=$'\t' read -r id branch pr_manifest item_base; do
+      [[ -z "$branch" ]] && continue
+      local_tip=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
+      remote=$(stack_remote_tip_state_json "$branch" "$local_tip")
+      pr=$(jq -c --arg branch "$branch" '.[$branch] // null' <<<"$prs")
+      pr_number=$(jq -r '.number // ""' <<<"$pr")
+      [[ -n "$pr_manifest" && "$pr_manifest" != "null" ]] && pr_number="$pr_manifest"
+      pr_title=$(jq -r '.title // ""' <<<"$pr")
+      pr_base=$(jq -r '.baseRefName // ""' <<<"$pr")
+      mat_item=$(jq -c --arg id "$id" '.items[]? | select(.id == $id)' <<<"$materialization")
+      commit=$(jq -r '.commit // ""' <<<"${mat_item:-null}")
+      item=$(jq -n \
+        --arg id "$id" \
+        --arg branch "$branch" \
+        --arg pr "$pr_number" \
+        --arg pr_title "$pr_title" \
+        --arg pr_base "$pr_base" \
+        --arg local_tip "$local_tip" \
+        --arg commit "$commit" \
+        --arg approval_state "$approval_state" \
+        --argjson remote "$remote" \
+        '{
+          id:$id,
+          branch:$branch,
+          pr:(if $pr == "" then null else ($pr | tonumber) end),
+          pr_title:(if $pr_title == "" then null else $pr_title end),
+          pr_base:(if $pr_base == "" then null else $pr_base end),
+          local_tip:(if $local_tip == "" then null else $local_tip end),
+          remote_tip:$remote.remote_tip,
+          remote_state:$remote.remote_state,
+          approval_state:$approval_state,
+          commit:(if $commit == "" then null else $commit end)
+        }')
+      items=$(jq --argjson item "$item" '. + [$item]' <<<"$items")
+    done < <(jq -r '.items[] | [.id, .branch, ((.pr // "") | tostring), (.base // "")] | @tsv' <<<"$manifest")
+
+    stacks=$(jq \
+      --arg name "$stack_name" \
+      --arg base "$base" \
+      --arg trunk "$trunk" \
+      --arg trunk_head "$trunk_head" \
+      --arg alignment_state "$alignment_state" \
+      --argjson materialization "$materialization" \
+      --argjson approval "$approval" \
+      --argjson items "$items" \
+      '. + [{
+        name:$name,
+        base:$base,
+        trunk:$trunk,
+        trunk_head:(if $trunk_head == "" then null else $trunk_head end),
+        alignment_state:$alignment_state,
+        materialization:$materialization,
+        approval:$approval,
+        items:$items
+      }]' <<<"$stacks")
+  done < <(jq -c '.stacks[]?' <<<"$store")
+
+  if [[ "$format" == "json" ]]; then
+    jq -n --arg repo "$repo" --arg base "$first_base" --arg prefix "$prefix" --argjson stacks "$stacks" \
+      '{repo:$repo, base:$base, prefix:$prefix, stacks:$stacks}'
+    return 0
+  fi
+
+  if [[ "$(jq 'length' <<<"$stacks")" == "0" ]]; then
+    echo "No materialized stacks"
+    return 0
+  fi
+  printf 'Repository: %s\n\n' "$repo"
+  printf '%-28s %-6s %-18s %s\n' "Stack" "Items" "Approval" "Trunk"
+  printf '%-28s %-6s %-18s %s\n' "-----" "-----" "--------" "-----"
+  jq -r '.[] | [.name, (.items | length | tostring), .approval.state, .trunk] | @tsv' <<<"$stacks" |
+  while IFS=$'\t' read -r stack_name item_count approval_state trunk; do
+    printf '%-28s %-6s %-18s %s\n' "$stack_name" "$item_count" "$approval_state" "$trunk"
+  done
+}
+
 stack_refresh_worktree_if_current_branch_moved() {
   local current_branch="$1" moved_tips="$2"
   [[ -n "$current_branch" && "$current_branch" != "HEAD" ]] || return 0
@@ -2219,13 +2394,14 @@ ${detail}"
 
 stack_cmd_trunk() {
   local sub="${1:-}"
-  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, status, materialize, or push"
+  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, list, status, materialize, or push"
   shift
   case "$sub" in
     init) stack_cmd_trunk_init "$@" ;;
     add) stack_cmd_trunk_add "$@" ;;
     move) stack_cmd_trunk_move "$@" ;;
     remove) stack_cmd_trunk_remove "$@" ;;
+    list) stack_cmd_trunk_list "$@" ;;
     status) stack_cmd_trunk_status "$@" ;;
     materialize) stack_cmd_trunk_materialize "$@" ;;
     push) stack_cmd_trunk_push "$@" ;;
@@ -3081,6 +3257,11 @@ Commands:
 
   trunk remove --stack NAME --id ID [--dry-run]
     Remove one item from the Dolt-backed stack manifest and compact order.
+
+  trunk list [--json] [--base REF] [--prefix PREFIX]
+    List current-repository Dolt-backed materialized stack manifests with
+    materialization, trunk approval, PR, and local/remote tip state. Inferred
+    loose branches from stack status are intentionally omitted.
 
   trunk status --name NAME|--stack NAME|--manifest PATH [--json]
                [--base REF] [--prefix PREFIX]

@@ -625,6 +625,50 @@ pg_cmd_stack_store_manifest() {
   fi
 }
 
+pg_cmd_stack_store_list() {
+  local format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown stack-store-list option: $1"; return 1 ;;
+    esac
+  done
+  pg_store_upsert_repo || return 1
+  local repo_key repo_root stack_names='[]' stack_name manifest materialization approval stacks='[]'
+  repo_key=$(pg_repo_key) || return 1
+  repo_root=$(pg_main_repo_path) || return 1
+  while IFS=, read -r stack_name; do
+    [[ -z "$stack_name" ]] && continue
+    stack_name=$(pg_csv_unquote "$stack_name")
+    stack_names=$(jq --arg name "$stack_name" '. + [$name]' <<<"$stack_names")
+  done < <(pg_dolt_sql_csv "
+SELECT name
+FROM stacks
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND status = 'active'
+ORDER BY updated_at DESC, name;
+" | tail -n +2)
+
+  while IFS= read -r stack_name; do
+    [[ -z "$stack_name" ]] && continue
+    manifest=$(pg_stack_manifest_json "$stack_name")
+    [[ -n "$manifest" ]] || continue
+    materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || echo 'null')
+    approval=$(pg_trunk_check_json "$stack_name" 2>/dev/null || echo '{"allowed":false,"reason":"Unable to check trunk approval."}')
+    stacks=$(jq \
+      --argjson manifest "$manifest" \
+      --argjson materialization "$materialization" \
+      --argjson approval "$approval" \
+      '. + [{manifest:$manifest, materialization:$materialization, approval:$approval}]' <<<"$stacks")
+  done < <(jq -r '.[]' <<<"$stack_names")
+
+  if [[ "$format" == "json" ]]; then
+    jq -n --arg repo "$repo_root" --arg repo_key "$repo_key" --argjson stacks "$stacks" \
+      '{repo:$repo, repo_key:$repo_key, stacks:$stacks}'
+  else
+    jq -r '.[] | .manifest.name' <<<"$stacks"
+  fi
+}
+
 pg_cmd_stack_store_record_materialization() {
   local stack_name="" materialization_json=""
   while [[ $# -gt 0 ]]; do
@@ -4030,6 +4074,9 @@ pg_main() {
       ;;
     stack-store-manifest)
       pg_cmd_stack_store_manifest "$@"
+      ;;
+    stack-store-list)
+      pg_cmd_stack_store_list "$@"
       ;;
     stack-store-record-materialization)
       pg_cmd_stack_store_record_materialization "$@"

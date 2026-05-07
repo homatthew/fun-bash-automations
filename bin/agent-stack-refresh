@@ -77,7 +77,7 @@ Current rules:
       verify: dolt version
       store: ~/.push-gate/dolt-store by default; PG_STORE_DIR overrides it.
   - Stack manifests are Dolt-backed through push-gate, not repo .stack JSON.
-  - Prefer: stack trunk init/add/status/materialize/push --stack <name>
+  - Prefer: stack trunk init/add/list/status/materialize/push --stack <name>
   - Reorder existing stack items with stack trunk move; prune them with
     stack trunk remove. Do not create a -v2 stack just to reorder items.
   - Compatibility only: stack trunk ... --manifest <path>

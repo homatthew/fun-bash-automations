@@ -100,6 +100,33 @@ mkdir -p "$REPO"
   materialize_out=$(bash "$STACK" trunk materialize --stack demo 2>&1)
   expect_contains "$materialize_out" "Materialized private trunk: mho/demo.trunk"
 
+  git checkout -b mho/loose --no-track main >/dev/null 2>&1
+  printf 'loose\n' >loose.txt
+  git add loose.txt
+  git_commit "loose branch outside materialized stack"
+  git checkout main >/dev/null 2>&1
+
+  trunk_list=$(bash "$STACK" trunk list --json)
+  repo_physical=$(pwd -P)
+  [[ "$(jq -r '.repo' <<<"$trunk_list")" == "$repo_physical" ]] \
+    || fail "expected trunk list repo to be current repo: $trunk_list"
+  [[ "$(jq -r '.stacks | length' <<<"$trunk_list")" == "1" ]] \
+    || fail "expected one Dolt-backed stack in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks[0].name' <<<"$trunk_list")" == "demo" ]] \
+    || fail "expected demo stack in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks[0].alignment_state' <<<"$trunk_list")" == "up_to_date" ]] \
+    || fail "expected materialized stack to be up to date: $trunk_list"
+  [[ "$(jq -r '.stacks[0].materialization.manifest_hash | length > 0' <<<"$trunk_list")" == "true" ]] \
+    || fail "expected latest materialization in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.state' <<<"$trunk_list")" == "needs_approval" ]] \
+    || fail "expected missing trunk lease to need approval: $trunk_list"
+  [[ "$(jq -r '.stacks[0].items | map(.id) | join(",")' <<<"$trunk_list")" == "base,api" ]] \
+    || fail "expected manifest order in trunk list: $trunk_list"
+  [[ "$(jq -r '[.stacks[].items[].branch] | index("mho/loose") == null' <<<"$trunk_list")" == "true" ]] \
+    || fail "expected trunk list to omit loose inferred branches: $trunk_list"
+  [[ "$(jq -r '.stacks[0].items[0].remote_state' <<<"$trunk_list")" == "not_pushed" ]] \
+    || fail "expected item remote state in trunk list: $trunk_list"
+
   item_briefs="$TEST_TMP/item-briefs.json"
   jq -n '[
     {
