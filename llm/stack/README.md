@@ -86,6 +86,7 @@ Private trunk refs must be private branches such as
    stack trunk init --name <name> --base origin/main --trunk mho/<name>.trunk
    stack trunk add --stack <name> --id <id> --branch <branch>
    stack trunk move --stack <name> --id <id> --after <id>
+   stack trunk list --json
    stack trunk status --stack <name>
    stack trunk materialize --stack <name>
    ```
@@ -169,7 +170,10 @@ planned rebases without moving refs. The command reports stale push-gate leases
 but does not change GitHub PR bases.
 
 `stack trunk init` and `stack trunk add` write a stack manifest to push-gate's
-Dolt store. `stack trunk move` reorders existing items with `--after`,
+Dolt store. `stack trunk list --json` lists only current-repo Dolt-backed
+materialized stacks with manifest order, latest materialization, trunk approval,
+PR details, and local/remote tip state. It intentionally omits inferred loose
+branches from `stack status`. `stack trunk move` reorders existing items with `--after`,
 `--before`, `--first`, or `--last`; `stack trunk remove` prunes an item and
 compacts order. These commands only change manifest order. `stack trunk
 materialize --stack <name>` reads that manifest, builds the private trunk in a

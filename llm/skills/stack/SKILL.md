@@ -93,6 +93,7 @@ stack trunk init --name NAME --base REF --trunk BRANCH
 stack trunk add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--base REF]
 stack trunk move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
 stack trunk remove --stack NAME --id ID [--dry-run]
+stack trunk list [--json] [--base REF] [--prefix PREFIX]
 stack trunk status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
 stack trunk materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
@@ -147,7 +148,10 @@ is reported as stale. The command does not change GitHub PR bases; retarget or
 create PRs separately when the inserted branch becomes the new review base.
 
 `stack trunk init` and `stack trunk add` write the manifest to the Dolt-backed
-push-gate store. `stack trunk materialize --stack <name>` reads that manifest,
+push-gate store. `stack trunk list --json` is the materialized-stack dashboard
+contract: it lists only current-repo Dolt-backed stacks, ordered manifest items,
+latest materialization, trunk approval, PR metadata, and local/remote tip state;
+it does not include inferred loose branches from `stack status`. `stack trunk materialize --stack <name>` reads that manifest,
 builds the stack's private trunk in a scratch clone, replays item branches in
 manifest order, and then atomically moves the trunk ref plus each item branch
 pointer to the corresponding commit on the trunk. This is the declarative form
