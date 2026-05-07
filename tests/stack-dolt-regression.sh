@@ -25,6 +25,12 @@ expect_contains() {
   [[ "$haystack" == *"$needle"* ]] || fail "expected [$needle] in: $haystack"
 }
 
+sql_quote() {
+  local s="$1"
+  s="${s//\'/\'\'}"
+  printf "'%s'" "$s"
+}
+
 git_commit() {
   GIT_AUTHOR_NAME=Test \
   GIT_AUTHOR_EMAIL=test@example.com \
@@ -148,6 +154,10 @@ mkdir -p "$REPO"
   ]' >"$item_briefs"
 
   prepare_out=$(bash "$PG" prepare-trunk --stack demo \
+    --async \
+    --expires 8h \
+    --max-pushes 30 \
+    --allow-rewrite \
     --what "ship demo stack" \
     --why "verify rich trunk review details" \
     --approach "review each materialized item before pushing" \
@@ -163,6 +173,14 @@ mkdir -p "$REPO"
   expect_contains "$(jq -r '.description.motivation' "$draft_file")" "verify rich trunk review details"
   [[ "$(jq '.stack_items | length' "$draft_file")" == "2" ]] \
     || fail "expected stack items in trunk draft: $(cat "$draft_file")"
+  [[ "$(jq -r '.async_iteration.enabled' "$draft_file")" == "true" ]] \
+    || fail "expected async trunk draft metadata"
+  [[ "$(jq -r '.async_iteration.max_pushes' "$draft_file")" == "30" ]] \
+    || fail "expected async trunk max push budget"
+  [[ "$(jq -r '.async_iteration.allow_rewrite' "$draft_file")" == "true" ]] \
+    || fail "expected async trunk rewrite approval"
+  [[ "$(jq -r '.async_iteration.scope.trunk_ref' "$draft_file")" == "mho/demo.trunk" ]] \
+    || fail "expected async trunk scope to include private trunk ref"
   expect_contains "$(jq -r '.stack_items[0].pointer_subject' "$draft_file")" "feature base"
   expect_contains "$(jq -r '.stack_items[0].description.summary[0]' "$draft_file")" "Add the base stack item."
   expect_contains "$(jq -r '.stack_items[0].description.motivation[0]' "$draft_file")" "Provide the first review unit."
@@ -179,6 +197,7 @@ mkdir -p "$REPO"
   expect_contains "$(jq -r '.stack_items[1].base_commit' "$draft_file")" "$(git rev-parse mho/feature-base)"
   expect_contains "$(jq -r '.stack_items[1].contained_commits[0].subject' "$draft_file")" "feature api"
   preview_out=$(bash "$PG" preview-trunk --draft "$draft_file" 2>&1)
+  expect_contains "$preview_out" "Async iteration: enabled"
   expect_contains "$preview_out" "Stack item: base"
   expect_contains "$preview_out" "Description:"
   expect_contains "$preview_out" "Summary:"
@@ -204,6 +223,19 @@ mkdir -p "$REPO"
   expect_contains "$approve_trunk_out" "requires an interactive terminal"
   expect_contains "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" "Edited base item description."
 
+  trunk_draft_out=$(bash "$PG" trunk-draft --stack demo --format yaml)
+  [[ "$(jq -r '.stack' <<<"$trunk_draft_out")" == "demo" ]] \
+    || fail "expected trunk-draft JSON to name demo stack: $trunk_draft_out"
+  [[ "$(jq -r '.format' <<<"$trunk_draft_out")" == "yaml" ]] \
+    || fail "expected trunk-draft JSON to report yaml format: $trunk_draft_out"
+  yaml_draft_file=$(jq -r '.draft_file' <<<"$trunk_draft_out")
+  json_draft_file=$(jq -r '.json_draft_file' <<<"$trunk_draft_out")
+  [[ -f "$yaml_draft_file" ]] || fail "expected YAML trunk draft file: $trunk_draft_out"
+  [[ -f "$json_draft_file" ]] || fail "expected JSON trunk draft file: $trunk_draft_out"
+  expect_contains "$(head -n 1 "$yaml_draft_file")" "pg trunk approval draft"
+  yq eval '.stack' "$yaml_draft_file" | grep -qx 'demo' \
+    || fail "expected YAML trunk draft to parse as stack demo"
+
   bad_item_briefs="$TEST_TMP/bad-item-briefs.json"
   jq -n '[{id:"base", what:"missing peers", why:"incomplete", approach:"incomplete"}]' >"$bad_item_briefs"
   set +e
@@ -227,6 +259,59 @@ mkdir -p "$REPO"
 
   check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   expect_contains "$check_out" "No active trunk lease for stack demo"
+
+  vscode_approve_out=$(bash "$PG" approve-trunk --draft "$yaml_draft_file" --reviewed-in-vscode 2>&1)
+  expect_contains "$vscode_approve_out" "Trunk lease approved: demo"
+  vscode_check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
+  [[ "$(jq -r '.allowed' <<<"$vscode_check_out")" == "true" ]] \
+    || fail "expected VS Code-reviewed YAML approval to allow trunk: $vscode_check_out"
+
+  repo_key=$(git rev-parse --git-common-dir)
+  [[ "$repo_key" == /* ]] || repo_key="$(git rev-parse --show-toplevel)/$repo_key"
+  materialization_id=$(jq -r '.materialization.materialization_id' "$draft_file")
+  manifest_hash=$(jq -r '.materialization.manifest_hash' "$draft_file")
+  trunk_tip=$(jq -r '.materialization.trunk_tip' "$draft_file")
+  pretty_async=$(jq '.async_iteration | .expires_at = "2099-01-01T00:00:00Z"' "$draft_file")
+  brief_json=$(jq -c '.brief' "$draft_file")
+  now="2026-05-06T00:00:00Z"
+  cd "$PG_STORE_DIR"
+  dolt sql -q "
+REPLACE INTO trunk_leases (repo_key, stack_name, manifest_hash, materialization_id, trunk_tip, approved_scope_json, brief_json, async_json, status, created_by, created_at, updated_at)
+VALUES ($(sql_quote "$repo_key"), 'demo', $(sql_quote "$manifest_hash"), $(sql_quote "$materialization_id"), $(sql_quote "$trunk_tip"), 'null', $(sql_quote "$brief_json"), $(sql_quote "$pretty_async"), 'active', 'test', $(sql_quote "$now"), $(sql_quote "$now"));
+" >/dev/null
+  jq -r '.materialization.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' "$draft_file" |
+  while IFS=$'\t' read -r item_id order_index branch commit_sha pr_number; do
+    pr_sql="NULL"
+    [[ -n "$pr_number" ]] && pr_sql="$pr_number"
+    dolt sql -q "
+REPLACE INTO trunk_lease_items (repo_key, stack_name, item_id, order_index, branch, commit_sha, pr_number)
+VALUES ($(sql_quote "$repo_key"), 'demo', $(sql_quote "$item_id"), $order_index, $(sql_quote "$branch"), $(sql_quote "$commit_sha"), $pr_sql);
+" >/dev/null
+  done
+  cd "$REPO"
+  pretty_check=$(bash "$PG" check-trunk --stack demo 2>&1)
+  [[ "$(jq -r '.allowed' <<<"$pretty_check")" == "true" ]] \
+    || fail "expected check-trunk to read pretty async_json from Dolt: $pretty_check"
+  [[ "$(jq -r '.async_iteration.enabled' <<<"$pretty_check")" == "true" ]] \
+    || fail "expected async status in check-trunk output: $pretty_check"
+  set +e
+  failed_trunk_push=$(bash "$PG" push \
+    --trunk-stack demo \
+    --branch mho/feature-api \
+    --source-ref mho/feature-api \
+    --remote missing \
+    --force-with-lease \
+    --assert-flow $'push stack trunk demo\nitem api\nbranch mho/feature-api' 2>&1)
+  failed_trunk_push_rc=$?
+  set -e
+  [[ "$failed_trunk_push_rc" != "0" ]] || fail "expected trunk push to fail against missing remote"
+  trunk_used_pushes=$(cd "$PG_STORE_DIR" && dolt sql -r json -q "
+SELECT async_json
+FROM trunk_leases
+WHERE repo_key = $(sql_quote "$repo_key") AND stack_name = 'demo';
+" | jq -r '.rows[0].async_json' | jq -r '.used_pushes')
+  [[ "$trunk_used_pushes" == "0" ]] \
+    || fail "failed trunk push consumed async budget: $trunk_used_pushes output: $failed_trunk_push"
 
   materializations=$(cd "$PG_STORE_DIR" && dolt sql -r csv -q "SELECT COUNT(*) FROM trunk_materializations;" | tail -n +2)
   [[ "$materializations" == "1" ]] || fail "expected one trunk materialization row, got $materializations"

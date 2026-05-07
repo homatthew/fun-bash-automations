@@ -13,6 +13,163 @@ pg_fail() {
   return 1
 }
 
+pg_duration_seconds() {
+  local value="$1" number unit
+  if [[ "$value" =~ ^([0-9]+)([smhd])?$ ]]; then
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]:-s}"
+    case "$unit" in
+      s) printf '%s\n' "$number" ;;
+      m) printf '%s\n' "$((number * 60))" ;;
+      h) printf '%s\n' "$((number * 3600))" ;;
+      d) printf '%s\n' "$((number * 86400))" ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
+  return 1
+}
+
+pg_resolve_expires_at() {
+  local duration="$1" seconds
+  seconds=$(pg_duration_seconds "$duration") || return 1
+  python3 - "$seconds" <<'PY'
+from datetime import datetime, timedelta, timezone
+import sys
+
+seconds = int(sys.argv[1])
+expires = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+print(expires.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+pg_async_request_json() {
+  local enabled="$1" mode="$2" expires="$3" max_pushes="$4" allow_rewrite="$5"
+  if [[ "$enabled" != "true" ]]; then
+    jq -n '{enabled:false}'
+    return 0
+  fi
+  [[ -n "$expires" ]] || expires="8h"
+  [[ -n "$max_pushes" ]] || max_pushes=20
+  [[ "$max_pushes" =~ ^[0-9]+$ ]] || { pg_fail "--max-pushes must be a non-negative integer"; return 1; }
+  pg_duration_seconds "$expires" >/dev/null || { pg_fail "--expires must be a duration like 8h, 30m, or 1d"; return 1; }
+  jq -n \
+    --arg mode "$mode" \
+    --arg expires "$expires" \
+    --argjson max_pushes "$max_pushes" \
+    --argjson allow_rewrite "$([[ "$allow_rewrite" == "true" ]] && echo true || echo false)" \
+    '{
+      enabled: true,
+      mode: $mode,
+      expires: $expires,
+      expires_at: null,
+      max_pushes: $max_pushes,
+      used_pushes: 0,
+      allow_rewrite: $allow_rewrite,
+      scope: {},
+      audit: []
+    }'
+}
+
+pg_async_status_json() {
+  local async_json="$1" now enabled expires_at max_pushes used_pushes remaining allow_rewrite block_reason scope mode
+  now=$(pg_now_utc)
+  enabled=$(jq -r '.enabled // false' <<<"$async_json")
+  mode=$(jq -r '.mode // ""' <<<"$async_json")
+  expires_at=$(jq -r '.expires_at // ""' <<<"$async_json")
+  max_pushes=$(jq -r '.max_pushes // 0' <<<"$async_json")
+  used_pushes=$(jq -r '.used_pushes // 0' <<<"$async_json")
+  allow_rewrite=$(jq -r '.allow_rewrite // false' <<<"$async_json")
+  scope=$(jq -c '.scope // {}' <<<"$async_json")
+  remaining=$((max_pushes - used_pushes))
+  [[ "$remaining" -lt 0 ]] && remaining=0
+  block_reason=""
+  if [[ "$enabled" != "true" ]]; then
+    block_reason="async lease not enabled"
+  elif [[ -z "$expires_at" || "$expires_at" == "null" ]]; then
+    block_reason="async lease has no expires_at; re-approve with pg"
+  elif [[ "$now" > "$expires_at" ]]; then
+    block_reason="async lease expired at $expires_at; re-run pg prepare and ask the user to review"
+  elif [[ "$used_pushes" -ge "$max_pushes" ]]; then
+    block_reason="async push budget exhausted ($used_pushes/$max_pushes); re-run pg prepare and ask the user to review"
+  fi
+  jq -n \
+    --argjson enabled "$([[ "$enabled" == "true" ]] && echo true || echo false)" \
+    --arg mode "$mode" \
+    --arg expires_at "$expires_at" \
+    --argjson allow_rewrite "$([[ "$allow_rewrite" == "true" ]] && echo true || echo false)" \
+    --argjson max_pushes "$max_pushes" \
+    --argjson used_pushes "$used_pushes" \
+    --argjson remaining "$remaining" \
+    --argjson scope "$scope" \
+    --arg block_reason "$block_reason" \
+    '{
+      enabled: $enabled,
+      mode: $mode,
+      expires_at: (if $expires_at == "" or $expires_at == "null" then null else $expires_at end),
+      allow_rewrite: $allow_rewrite,
+      pushes: {
+        used: $used_pushes,
+        max: $max_pushes,
+        remaining: $remaining
+      },
+      scope: $scope,
+      block_reason: (if $block_reason == "" then null else $block_reason end)
+    }'
+}
+
+pg_finalize_async_json() {
+  local async_json="$1" mode="$2" expires expires_at
+  if [[ "$(jq -r '.enabled // false' <<<"$async_json")" != "true" ]]; then
+    jq -n '{enabled:false}'
+    return 0
+  fi
+  local max_pushes
+  max_pushes=$(jq -r '.max_pushes // ""' <<<"$async_json")
+  [[ "$max_pushes" =~ ^[0-9]+$ ]] || { pg_fail "async_iteration.max_pushes must be a non-negative integer"; return 1; }
+  expires=$(jq -r '.expires // "8h"' <<<"$async_json")
+  expires_at=$(pg_resolve_expires_at "$expires") || { pg_fail "invalid async expires duration: $expires"; return 1; }
+  jq -c \
+    --arg mode "$mode" \
+    --arg expires_at "$expires_at" \
+    --argjson default_max "$([[ "$mode" == "trunk" ]] && echo 30 || echo 20)" \
+    '.mode = $mode
+     | .expires_at = $expires_at
+     | .max_pushes = (.max_pushes // $default_max)
+     | .used_pushes = (.used_pushes // 0)
+     | .allow_rewrite = (.allow_rewrite // false)
+     | .audit = (.audit // [])' <<<"$async_json"
+}
+
+pg_lock_acquire() {
+  local name="$1" lock_root lock_dir waited=0 lock_pid
+  lock_root="$(pg_store_dir)/locks"
+  mkdir -p "$lock_root" || return 1
+  lock_dir="$lock_root/$(pg_branch_slug "$name").lock"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    if [[ -r "$lock_dir/pid" ]]; then
+      lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+      if [[ "$lock_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        rm -rf "$lock_dir"
+        continue
+      fi
+    fi
+    waited=$((waited + 1))
+    if [[ "$waited" -gt 100 ]]; then
+      pg_fail "Timed out waiting for push-gate lock: $lock_dir"
+      return 1
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$$" >"$lock_dir/pid" 2>/dev/null || true
+  printf '%s\n' "$lock_dir"
+}
+
+pg_lock_release() {
+  local lock_dir="$1"
+  [[ -n "$lock_dir" ]] && rm -rf "$lock_dir"
+}
+
 pg_helper_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
@@ -63,6 +220,7 @@ ALTER TABLE leases ADD COLUMN brief_approach TEXT;
 ALTER TABLE leases ADD COLUMN brief_scope TEXT;
 ALTER TABLE leases ADD COLUMN brief_risks TEXT;
 ALTER TABLE leases ADD COLUMN bead_ids TEXT;
+ALTER TABLE leases ADD COLUMN async_json TEXT;
 SQL
   return 0
 }
@@ -79,7 +237,7 @@ pg_db_upsert_lease() {
   # Extract into shell vars via jq (each value null-safe).
   local repo_root branch_ref repo_name branch_name remote pr_number pr_url
   local anchor base_ref status intent assert scope created_at updated_at
-  local brief_what brief_why brief_approach brief_scope brief_risks bead_ids
+  local brief_what brief_why brief_approach brief_scope brief_risks bead_ids async_json
   repo_root=$(jq -r '.repo_root // ""' "$lease_path")
   branch_ref=$(jq -r '.branch_ref // ""' "$lease_path")
   repo_name=$(jq -r '.repo_name // ""' "$lease_path")
@@ -101,6 +259,7 @@ pg_db_upsert_lease() {
   brief_scope=$(jq -r '.brief.scope // ""' "$lease_path")
   brief_risks=$(jq -r '.brief.risks // ""' "$lease_path")
   bead_ids=$(jq -r '.bead_ids // [] | join(",")' "$lease_path")
+  async_json=$(jq -c '.async_iteration // {enabled:false}' "$lease_path")
 
   [[ -n "$repo_root" && -n "$branch_ref" ]] || return 0
 
@@ -110,7 +269,7 @@ INSERT INTO leases (
   pr_number, pr_url, approved_anchor, base_ref, status,
   user_intent, agent_assertion_template, approved_scope_json,
   lease_file_path, created_at, updated_at,
-  brief_what, brief_why, brief_approach, brief_scope, brief_risks, bead_ids
+  brief_what, brief_why, brief_approach, brief_scope, brief_risks, bead_ids, async_json
 ) VALUES (
   $(pg_sql_quote "$repo_root"), $(pg_sql_quote "$branch_ref"),
   $(pg_sql_quote "$repo_name"), $(pg_sql_quote "$branch_name"),
@@ -125,7 +284,8 @@ INSERT INTO leases (
   $(pg_sql_quote "$created_at"), $(pg_sql_quote "$updated_at"),
   $(pg_sql_quote "$brief_what"), $(pg_sql_quote "$brief_why"),
   $(pg_sql_quote "$brief_approach"), $(pg_sql_quote "$brief_scope"),
-  $(pg_sql_quote "$brief_risks"), $(pg_sql_quote "$bead_ids")
+  $(pg_sql_quote "$brief_risks"), $(pg_sql_quote "$bead_ids"),
+  $(pg_sql_quote "$async_json")
 )
 ON CONFLICT(repo_root, branch_ref) DO UPDATE SET
   repo_name = excluded.repo_name,
@@ -146,7 +306,8 @@ ON CONFLICT(repo_root, branch_ref) DO UPDATE SET
   brief_approach = excluded.brief_approach,
   brief_scope = excluded.brief_scope,
   brief_risks = excluded.brief_risks,
-  bead_ids = excluded.bead_ids;
+  bead_ids = excluded.bead_ids,
+  async_json = excluded.async_json;
 SQL
 }
 
@@ -211,6 +372,50 @@ pg_dolt_sql_csv() {
   pg_require_dolt || return 1
   pg_dolt_init || return 1
   (cd "$(pg_dolt_store_dir)" && dolt sql -r csv -q "$query")
+}
+
+pg_dolt_sql_json() {
+  local query="$1"
+  pg_require_dolt || return 1
+  pg_dolt_init || return 1
+  (cd "$(pg_dolt_store_dir)" && dolt sql -r json -q "$query")
+}
+
+pg_compact_json_text() {
+  python3 -c '
+import sys
+
+text = sys.stdin.read()
+out = []
+in_string = False
+escaped = False
+
+for ch in text:
+    if in_string:
+        if escaped:
+            out.append(ch)
+            escaped = False
+        elif ch == "\\":
+            out.append(ch)
+            escaped = True
+        elif ch == chr(34):
+            out.append(ch)
+            in_string = False
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20:
+            out.append("\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    else:
+        out.append(ch)
+        if ch == chr(34):
+            in_string = True
+
+sys.stdout.write("".join(out))
+' | jq -c .
 }
 
 pg_dolt_commit() {
@@ -335,6 +540,7 @@ CREATE TABLE IF NOT EXISTS pending_trunk_assertions (
 );
 ' >/dev/null
     dolt sql -q "ALTER TABLE pending_trunk_assertions ADD COLUMN remote VARCHAR(255) NOT NULL DEFAULT 'origin';" >/dev/null 2>&1 || true
+    dolt sql -q "ALTER TABLE trunk_leases ADD COLUMN async_json TEXT;" >/dev/null 2>&1 || true
   ) || return 1
 }
 
@@ -845,7 +1051,7 @@ ORDER BY order_index;
 }
 
 pg_trunk_active_lease_json() {
-  local stack_name="$1" repo_key row manifest_hash materialization_id trunk_tip status updated_at
+  local stack_name="$1" repo_key row manifest_hash materialization_id trunk_tip status updated_at async_json
   repo_key=$(pg_repo_key) || return 1
   row=$(pg_dolt_sql_csv "
 SELECT manifest_hash, materialization_id, trunk_tip, status, updated_at
@@ -854,6 +1060,11 @@ WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$s
 " | tail -n +2 | head -1)
   [[ -n "$row" ]] || return 1
   IFS=, read -r manifest_hash materialization_id trunk_tip status updated_at <<<"$row"
+  async_json=$(pg_dolt_sql_json "
+SELECT COALESCE(async_json, '{\"enabled\":false}') AS async_json
+FROM trunk_leases
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" | jq -r '.rows[0].async_json // "{\"enabled\":false}"' | pg_compact_json_text)
   local items='[]' item_id order_index branch commit_sha pr_number
   while IFS=, read -r item_id order_index branch commit_sha pr_number; do
     [[ -z "$item_id" ]] && continue
@@ -884,6 +1095,7 @@ ORDER BY order_index;
     --arg trunk_tip "$trunk_tip" \
     --arg status "$status" \
     --arg updated_at "$updated_at" \
+    --argjson async_iteration "$async_json" \
     --argjson items "$items" \
     '{
       stack: $stack,
@@ -892,6 +1104,7 @@ ORDER BY order_index;
       trunk_tip: $trunk_tip,
       status: $status,
       updated_at: $updated_at,
+      async_iteration: $async_iteration,
       items: $items
     }'
 }
@@ -909,6 +1122,8 @@ pg_trunk_check_json() {
     return 0
   fi
   local lease_status lease_manifest lease_tip materialization_manifest materialization_tip lease_items materialization_items
+  local async_status async_enabled async_block async_allow_rewrite lease_shape materialization_shape
+  local manifest current_trunk_ref scoped_trunk_ref
   lease_status=$(jq -r '.status' <<<"$lease")
   lease_manifest=$(jq -r '.manifest_hash' <<<"$lease")
   lease_tip=$(jq -r '.trunk_tip' <<<"$lease")
@@ -916,24 +1131,48 @@ pg_trunk_check_json() {
   materialization_tip=$(jq -r '.trunk_tip' <<<"$materialization")
   lease_items=$(jq -c '[.items[] | {id,branch,commit}]' <<<"$lease")
   materialization_items=$(jq -c '[.items[] | {id,branch,commit}]' <<<"$materialization")
+  lease_shape=$(jq -c '[.items[] | {id,branch}]' <<<"$lease")
+  materialization_shape=$(jq -c '[.items[] | {id,branch}]' <<<"$materialization")
+  async_status=$(pg_async_status_json "$(jq -c '.async_iteration // {enabled:false}' <<<"$lease")")
+  async_enabled=$(jq -r '.enabled' <<<"$async_status")
+  async_block=$(jq -r '.block_reason // ""' <<<"$async_status")
+  async_allow_rewrite=$(jq -r '.allow_rewrite // false' <<<"$async_status")
+  manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
+  current_trunk_ref=$(jq -r '.trunk // ""' <<<"$manifest" 2>/dev/null || true)
+  scoped_trunk_ref=$(jq -r '.scope.trunk_ref // ""' <<<"$async_status")
   if [[ "$lease_status" != "active" ]]; then
-    jq -n --arg status "$lease_status" '{allowed:false, reason:("Trunk lease is not active: " + $status)}'
+    jq -n --arg status "$lease_status" --argjson async_iteration "$async_status" '{allowed:false, reason:("Trunk lease is not active: " + $status), async_iteration:$async_iteration}'
     return 0
   fi
   if [[ "$lease_manifest" != "$materialization_manifest" ]]; then
-    jq -n '{allowed:false, reason:"Stack manifest changed after trunk approval. Re-run pg prepare-trunk and pg trunk."}'
+    jq -n --argjson async_iteration "$async_status" '{allowed:false, reason:"Stack manifest changed after trunk approval. Re-run pg prepare-trunk and pg trunk.", async_iteration:$async_iteration}'
     return 0
   fi
-  if [[ "$lease_tip" != "$materialization_tip" ]]; then
-    jq -n '{allowed:false, reason:"Private trunk tip changed after approval. Re-run pg prepare-trunk and pg trunk."}'
+  if [[ "$lease_shape" != "$materialization_shape" ]]; then
+    jq -n --argjson async_iteration "$async_status" '{allowed:false, reason:"Stack item ids or branch names changed after trunk approval. Re-run pg prepare-trunk and pg trunk.", async_iteration:$async_iteration}'
     return 0
   fi
-  if [[ "$lease_items" != "$materialization_items" ]]; then
-    jq -n '{allowed:false, reason:"Stack item commits changed after trunk approval. Re-run pg prepare-trunk and pg trunk."}'
+  if [[ -n "$scoped_trunk_ref" && -n "$current_trunk_ref" && "$scoped_trunk_ref" != "$current_trunk_ref" ]]; then
+    jq -n --argjson async_iteration "$async_status" '{allowed:false, reason:"Stack private trunk ref changed after trunk approval. Re-run pg prepare-trunk and pg trunk.", async_iteration:$async_iteration}'
     return 0
+  fi
+  if [[ "$async_enabled" == "true" && -n "$async_block" ]]; then
+    jq -n --arg reason "$async_block" --argjson async_iteration "$async_status" '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+    return 0
+  fi
+  if [[ "$lease_tip" != "$materialization_tip" || "$lease_items" != "$materialization_items" ]]; then
+    if [[ "$async_enabled" != "true" ]]; then
+      jq -n --argjson async_iteration "$async_status" '{allowed:false, reason:"Stack trunk changed after approval. Re-run pg prepare-trunk --async and pg trunk for iterative pushes.", async_iteration:$async_iteration}'
+      return 0
+    fi
+    if [[ "$async_allow_rewrite" != "true" ]]; then
+      jq -n --argjson async_iteration "$async_status" '{allowed:false, reason:"Stack trunk changed after approval, but async rewrite was not approved. Re-run pg prepare-trunk --async --allow-rewrite and pg trunk.", async_iteration:$async_iteration}'
+      return 0
+    fi
   fi
   jq -n --argjson lease "$lease" --argjson materialization "$materialization" \
-    '{allowed:true, lease:$lease, materialization:$materialization}'
+    --argjson async_iteration "$async_status" \
+    '{allowed:true, lease:$lease, materialization:$materialization, async_iteration:$async_iteration}'
 }
 
 pg_git_log_json_for_range() {
@@ -1141,6 +1380,7 @@ pg_trunk_stack_items_json() {
 
 pg_cmd_prepare_trunk() {
   local stack_name="" what="" why="" approach="" scope="" risks="" item_briefs_file="" item_briefs_raw="" item_briefs="[]"
+  local async_enabled="false" async_expires="" async_max_pushes="" async_allow_rewrite="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stack|--name) stack_name="$2"; shift 2 ;;
@@ -1150,6 +1390,16 @@ pg_cmd_prepare_trunk() {
       --scope) scope="$2"; shift 2 ;;
       --risks) risks="$2"; shift 2 ;;
       --item-briefs|--item-brief-file) item_briefs_file="$2"; shift 2 ;;
+      --low-stakes)
+        async_enabled="true"
+        [[ -n "$async_expires" ]] || async_expires="1h"
+        [[ -n "$async_max_pushes" ]] || async_max_pushes="5"
+        shift
+        ;;
+      --async) async_enabled="true"; shift ;;
+      --expires) async_expires="$2"; shift 2 ;;
+      --max-pushes) async_max_pushes="$2"; shift 2 ;;
+      --allow-rewrite) async_allow_rewrite="true"; shift ;;
       *) pg_fail "Unknown prepare-trunk option: $1"; return 1 ;;
     esac
   done
@@ -1173,6 +1423,8 @@ pg_cmd_prepare_trunk() {
       || { pg_fail "item briefs must contain exactly one entry per stack item, and each needs what, why, and approach."; return 1; }
   fi
   path=$(pg_trunk_prepare_path "$stack_name")
+  local async_json
+  async_json=$(pg_async_request_json "$async_enabled" "trunk" "${async_expires:-8h}" "${async_max_pushes:-30}" "$async_allow_rewrite") || return 1
   jq -n \
     --arg repo_root "$repo_root" \
     --arg stack "$stack_name" \
@@ -1184,6 +1436,7 @@ pg_cmd_prepare_trunk() {
     --arg at "$(pg_now_utc)" \
     --argjson materialization "$materialization" \
     --argjson item_briefs "$item_briefs" \
+    --argjson async_iteration "$async_json" \
     '{
       repo_root: $repo_root,
       stack: $stack,
@@ -1194,7 +1447,8 @@ pg_cmd_prepare_trunk() {
       risks: (if $risks == "" then null else $risks end),
       item_briefs: $item_briefs,
       prepared_at: $at,
-      materialization: $materialization
+      materialization: $materialization,
+      async_iteration: $async_iteration
     }' >"$path"
   echo "Prepared trunk brief written: $path"
   echo "Now ask the user to run:  pg -C $repo_root trunk --stack $stack_name"
@@ -1221,8 +1475,18 @@ pg_render_trunk_summary() {
     "Stack trunk approval",
     "",
     "Stack: " + .stack,
+    (if ((.async_iteration.scope.trunk_ref // "") != "") then "Private trunk ref: " + .async_iteration.scope.trunk_ref else empty end),
     "Trunk tip: " + .materialization.trunk_tip,
     "Manifest hash: " + .materialization.manifest_hash,
+    (if (.async_iteration.enabled // false) then
+      "Async iteration: enabled"
+      + "\n  Expires: " + ((.async_iteration.expires_at // .async_iteration.expires // "") | tostring)
+      + "\n  Pushes: " + ((.async_iteration.used_pushes // 0) | tostring) + "/" + ((.async_iteration.max_pushes // 0) | tostring)
+      + "\n  Rewrite: " + (if (.async_iteration.allow_rewrite // false) then "allowed" else "denied" end)
+      + "\n  Scope: same stack, private trunk ref, manifest hash, item ids, and item branches"
+    else
+      "Async iteration: disabled"
+    end),
     "",
     "Description:",
     "  Summary: " + (desc.summary // ""),
@@ -1264,14 +1528,16 @@ pg_render_trunk_summary() {
 
 pg_cmd_trunk() {
   local stack_name=""
+  local assume_yes="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -y|--yes) assume_yes="true"; shift ;;
       --stack|--name) stack_name="$2"; shift 2 ;;
       *) pg_fail "Unknown trunk option: $1"; return 1 ;;
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "pg trunk requires --stack NAME"
-  local prepare_path draft_file script_file materialization stack_items what why approach scope risks
+  local prepare_path draft_file script_file materialization stack_items what why approach scope risks async_json trunk_ref manifest_json
   prepare_path=$(pg_trunk_prepare_path "$stack_name")
   [[ -f "$prepare_path" ]] || pg_fail "No prepared trunk brief for $stack_name. Run pg prepare-trunk first."
   materialization=$(pg_trunk_latest_materialization_json "$stack_name") || {
@@ -1286,6 +1552,9 @@ pg_cmd_trunk() {
   approach=$(jq -r '.approach // ""' "$prepare_path")
   scope=$(jq -r '.scope // ""' "$prepare_path")
   risks=$(jq -r '.risks // ""' "$prepare_path")
+  async_json=$(jq -c '.async_iteration // {enabled:false}' "$prepare_path")
+  manifest_json=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || echo '{}')
+  trunk_ref=$(jq -r '.trunk // ""' <<<"$manifest_json")
   draft_file=$(pg_trunk_draft_path "$stack_name")
   script_file="${draft_file%.json}.sh"
   jq -n \
@@ -1298,10 +1567,12 @@ pg_cmd_trunk() {
     --arg approach "$approach" \
     --arg scope "$scope" \
     --arg risks "$risks" \
+    --arg trunk_ref "$trunk_ref" \
     --arg created_by "${USER:-unknown}" \
     --arg created_at "$(pg_now_utc)" \
     --argjson materialization "$materialization" \
     --argjson stack_items "$stack_items" \
+    --argjson async_iteration "$async_json" \
     '{
       schema_version: 1,
       stack: $stack,
@@ -1326,6 +1597,22 @@ pg_cmd_trunk() {
         scope: (if $scope == "" then null else $scope end),
         risks: (if $risks == "" then null else $risks end)
       },
+      async_iteration: (
+        if ($async_iteration.enabled // false) then
+          $async_iteration
+          | .mode = "trunk"
+          | .scope = {
+              type: "trunk",
+              stack: $stack,
+              trunk_ref: $trunk_ref,
+              manifest_hash: $materialization.manifest_hash,
+              item_ids: ($materialization.items | map(.id)),
+              item_branches: ($materialization.items | map(.branch))
+            }
+        else
+          {enabled:false}
+        end
+      ),
       created_by: $created_by,
       created_at: $created_at,
       status: "active"
@@ -1335,6 +1622,7 @@ pg_cmd_trunk() {
 set -euo pipefail
 DRAFT_FILE="$draft_file"
 HELPER="$(pg_helper_path)"
+ASSUME_YES="$assume_yes"
 editor="\${EDITOR:-vi}"
 if command -v yq >/dev/null 2>&1; then
   {
@@ -1352,12 +1640,17 @@ else
 fi
 "\$HELPER" preview-trunk --draft "\$DRAFT_FILE"
 echo
-printf 'Proceed? [Y/n] '
-read -r answer
-case "\$answer" in
-  ""|y|Y|yes|YES) "\$HELPER" approve-trunk --draft "\$DRAFT_FILE" ;;
-  *) echo "Canceled"; exit 1 ;;
-esac
+if [[ "\$ASSUME_YES" == "true" ]]; then
+  echo "Proceed: yes (--yes, after editor review)"
+  "\$HELPER" approve-trunk --draft "\$DRAFT_FILE"
+else
+  printf 'Proceed? [Y/n] '
+  read -r answer
+  case "\$answer" in
+    ""|y|Y|yes|YES) "\$HELPER" approve-trunk --draft "\$DRAFT_FILE" ;;
+    *) echo "Canceled"; exit 1 ;;
+  esac
+fi
 EOF
   chmod +x "$script_file"
   echo "Trunk approval script: $script_file"
@@ -1365,6 +1658,60 @@ EOF
   if [[ "${PG_AUTO_RUN_APPROVAL:-1}" == "1" ]] && [[ -t 0 || -t 1 ]]; then
     bash "$script_file"
   fi
+}
+
+pg_cmd_trunk_draft() {
+  local stack_name="" format="yaml" out_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --format) format="$2"; shift 2 ;;
+      --out) out_file="$2"; shift 2 ;;
+      *) pg_fail "Unknown trunk-draft option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg trunk-draft requires --stack NAME"
+  case "$format" in
+    json|yaml) ;;
+    *) pg_fail "pg trunk-draft --format must be json or yaml"; return 1 ;;
+  esac
+
+  local trunk_out draft_file script_file target_file
+  trunk_out=$(PG_AUTO_RUN_APPROVAL=0 pg_cmd_trunk --stack "$stack_name") || return 1
+  draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^Draft file:/ {print $2; exit}')
+  script_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^Trunk approval script:/ {print $2; exit}')
+  [[ -f "$draft_file" ]] || { pg_fail "Unable to create trunk draft for $stack_name"; return 1; }
+
+  if [[ "$format" == "yaml" ]]; then
+    command -v yq >/dev/null 2>&1 \
+      || { pg_fail "YAML trunk drafts require yq. Use --format json or install yq."; return 1; }
+    target_file="${out_file:-$draft_file.yaml}"
+    {
+      echo "# pg trunk approval draft — edit description and stack_items[].description."
+      echo "# Save this file, then approve it from VS Code with Gitless: Approve Saved Draft."
+      echo "# Machine fields stay below the human review text."
+      yq -P eval '.' "$draft_file" --output-format=yaml
+    } >"$target_file"
+  else
+    target_file="${out_file:-$draft_file}"
+    if [[ -n "$out_file" && "$out_file" != "$draft_file" ]]; then
+      cp "$draft_file" "$out_file"
+    fi
+  fi
+
+  jq -n \
+    --arg stack "$stack_name" \
+    --arg format "$format" \
+    --arg draft_file "$target_file" \
+    --arg json_draft_file "$draft_file" \
+    --arg script_file "$script_file" \
+    '{
+      stack: $stack,
+      format: $format,
+      draft_file: $draft_file,
+      json_draft_file: $json_draft_file,
+      script_file: (if $script_file == "" then null else $script_file end)
+    }'
 }
 
 pg_cmd_preview_trunk() {
@@ -1381,14 +1728,30 @@ pg_cmd_preview_trunk() {
 
 pg_cmd_approve_trunk() {
   local draft=""
+  local reviewed_in_vscode="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --draft) draft="$2"; shift 2 ;;
+      --reviewed-in-vscode) reviewed_in_vscode="true"; shift ;;
       *) pg_fail "Unknown approve-trunk option: $1"; return 1 ;;
     esac
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
-  local normalized_draft
+  local cleanup_draft="" normalized_draft=""
+  trap 'rm -f "${cleanup_draft:-}" "${normalized_draft:-}"' RETURN
+  case "$draft" in
+    *.yaml|*.yml)
+      command -v yq >/dev/null 2>&1 \
+        || { pg_fail "YAML trunk drafts require yq. Use JSON or install yq."; return 1; }
+      cleanup_draft=$(mktemp "${TMPDIR:-/tmp}/pg-trunk-yaml-draft.XXXXXX")
+      yq eval '.' "$draft" --output-format=json >"$cleanup_draft" || {
+        rm -f "$cleanup_draft"
+        pg_fail "Draft YAML failed to parse: $draft"
+        return 1
+      }
+      draft="$cleanup_draft"
+      ;;
+  esac
   normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-trunk-draft.XXXXXX")
   jq '
     def from_brief:
@@ -1454,11 +1817,11 @@ pg_cmd_approve_trunk() {
     pg_fail "Approval blocked: each stack item requires brief.what, brief.why, and brief.approach. Missing: $missing_item_briefs"
     return 1
   fi
-  if [[ ! -t 0 ]]; then
-    pg_fail "Blocked: pg approve-trunk requires an interactive terminal. Run the approval script printed by pg trunk instead."
+  if [[ ! -t 0 && "$reviewed_in_vscode" != "true" ]]; then
+    pg_fail "Blocked: pg approve-trunk requires an interactive terminal, unless the saved draft was reviewed and submitted from VS Code with --reviewed-in-vscode."
     return 1
   fi
-  local stack_name repo_key now materialization_id manifest_hash trunk_tip brief_json scope_json created_by
+  local stack_name repo_key now materialization_id manifest_hash trunk_tip brief_json scope_json created_by async_json
   stack_name=$(jq -r '.stack' "$draft")
   local current_materialization draft_materialization
   current_materialization=$(pg_trunk_latest_materialization_json "$stack_name") \
@@ -1476,9 +1839,12 @@ pg_cmd_approve_trunk() {
   brief_json=$(jq -c '.brief' "$draft")
   scope_json=$(jq -c '.approved_scope // null' "$draft")
   created_by=$(jq -r '.created_by // "unknown"' "$draft")
+  async_json=$(pg_finalize_async_json "$(jq -c '.async_iteration // {enabled:false}' "$draft")" "trunk" | jq -c .) || return 1
+  jq --argjson async_iteration "$async_json" '.async_iteration = $async_iteration' \
+    "$draft" >"$draft.tmp" && mv "$draft.tmp" "$draft"
   pg_dolt_sql "
-REPLACE INTO trunk_leases (repo_key, stack_name, manifest_hash, materialization_id, trunk_tip, approved_scope_json, brief_json, status, created_by, created_at, updated_at)
-VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$scope_json"), $(pg_sql_quote "$brief_json"), 'active', $(pg_sql_quote "$created_by"), $(pg_sql_quote "$now"), $(pg_sql_quote "$now"));
+REPLACE INTO trunk_leases (repo_key, stack_name, manifest_hash, materialization_id, trunk_tip, approved_scope_json, brief_json, async_json, status, created_by, created_at, updated_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$scope_json"), $(pg_sql_quote "$brief_json"), $(pg_sql_quote "$async_json"), 'active', $(pg_sql_quote "$created_by"), $(pg_sql_quote "$now"), $(pg_sql_quote "$now"));
 DELETE FROM trunk_lease_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
 " >/dev/null
   local item_id order_index branch commit_sha pr_number pr_sql
@@ -1492,6 +1858,8 @@ VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quo
   done < <(jq -r '.materialization.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' "$draft")
   pg_dolt_commit "trunk lease $stack_name"
   rm -f "$(pg_trunk_prepare_path "$stack_name")"
+  trap - RETURN
+  rm -f "$cleanup_draft" "$normalized_draft"
   echo "Trunk lease approved: $stack_name"
 }
 
@@ -1505,6 +1873,29 @@ pg_cmd_check_trunk() {
   done
   [[ -n "$stack_name" ]] || pg_fail "pg check-trunk requires --stack NAME"
   pg_trunk_check_json "$stack_name"
+}
+
+pg_cmd_revoke_trunk() {
+  local stack_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      *) pg_fail "Unknown revoke-trunk option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg revoke-trunk requires --stack NAME"
+  local repo_key now
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  pg_dolt_sql "
+UPDATE trunk_leases
+SET status = 'revoked', updated_at = $(pg_sql_quote "$now")
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM pending_trunk_assertions
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" >/dev/null
+  pg_dolt_commit "revoke trunk lease $stack_name"
+  echo "Revoked trunk lease for $stack_name"
 }
 
 pg_trunk_record_pending_assertion() {
@@ -1521,6 +1912,42 @@ pg_trunk_clear_pending_assertion() {
   local stack_name="$1" branch="$2" repo_key
   repo_key=$(pg_repo_key) || return 0
   pg_dolt_sql "DELETE FROM pending_trunk_assertions WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND branch = $(pg_sql_quote "$branch");" >/dev/null || true
+}
+
+pg_trunk_record_async_success() {
+  local stack_name="$1" branch="$2" remote="$3" source_ref="$4" commit_sha="$5" assert_flow="$6"
+  local repo_key async_json updated
+  repo_key=$(pg_repo_key) || return 1
+  async_json=$(pg_dolt_sql_json "
+SELECT COALESCE(async_json, '{\"enabled\":false}') AS async_json
+FROM trunk_leases
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" | jq -r '.rows[0].async_json // "{\"enabled\":false}"' | pg_compact_json_text)
+  [[ "$(jq -r '.enabled // false' <<<"$async_json")" == "true" ]] || return 0
+  updated=$(jq -c \
+    --arg branch "$branch" \
+    --arg remote "$remote" \
+    --arg source_ref "$source_ref" \
+    --arg pushed_head "$commit_sha" \
+    --arg assert_flow "$assert_flow" \
+    --arg timestamp "$(pg_now_utc)" \
+    '.used_pushes = ((.used_pushes // 0) + 1)
+     | .audit = ((.audit // []) + [{
+         stack: .scope.stack,
+         branch: $branch,
+         remote: $remote,
+         source_ref: $source_ref,
+         pushed_head: $pushed_head,
+         timestamp: $timestamp,
+         assertion_summary: ($assert_flow | gsub("[\r\n]+"; " | "))
+       }])' <<<"$async_json")
+  pg_dolt_sql "
+UPDATE trunk_leases
+SET async_json = $(pg_sql_quote "$updated"),
+    updated_at = $(pg_sql_quote "$(pg_now_utc)")
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+" >/dev/null
+  pg_dolt_commit "trunk async push $stack_name"
 }
 
 pg_trunk_pending_allows_push() {
@@ -1542,13 +1969,13 @@ LIMIT 1;
   allowed=$(jq -r '.allowed' <<<"$check")
   [[ "$allowed" == "true" ]] || return 1
   jq -e --arg branch "$branch" --arg commit "$commit_sha" \
-    '.lease.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null \
+    '.materialization.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null \
     && return 0
 
   local manifest trunk_branch trunk_tip
   manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
   trunk_branch=$(jq -r '.trunk // ""' <<<"$manifest" 2>/dev/null || true)
-  trunk_tip=$(jq -r '.lease.trunk_tip // ""' <<<"$check")
+  trunk_tip=$(jq -r '.materialization.trunk_tip // ""' <<<"$check")
   [[ -n "$trunk_branch" && "$branch" == "$trunk_branch" && "$commit_sha" == "$trunk_tip" ]]
 }
 
@@ -1558,27 +1985,36 @@ pg_cmd_push_trunk() {
   [[ -n "$branch" ]] || pg_fail "pg push --trunk-stack requires --branch."
   [[ -n "$source_ref" ]] || pg_fail "pg push --trunk-stack requires --source-ref."
   remote="${remote:-origin}"
-  local commit_sha check allowed reason refspec result use_upstream="false"
+  local commit_sha check allowed reason refspec result use_upstream="false" lock_dir=""
+  lock_dir=$(pg_lock_acquire "trunk-$stack_name") || return 1
+  cleanup_trunk_lock() {
+    [[ -n "$lock_dir" ]] && pg_lock_release "$lock_dir"
+  }
+  trap cleanup_trunk_lock EXIT
   commit_sha=$(git rev-parse --verify "${source_ref}^{commit}") \
-    || { pg_fail "source ref is not a commit: $source_ref"; return 1; }
+    || { cleanup_trunk_lock; trap - EXIT; pg_fail "source ref is not a commit: $source_ref"; return 1; }
   check=$(pg_trunk_check_json "$stack_name")
   allowed=$(jq -r '.allowed' <<<"$check")
   if [[ "$allowed" != "true" ]]; then
     reason=$(jq -r '.reason' <<<"$check")
+    cleanup_trunk_lock
+    trap - EXIT
     pg_fail "$reason"
+    return 1
   fi
   if ! jq -e --arg branch "$branch" --arg commit "$commit_sha" \
-    '.lease.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null; then
+    '.materialization.items[] | select(.branch == $branch and .commit == $commit)' <<<"$check" >/dev/null; then
     local manifest trunk_branch trunk_tip
     manifest=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || true)
     trunk_branch=$(jq -r '.trunk // ""' <<<"$manifest" 2>/dev/null || true)
-    trunk_tip=$(jq -r '.lease.trunk_tip // ""' <<<"$check")
+    trunk_tip=$(jq -r '.materialization.trunk_tip // ""' <<<"$check")
     [[ -n "$trunk_branch" && "$branch" == "$trunk_branch" && "$commit_sha" == "$trunk_tip" ]] \
-      || pg_fail "Trunk lease for $stack_name does not approve $branch at $commit_sha"
+      || { cleanup_trunk_lock; trap - EXIT; pg_fail "Trunk lease for $stack_name does not approve $branch at $commit_sha"; return 1; }
   fi
   pg_trunk_record_pending_assertion "$stack_name" "$branch" "$remote" "$source_ref" "$commit_sha" "$assert_flow"
   cleanup_trunk_pending() {
     pg_trunk_clear_pending_assertion "$stack_name" "$branch"
+    cleanup_trunk_lock
   }
   trap cleanup_trunk_pending EXIT
   refspec="$source_ref:$branch"
@@ -1593,8 +2029,12 @@ pg_cmd_push_trunk() {
     git push "$remote" "$refspec"
   fi
   result=$?
-  trap - EXIT
   pg_trunk_clear_pending_assertion "$stack_name" "$branch"
+  if [[ "$result" == "0" ]]; then
+    pg_trunk_record_async_success "$stack_name" "$branch" "$remote" "$source_ref" "$commit_sha" "$assert_flow"
+  fi
+  trap - EXIT
+  cleanup_trunk_lock
   return "$result"
 }
 
@@ -1967,6 +2407,7 @@ pg_prepare_path() {
 # Required before `pg` will produce a draft (see pg_cmd_draft_approve).
 pg_cmd_prepare() {
   local what="" why="" approach="" scope="" risks="" beads=""
+  local async_enabled="false" async_expires="" async_max_pushes="" async_allow_rewrite="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --what)     what="$2"; shift 2 ;;
@@ -1975,6 +2416,16 @@ pg_cmd_prepare() {
       --scope)    scope="$2"; shift 2 ;;
       --risks)    risks="$2"; shift 2 ;;
       --beads)    beads="$2"; shift 2 ;;
+      --low-stakes)
+        async_enabled="true"
+        [[ -n "$async_expires" ]] || async_expires="1h"
+        [[ -n "$async_max_pushes" ]] || async_max_pushes="5"
+        shift
+        ;;
+      --async)    async_enabled="true"; shift ;;
+      --expires)  async_expires="$2"; shift 2 ;;
+      --max-pushes) async_max_pushes="$2"; shift 2 ;;
+      --allow-rewrite) async_allow_rewrite="true"; shift ;;
       *) pg_fail "Unknown prepare option: $1"; return 1 ;;
     esac
   done
@@ -2006,6 +2457,8 @@ pg_cmd_prepare() {
   branch=$(pg_branch_name 2>/dev/null) || { pg_fail "not on a branch"; return 1; }
   head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
   path=$(pg_prepare_path)
+  local async_json
+  async_json=$(pg_async_request_json "$async_enabled" "branch" "${async_expires:-8h}" "${async_max_pushes:-20}" "$async_allow_rewrite") || return 1
 
   jq -n \
     --arg repo_root "$repo_root" \
@@ -2018,6 +2471,7 @@ pg_cmd_prepare() {
     --arg beads "$beads" \
     --arg head "$head_sha" \
     --arg at "$(pg_now_utc)" \
+    --argjson async_iteration "$async_json" \
     '{
       repo_root: $repo_root,
       branch: $branch,
@@ -2028,7 +2482,8 @@ pg_cmd_prepare() {
       risks: (if $risks == "" then null else $risks end),
       beads: (if $beads == "" then [] else ($beads | split(",") | map(. | ascii_downcase | gsub("^ +| +$"; ""))) end),
       prepared_at: $at,
-      prepared_at_head: $head
+      prepared_at_head: $head,
+      async_iteration: $async_iteration
     }' > "$path"
 
   echo "Prepared brief written: $path"
@@ -2313,6 +2768,14 @@ pg_render_lease_summary() {
     "PR Repo: " + (.pr_repo // "(default)"),
     "Remote: " + .remote,
     "Anchor: " + .approved_anchor,
+    (if (.async_iteration.enabled // false) then
+      "Async iteration: enabled"
+      + "\n  Expires: " + ((.async_iteration.expires_at // .async_iteration.expires // "") | tostring)
+      + "\n  Pushes: " + ((.async_iteration.used_pushes // 0) | tostring) + "/" + ((.async_iteration.max_pushes // 0) | tostring)
+      + "\n  Rewrite: " + (if (.async_iteration.allow_rewrite // false) then "allowed" else "denied" end)
+    else
+      "Async iteration: disabled"
+    end),
     "",
     "Description:",
     "  Summary: " + (desc.summary // ""),
@@ -2690,7 +3153,7 @@ pg_validate_scope() {
         fi
       done < <(echo "$allow_paths_json" | jq -r '.[]')
       if [[ "$ok" != "true" ]]; then
-        jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside approved_scope.paths. Re-run `pg` to re-approve, or set PG_SCOPE_OVERRIDE=1 for a one-time bypass.")}'
+        jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside approved_scope.paths. Re-run pg prepare and ask the user to review.")}'
         return 0
       fi
     done <<<"$changed_files"
@@ -2738,6 +3201,71 @@ pg_validate_scope() {
   fi
 
   jq -n '{allowed:true}'
+}
+
+pg_validate_branch_lease_state() {
+  local lease_json="$1" branch_ref="$2" remote="$3" current_head="$4"
+  local lease_status lease_remote approved_anchor has_scope async_json async_status async_enabled async_block async_allow_rewrite
+  local scope_result scope_allowed scope_reason
+
+  lease_status=$(echo "$lease_json" | jq -r '.status // "active"')
+  lease_remote=$(echo "$lease_json" | jq -r '.remote // ""')
+  approved_anchor=$(echo "$lease_json" | jq -r '.approved_anchor // ""')
+  async_json=$(echo "$lease_json" | jq -c '.async_iteration // {enabled:false}')
+  async_status=$(pg_async_status_json "$async_json")
+  async_enabled=$(echo "$async_status" | jq -r '.enabled')
+  async_block=$(echo "$async_status" | jq -r '.block_reason // ""')
+  async_allow_rewrite=$(echo "$async_status" | jq -r '.allow_rewrite // false')
+
+  if [[ "$lease_status" != "active" ]]; then
+    jq -n --arg reason "Blocked: push lease for $(pg_branch_display "$branch_ref") is not active. Run pg prepare and ask the user to review." \
+      --argjson async_iteration "$async_status" \
+      '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+    return 0
+  fi
+  if [[ -n "$remote" && -n "$lease_remote" && "$lease_remote" != "$remote" ]]; then
+    jq -n --arg reason "Blocked: lease for $(pg_branch_display "$branch_ref") is scoped to remote '$lease_remote', but push targets '$remote'. Re-run pg prepare for the target remote or use the leased remote." \
+      --argjson async_iteration "$async_status" \
+      '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+    return 0
+  fi
+
+  if [[ "$async_enabled" == "true" && -n "$async_block" ]]; then
+    jq -n --arg reason "Blocked: $async_block" --argjson async_iteration "$async_status" \
+      '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+    return 0
+  fi
+
+  if [[ "$current_head" != "$approved_anchor" ]]; then
+    if [[ "$async_enabled" != "true" ]]; then
+      jq -n --arg reason "Blocked: HEAD changed after approval (lease anchor $approved_anchor, HEAD $current_head). Re-run pg prepare --async and ask the user to review for iterative pushes." \
+        --argjson async_iteration "$async_status" \
+        '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+      return 0
+    fi
+    if ! git merge-base --is-ancestor "$approved_anchor" "$current_head" 2>/dev/null; then
+      if [[ "$async_allow_rewrite" != "true" ]]; then
+        jq -n --arg reason "Blocked: branch history was rewritten after lease anchor $approved_anchor, but async rewrite was not approved. Re-run pg prepare --async --allow-rewrite and ask the user to review." \
+          --argjson async_iteration "$async_status" \
+          '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+        return 0
+      fi
+    fi
+  fi
+
+  has_scope=$(echo "$lease_json" | jq -r '.approved_scope // empty | if . == null or . == {} then "" else "1" end')
+  if [[ -n "$has_scope" ]]; then
+    scope_result=$(pg_validate_scope "$lease_json")
+    scope_allowed=$(echo "$scope_result" | jq -r '.allowed')
+    if [[ "$scope_allowed" != "true" ]]; then
+      scope_reason=$(echo "$scope_result" | jq -r '.reason')
+      jq -n --arg reason "$scope_reason" --argjson async_iteration "$async_status" \
+        '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+      return 0
+    fi
+  fi
+
+  jq -n --argjson async_iteration "$async_status" '{allowed:true, async_iteration:$async_iteration}'
 }
 
 pg_validate_push_guard() {
@@ -2803,55 +3331,21 @@ pg_validate_push_guard() {
     return 0
   fi
 
-  lease_status=$(echo "$lease_json" | jq -r '.status')
-  lease_remote=$(echo "$lease_json" | jq -r '.remote')
-  if [[ "$lease_status" != "active" ]]; then
-    jq -n --arg reason "Blocked: push lease for $lease_branch is not active. Generate a new approval draft with pg." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-  if [[ "$lease_remote" != "$remote" ]]; then
-    jq -n --arg reason "Blocked: lease for $lease_branch is scoped to remote '$lease_remote', but push targets '$remote'. Generate a new draft or use the leased remote." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-
-  approved_anchor=$(echo "$lease_json" | jq -r '.approved_anchor')
   # Deletion pushes (--delete or :branch) don't push commits, so skip the
   # ancestor + scope checks below — there's no diff to validate.
   if [[ "$is_delete" == "true" ]]; then
     jq -n '{allowed:true, verdict:"delete"}'
     return 0
   fi
-  if ! git merge-base --is-ancestor "$approved_anchor" "$current_head" 2>/dev/null; then
-    jq -n --arg reason "Blocked: branch history was rewritten after lease anchor $approved_anchor. Create a new lease before pushing." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-  # Scope-aware anchor check:
-  #   - If lease has approved_scope (semantic approval), accept any descendant
-  #     as long as pg_validate_scope passes below.
-  #   - If lease has NO approved_scope (back-compat / one-shot), require HEAD
-  #     to match approved_anchor exactly — the user approved THESE commits.
-  #   - PG_ALLOW_DESCENDANT=1 bypasses the anchor-exact rule for one push.
-  local has_scope
-  has_scope=$(echo "$lease_json" | jq -r '.approved_scope // empty | if . == null or . == {} then "" else "1" end')
-  if [[ -z "$has_scope" && "${PG_ALLOW_DESCENDANT:-0}" != "1" && "$current_head" != "$approved_anchor" ]]; then
-    jq -n --arg reason "Blocked: new commits landed after lease was approved (lease anchor $approved_anchor, HEAD $current_head). Run \`pg\` to re-approve with a semantic scope, or override once with PG_ALLOW_DESCENDANT=1 pg push ..." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-  if [[ "$force_with_lease" == "true" && "$current_head" != "$approved_anchor" ]]; then
-    jq -n --arg reason "Blocked: --force-with-lease requires a lease approved at the rewritten HEAD. Create a new lease before pushing." '{allowed:false, reason:$reason}'
-    return 0
-  fi
 
-  # Semantic scope check — applies only when lease has approved_scope.
-  if [[ -n "$has_scope" && "${PG_SCOPE_OVERRIDE:-0}" != "1" ]]; then
-    local scope_result scope_allowed scope_reason
-    scope_result=$(pg_validate_scope "$lease_json")
-    scope_allowed=$(echo "$scope_result" | jq -r '.allowed')
-    if [[ "$scope_allowed" != "true" ]]; then
-      scope_reason=$(echo "$scope_result" | jq -r '.reason')
-      jq -n --arg reason "$scope_reason" '{allowed:false, reason:$reason}'
-      return 0
-    fi
+  local lease_validation lease_allowed lease_reason
+  lease_validation=$(pg_validate_branch_lease_state "$lease_json" "$branch_ref" "$remote" "$current_head")
+  lease_allowed=$(echo "$lease_validation" | jq -r '.allowed')
+  if [[ "$lease_allowed" != "true" ]]; then
+    lease_reason=$(echo "$lease_validation" | jq -r '.reason')
+    jq -n --arg reason "$lease_reason" --argjson async_iteration "$(echo "$lease_validation" | jq -c '.async_iteration')" \
+      '{allowed:false, reason:$reason, async_iteration:$async_iteration}'
+    return 0
   fi
 
   local pr_reason=""
@@ -2948,6 +3442,35 @@ pg_append_push_log() {
   jq -c --arg result "$result" --arg timestamp "$(pg_now_utc)" '. + {result:$result, logged_at:$timestamp}' "$pending_path" >>"$log_path"
 }
 
+pg_record_branch_async_success() {
+  local branch_ref="$1" remote="$2" source_ref="$3" pushed_head="$4" assert_flow="$5"
+  local lease_path async_enabled
+  lease_path=$(pg_lease_path_for_ref "$branch_ref")
+  [[ -f "$lease_path" ]] || return 0
+  async_enabled=$(jq -r '.async_iteration.enabled // false' "$lease_path")
+  [[ "$async_enabled" == "true" ]] || return 0
+  jq \
+    --arg remote "$remote" \
+    --arg source_ref "$source_ref" \
+    --arg pushed_head "$pushed_head" \
+    --arg assert_flow "$assert_flow" \
+    --arg timestamp "$(pg_now_utc)" \
+    '.async_iteration.used_pushes = ((.async_iteration.used_pushes // 0) + 1)
+     | .async_iteration.audit = ((.async_iteration.audit // []) + [{
+         branch: .branch_name,
+         branch_ref: .branch_ref,
+         remote: $remote,
+         source_ref: $source_ref,
+         pushed_head: $pushed_head,
+         timestamp: $timestamp,
+         assertion_summary: ($assert_flow | gsub("[\r\n]+"; " | "))
+       }])
+     | .updated_at = $timestamp' \
+    "$lease_path" >"$lease_path.tmp"
+  mv "$lease_path.tmp" "$lease_path"
+  pg_db_upsert_lease "$lease_path" || true
+}
+
 pg_cmd_preview_draft() {
   local draft=""
   while [[ $# -gt 0 ]]; do
@@ -2969,9 +3492,14 @@ pg_cmd_preview_draft() {
 pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
   local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
+  local assume_yes="false"
   local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path scope_json
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -y|--yes)
+        assume_yes="true"
+        shift
+        ;;
       --intent)
         intent="$2"
         shift 2
@@ -3051,12 +3579,12 @@ pg_cmd_draft_approve() {
 
   # Run the semantic interview (single codex call) to extract
   # Brief inputs: prefer a prefill file written by `pg prepare` (agent
-  # handoff), fall back to the LLM-reads-commits interview only when the
-  # user explicitly opts in via PG_ALLOW_INFERENCE=1. Otherwise fail
-  # fast: the agent has richer context than commits alone expose, and
+  # handoff), falling back to commit inference only for explicitly configured
+  # human-only workflows. Otherwise fail fast: the agent has richer context than commits alone expose, and
   # letting pg silently infer undermines the whole semantic check.
   local _pg_what _pg_why _pg_approach _pg_scope _pg_risks
-  local _pg_bead_ids _pg_bead_block _pg_prepare_path
+  local _pg_bead_ids _pg_bead_block _pg_prepare_path _pg_async_json
+  _pg_async_json='{"enabled":false}'
   if [[ -z "$intent" || -z "$assert_flow" ]]; then
     _pg_prepare_path=$(pg_prepare_path)
     if [[ -f "$_pg_prepare_path" ]]; then
@@ -3067,6 +3595,7 @@ pg_cmd_draft_approve() {
       _pg_scope=$(jq -r '.scope // ""' "$_pg_prepare_path")
       _pg_risks=$(jq -r '.risks // ""' "$_pg_prepare_path")
       _pg_bead_ids=$(jq -r '.beads[]? // empty' "$_pg_prepare_path")
+      _pg_async_json=$(jq -c '.async_iteration // {enabled:false}' "$_pg_prepare_path")
       [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg: using prepared brief from $_pg_prepare_path" >&2
 
       # Warn if prepare is stale (HEAD moved since preparation).
@@ -3122,11 +3651,6 @@ FIX   1. Ask your agent to run (in this repo):
          before telling you to run pg.
 
       2. Then re-run:   pg   (or pg -C <repo>)
-
-      Escape hatch (rare): if no agent is involved and you want to
-      author the brief yourself via the LLM interview:
-
-         PG_ALLOW_INFERENCE=1 pg
 
 ─────────────────────────────────────────────────────────────────────
 EOF
@@ -3200,6 +3724,7 @@ EOF
     --arg brief_scope "${_pg_scope:-}" \
     --arg brief_risks "${_pg_risks:-}" \
     --arg bead_ids "${_pg_bead_ids:-}" \
+    --argjson async_iteration "$_pg_async_json" \
     --arg created_by "${USER:-unknown}" \
     --arg created_at "$(pg_now_utc)" \
     '{
@@ -3235,6 +3760,20 @@ EOF
         risks: (if $brief_risks == "" then null else $brief_risks end)
       },
       bead_ids: (if $bead_ids == "" then [] else ($bead_ids | split("\n") | map(select(length > 0))) end),
+      async_iteration: (
+        if ($async_iteration.enabled // false) then
+          $async_iteration
+          | .mode = "branch"
+          | .scope = {
+              type: "branch",
+              branch_name: $branch_name,
+              branch_ref: $branch_ref,
+              remote: $remote
+            }
+        else
+          {enabled:false}
+        end
+      ),
       created_by: $created_by,
       created_at: $created_at,
       status: "active"
@@ -3272,6 +3811,7 @@ set -euo pipefail
 DRAFT_FILE="$draft_file"
 YAML_FILE="$yaml_file"
 HELPER="$script_path"
+ASSUME_YES="$assume_yes"
 
 # Context block computed at draft-approve time and baked into this
 # script. Shown as comments at the top of the YAML so the user sees
@@ -3282,9 +3822,9 @@ CTXEOF
 
 # Edit-before-approve: convert the draft JSON to YAML, open \$EDITOR on the
 # YAML (easier to edit: comments, multi-line strings, no strict quoting),
-# then round-trip back to JSON and validate. Skip with PG_SKIP_EDIT=1.
+# then round-trip back to JSON and validate.
 # Requires yq (mikefarah); falls back to raw JSON if yq is missing.
-if [ "\${PG_SKIP_EDIT:-0}" != "1" ]; then
+if true; then
   editor="\${EDITOR:-vi}"
   if command -v yq >/dev/null 2>&1; then
     # JSON → YAML with a helpful header + change-context comment.
@@ -3345,17 +3885,22 @@ fi
 
 "\$HELPER" preview-draft --draft "\$DRAFT_FILE"
 echo
-printf 'Proceed? [Y/n] '
-read -r answer
-case "\$answer" in
-  ""|y|Y|yes|YES)
-    "\$HELPER" approve --draft "\$DRAFT_FILE"
-    ;;
-  *)
-    echo "Canceled"
-    exit 1
-    ;;
-esac
+if [[ "\$ASSUME_YES" == "true" ]]; then
+  echo "Proceed: yes (--yes, after editor review)"
+  "\$HELPER" approve --draft "\$DRAFT_FILE"
+else
+  printf 'Proceed? [Y/n] '
+  read -r answer
+  case "\$answer" in
+    ""|y|Y|yes|YES)
+      "\$HELPER" approve --draft "\$DRAFT_FILE"
+      ;;
+    *)
+      echo "Canceled"
+      exit 1
+      ;;
+  esac
+fi
 EOF
   chmod +x "$script_file"
 
@@ -3462,6 +4007,11 @@ pg_cmd_approve() {
   repo_root=$(jq -r '.repo_root' "$draft")
   approved_anchor=$(jq -r '.approved_anchor' "$draft")
   git -C "$repo_root" cat-file -e "${approved_anchor}^{commit}" >/dev/null 2>&1 || pg_fail "Draft anchor commit no longer exists: $approved_anchor"
+
+  local async_iteration
+  async_iteration=$(pg_finalize_async_json "$(jq -c '.async_iteration // {enabled:false}' "$draft")" "branch") || return 1
+  jq --argjson async_iteration "$async_iteration" '.async_iteration = $async_iteration' \
+    "$draft" >"$draft.tmp" && mv "$draft.tmp" "$draft"
 
   lease_path="$(jq -r '.common_dir' "$draft")/push-gate/leases/$(jq -r '.branch_ref' "$draft").json"
   pg_ensure_parent_dir "$lease_path"
@@ -3679,16 +4229,18 @@ pg_cmd_check_intent() {
 
 pg_cmd_check() {
   local branch="${1:-}" branch_ref lease_path lease_json scope base_ref
-  local changed count added subjects validation
+  local changed count added subjects validation remote head
   branch_ref=$(pg_branch_ref "$branch")
   lease_path=$(pg_lease_path_for_ref "$branch_ref")
   if [[ ! -f "$lease_path" ]]; then
     jq -n --arg br "$(pg_branch_display "$branch_ref")" \
-      '{allowed:false, reason:("No lease for " + $br + ". Run `pg` to generate one.")}'
+      '{allowed:false, reason:("No lease for " + $br + ". Run pg prepare and ask the user to review."), async_iteration:{enabled:false}}'
     return 0
   fi
   lease_json=$(cat "$lease_path")
-  validation=$(pg_validate_scope "$lease_json")
+  remote=$(echo "$lease_json" | jq -r '.remote // ""')
+  head=$(git rev-parse HEAD 2>/dev/null || echo '')
+  validation=$(pg_validate_branch_lease_state "$lease_json" "$branch_ref" "$remote" "$head")
 
   scope=$(echo "$lease_json" | jq -c '.approved_scope // null')
   base_ref=$(echo "$scope" | jq -r '.base_ref // empty')
@@ -3712,7 +4264,7 @@ pg_cmd_check() {
     --arg count "$count" \
     --arg added "$added" \
     --arg anchor "$(echo "$lease_json" | jq -r '.approved_anchor // empty')" \
-    --arg head "$(git rev-parse HEAD 2>/dev/null || echo '')" \
+    --arg head "$head" \
     '. + {
       approved_scope: $scope,
       current: {
@@ -3790,8 +4342,33 @@ pg_cmd_leases() {
   fi
 
   if [[ "$format" == "json" ]]; then
-    sqlite3 "$db" -json "SELECT repo_name, branch_name, status, pr_number, approved_anchor, updated_at, repo_root FROM leases WHERE $where ORDER BY updated_at DESC;" 2>/dev/null \
-      | jq .
+    sqlite3 "$db" -json "SELECT repo_name, branch_name, status, pr_number, approved_anchor, updated_at, repo_root, async_json FROM leases WHERE $where ORDER BY updated_at DESC;" 2>/dev/null \
+      | jq --arg now "$(pg_now_utc)" '
+        map(
+          (.async_json | fromjson? // {enabled:false}) as $a
+          | . + {
+              async_iteration: {
+                enabled: ($a.enabled // false),
+                mode: ($a.mode // "branch"),
+                expires_at: ($a.expires_at // null),
+                allow_rewrite: ($a.allow_rewrite // false),
+                pushes: {
+                  used: ($a.used_pushes // 0),
+                  max: ($a.max_pushes // 0),
+                  remaining: ([ (($a.max_pushes // 0) - ($a.used_pushes // 0)), 0 ] | max)
+                },
+                scope: ($a.scope // {}),
+                block_reason: (
+                  if (($a.enabled // false) | not) then "async lease not enabled"
+                  elif (($a.expires_at // "") == "") then "async lease has no expires_at"
+                  elif ($now > $a.expires_at) then ("async lease expired at " + $a.expires_at)
+                  elif (($a.used_pushes // 0) >= ($a.max_pushes // 0)) then "async push budget exhausted"
+                  else null end
+                )
+              }
+            }
+          | del(.async_json)
+        )'
     return 0
   fi
 
@@ -3862,7 +4439,7 @@ pg_cmd_bind_pr() {
 
 pg_cmd_push() {
   local assert_flow="" remote="" branch="" source_ref="" force_with_lease="false" set_upstream="false" trunk_stack=""
-  local current_branch branch_ref lease_json pending_path result refspec use_upstream="false"
+  local current_branch branch_ref lease_json pending_path result refspec use_upstream="false" lock_dir=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --trunk-stack)
@@ -3911,27 +4488,29 @@ pg_cmd_push() {
   [[ -n "$branch" ]] || pg_fail "pg push requires --branch when not on a branch."
   source_ref="${source_ref:-${current_branch:-HEAD}}"
   branch_ref=$(pg_branch_ref "$branch")
+  lock_dir=$(pg_lock_acquire "$branch_ref") || return 1
+  cleanup_push_lock() {
+    [[ -n "$lock_dir" ]] && pg_lock_release "$lock_dir"
+  }
+  trap cleanup_push_lock EXIT
+
   lease_json=$(pg_load_lease_for_ref "$branch_ref" 2>/dev/null || true)
-  [[ -n "$lease_json" ]] || pg_fail "No lease found for $branch. Run pg to draft an approval first."
+  [[ -n "$lease_json" ]] || { cleanup_push_lock; trap - EXIT; pg_fail "No lease found for $branch. Run pg prepare and ask the user to review first."; return 1; }
   remote="${remote:-$(echo "$lease_json" | jq -r '.remote')}"
   pending_path=$(pg_pending_path_for_ref "$branch_ref")
 
-  # Enforce semantic scope directly here so pg push is strict regardless of
-  # which harness-level hook ran. PG_SCOPE_OVERRIDE=1 bypasses (one-shot).
-  local has_scope current_head approved_anchor
-  has_scope=$(echo "$lease_json" | jq -r '.approved_scope // empty | if . == null or . == {} then "" else "1" end')
+  # Enforce lease state directly here so pg push is strict regardless of
+  # which harness-level hook ran.
+  local current_head lease_validation lease_allowed lease_reason
   current_head=$(git rev-parse HEAD 2>/dev/null || true)
-  approved_anchor=$(echo "$lease_json" | jq -r '.approved_anchor')
-  if [[ -n "$has_scope" && "${PG_SCOPE_OVERRIDE:-0}" != "1" ]]; then
-    local scope_result scope_allowed scope_reason
-    scope_result=$(pg_validate_scope "$lease_json")
-    scope_allowed=$(echo "$scope_result" | jq -r '.allowed')
-    if [[ "$scope_allowed" != "true" ]]; then
-      scope_reason=$(echo "$scope_result" | jq -r '.reason')
-      pg_fail "$scope_reason"
-    fi
-  elif [[ -z "$has_scope" && "${PG_ALLOW_DESCENDANT:-0}" != "1" && "$current_head" != "$approved_anchor" ]]; then
-    pg_fail "Blocked: new commits landed after lease was approved (lease anchor $approved_anchor, HEAD $current_head). Run \`pg\` to re-approve with a semantic scope."
+  lease_validation=$(pg_validate_branch_lease_state "$lease_json" "$branch_ref" "$remote" "$current_head")
+  lease_allowed=$(echo "$lease_validation" | jq -r '.allowed')
+  if [[ "$lease_allowed" != "true" ]]; then
+    lease_reason=$(echo "$lease_validation" | jq -r '.reason')
+    cleanup_push_lock
+    trap - EXIT
+    pg_fail "$lease_reason"
+    return 1
   fi
 
   # Semantic intent check — LLM compares lease.user_intent to current
@@ -3943,13 +4522,17 @@ pg_cmd_push() {
   intent_verdict=$(echo "$intent_result" | jq -r '.verdict')
   if [[ "$intent_allowed" != "true" ]]; then
     intent_reason=$(echo "$intent_result" | jq -r '.reason')
+    cleanup_push_lock
+    trap - EXIT
     pg_fail "$intent_reason"
+    return 1
   fi
   [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_cmd_push: intent check verdict=$intent_verdict" >&2
 
   pg_write_pending_assertion "$remote" "$branch_ref" "$assert_flow" "$lease_json"
   cleanup_pending() {
     rm -f "$pending_path"
+    cleanup_push_lock
   }
   trap cleanup_pending EXIT
 
@@ -3973,9 +4556,13 @@ pg_cmd_push() {
     git push "$remote" "$refspec"
   fi
   result=$?
-  pg_append_push_log "$branch_ref" "pushed"
+  if [[ "$result" == "0" ]]; then
+    pg_append_push_log "$branch_ref" "pushed"
+    pg_record_branch_async_success "$branch_ref" "$remote" "$source_ref" "$current_head" "$assert_flow"
+  fi
   trap - EXIT
   rm -f "$pending_path"
+  cleanup_push_lock
   return "$result"
 }
 
@@ -3989,12 +4576,30 @@ pg_main() {
     shift 2
   done
 
+  local assume_yes="false"
+  while [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]]; do
+    assume_yes="true"
+    shift
+  done
+
   # Bare `pg` → draft-approve with auto-run of the approval script. That
   # opens vim on the draft JSON (intent + assert + scope), preview, y/N,
   # approve. One vim session, no copy-paste.
   local command="${1:-draft-approve}"
   if [[ $# -gt 0 ]]; then
     shift
+  fi
+
+  if [[ "$assume_yes" == "true" ]]; then
+    case "$command" in
+      draft-approve|trunk)
+        set -- --yes "$@"
+        ;;
+      *)
+        pg_fail "--yes is only valid with approval commands: pg [--yes], pg draft-approve --yes, or pg trunk --stack S --yes"
+        return 1
+        ;;
+    esac
   fi
 
   if pg_parse_common_flag "$command"; then
@@ -4014,6 +4619,9 @@ pg_main() {
       ;;
     trunk)
       pg_cmd_trunk "$@"
+      ;;
+    trunk-draft)
+      pg_cmd_trunk_draft "$@"
       ;;
     approve)
       pg_cmd_approve "$@"
@@ -4047,6 +4655,9 @@ pg_main() {
       ;;
     check-trunk)
       pg_cmd_check_trunk "$@"
+      ;;
+    revoke-trunk)
+      pg_cmd_revoke_trunk "$@"
       ;;
     check-intent)
       pg_cmd_check_intent "$@"
@@ -4106,11 +4717,13 @@ Push-gate — agent prepares, human approves, agent pushes.
 
 The canonical three-step flow (one command per actor):
 
-  1. AGENT:  pg prepare --what "..." --why "..." --approach "..."
+  1. AGENT:  pg prepare --what "..." --why "..." --approach "..." [--async --expires 8h --max-pushes 20 --allow-rewrite]
+             Use --low-stakes as reviewed shorthand for --async --expires 1h --max-pushes 5.
              Captures the agent's real context before handoff.
 
-  2. HUMAN:  pg [-C <path>]
+  2. HUMAN:  pg [-C <path>] [--yes]
              Opens vim on the agent's brief, review, y/N, lease written.
+             --yes still opens the editor; it only skips the final y/N prompt.
 
   3. AGENT:  pg push --assert-flow "..."
              Scope + semantic checks run, then git push.
@@ -4126,13 +4739,21 @@ Useful inspection:
   pg check-intent [branch]  LLM: does the diff match user_intent? (JSON)
   pg show   [branch]        Full lease dump for a branch.
   pg revoke [branch]        Drop a lease (new approval required).
+  pg revoke-trunk --stack S Drop a trunk lease (new approval required).
 
 Stack trunks:
 
-  pg prepare-trunk --stack S --what "..." --why "..." --approach "..." [--item-briefs FILE]
+  pg prepare-trunk --stack S --what "..." --why "..." --approach "..." [--item-briefs FILE] [--async --expires 8h --max-pushes 30 --allow-rewrite]
                          Agent handoff for approving a materialized trunk.
-  pg trunk --stack S      Human review/approval for the whole stack trunk.
+                         --low-stakes is reviewed shorthand for --async --expires 1h --max-pushes 5.
+  pg trunk --stack S [--yes]
+                         Human review/approval for the whole stack trunk.
+                         --yes still opens the editor; it only skips the final y/N prompt.
                          Draft uses stack items with pointer commits, contained commits, and file groups.
+  pg trunk-draft --stack S [--format yaml|json] [--out FILE]
+                         Create the same review draft without opening an editor.
+                         Used by VS Code so the user can review/edit the YAML
+                         natively before submitting approval.
   pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
                          Push one approved item ref, or the approved private
                          trunk ref at trunk_tip.
@@ -4144,6 +4765,8 @@ Plumbing (called by pg itself — you rarely invoke these directly):
 
   pg draft-approve      First half of pg: writes the YAML draft.
   pg approve --draft F  Second half: writes the lease after y/N.
+  pg approve-trunk --draft F --reviewed-in-vscode
+                         Writes a trunk lease from a saved VS Code-reviewed draft.
   pg stack-store-*      Dolt-backed stack manifest/materialization storage,
                          including init/add/move/remove/materialization.
   pg preview-draft      Renders the summary the approval script shows.
