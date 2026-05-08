@@ -59,6 +59,38 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
   printf '%s\n' "${STACK_TEST_PR_JSON:-[]}"
   exit 0
 fi
+if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
+  pr_number="${3:-}"
+  var="STACK_TEST_PR_VIEW_${pr_number}"
+  val="${!var:-}"
+  if [[ -n "$val" ]]; then
+    match_local="${STACK_TEST_PR_VIEW_MATCH_LOCAL:-}"
+    if [[ "$match_local" != "1" && -n "${STACK_TEST_PUSHED_BRANCHES_FILE:-}" && -f "$STACK_TEST_PUSHED_BRANCHES_FILE" ]]; then
+      head_branch=$(jq -r '.headRefName // ""' <<<"$val")
+      if [[ -n "$head_branch" ]] && grep -Fx -- "$head_branch" "$STACK_TEST_PUSHED_BRANCHES_FILE" >/dev/null 2>&1; then
+        match_local=1
+      fi
+    fi
+    if [[ "$match_local" == "1" ]]; then
+      head_branch=$(jq -r '.headRefName // ""' <<<"$val")
+      if [[ -n "$head_branch" ]]; then
+        head_oid=$(git rev-parse --verify "$head_branch" 2>/dev/null || jq -r '.headRefOid // ""' <<<"$val")
+        val=$(jq --arg head_oid "$head_oid" '.headRefOid = $head_oid' <<<"$val")
+      fi
+    fi
+    printf '%s\n' "$val"
+    exit 0
+  fi
+  jq -n --argjson number "$pr_number" '{
+    number: $number,
+    headRefName: "",
+    headRefOid: "",
+    headRepositoryOwner: {login: ""},
+    headRepository: {name: ""},
+    baseRefName: ""
+  }'
+  exit 0
+fi
 echo "unexpected gh: $*" >&2
 exit 1
 EOF
@@ -210,10 +242,53 @@ case "${1:-}" in
       || { echo "stack item not found: $id" >&2; exit 1; }
     jq --arg stack "$stack" --arg id "$id" '
       .[$stack].items = (.[$stack].items | map(select(.id != $id)))
-      | .[$stack].version = ((.[$stack].version // 1) + 1)
+      | if (.[$stack].items | length) == 0 then
+          del(.[$stack])
+        else
+          .[$stack].version = ((.[$stack].version // 1) + 1)
+        end
     ' "$store" >"$store.tmp"
     mv "$store.tmp" "$store"
-    echo "Stack item removed: $stack/$id"
+    if jq -e --arg stack "$stack" '.[$stack] == null' "$store" >/dev/null; then
+      echo "Stack pruned: $stack (removed final item $id)"
+    else
+      echo "Stack item removed: $stack/$id"
+    fi
+    exit 0
+    ;;
+  stack-store-list)
+    store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
+    [[ -f "$store" ]] || printf '{}\n' >"$store"
+    shift
+    format="text"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json) format="json"; shift ;;
+        *) echo "unexpected stack-store-list option: $1" >&2; exit 1 ;;
+      esac
+    done
+    if [[ "$format" == "json" ]]; then
+      jq -c --arg repo "$PWD" '
+        {
+          repo:$repo,
+          repo_key:$repo,
+          stacks:(to_entries | map({
+            manifest:{
+              version:1,
+              name:.value.name,
+              base:.value.base,
+              trunk:.value.trunk,
+              store_version:(.value.version // 1),
+              items:(.value.items // [])
+            },
+            materialization:null,
+            approval:{allowed:false, reason:"No active trunk lease."}
+          }))
+        }
+      ' "$store"
+    else
+      jq -r 'keys[]' "$store"
+    fi
     exit 0
     ;;
   stack-store-manifest)
@@ -228,6 +303,8 @@ case "${1:-}" in
         *) echo "unexpected stack-store-manifest option: $1" >&2; exit 1 ;;
       esac
     done
+    jq -e --arg stack "$stack" '.[$stack] != null' "$store" >/dev/null \
+      || { echo "stack not found in Dolt store: $stack" >&2; exit 1; }
     jq -c --arg stack "$stack" '.[$stack] | {version:1,name,base,trunk,store_version:(.version // 1),items}' "$store"
     exit 0
     ;;
@@ -250,6 +327,9 @@ case "${1:-}" in
     exit 0
     ;;
   stack-store-branch-materialization)
+    if [[ -n "${STACK_TEST_BRANCH_MATERIALIZATION_SLEEP:-}" ]]; then
+      sleep "$STACK_TEST_BRANCH_MATERIALIZATION_SLEEP"
+    fi
     store="${STACK_TEST_STACK_STORE:?STACK_TEST_STACK_STORE required}"
     mat_file="${STACK_TEST_STACK_MATERIALIZATIONS:?STACK_TEST_STACK_MATERIALIZATIONS required}"
     shift
@@ -344,6 +424,9 @@ case "${1:-}" in
       exit 1
     fi
     log "push $*"
+    if [[ -n "${STACK_TEST_PUSHED_BRANCHES_FILE:-}" && -n "$source_ref" ]]; then
+      echo "$source_ref" >>"$STACK_TEST_PUSHED_BRANCHES_FILE"
+    fi
     echo "(fake) git push ok"
     exit 0
     ;;
@@ -479,7 +562,7 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
   {"repo_root":$rr,"branch_name":"mho/feature-api","status":"active","approved_anchor":"deadbeef","pr_number":43,"updated_at":"2026-04-24T00:00:00Z"}
 ]')
 
-echo "1..34"
+echo "1..36"
 
 # ------------------------------------------------------------------------
 # 1. status renders all three branches
@@ -615,16 +698,23 @@ echo "ok 9 - sync cascades squash-merged parent then invokes branchless once"
 # After test 8's cascade, feature-base is a sibling of main; mho/feature-ui
 # has no PR in STACK_TEST_PR_JSON, so it must be skipped during push.
 PG_LOG="$TEST_TMP/pg.log"
+PUSHED_BRANCHES="$TEST_TMP/pushed-branches.log"
 : >"$PG_LOG"
+: >"$PUSHED_BRANCHES"
 
 # Reset to a stable HEAD before stack push (which checks out branches).
 git -C "$REPO" checkout main >/dev/null 2>&1
+git -C "$REPO" remote add upstream git@github.com:example/stack-pr-head.git >/dev/null 2>&1 || true
 
-fresh_lease='{"allowed":true,"current":{"anchor_matches_head":true}}'
+fresh_lease='{"allowed":true,"current":{"anchor_matches_head":true},"async_iteration":{"enabled":false}}'
+fresh_async_lease='{"allowed":true,"current":{"anchor_matches_head":false},"async_iteration":{"enabled":true,"pushes":{"used":1,"max":5,"remaining":4}}}'
 export STACK_TEST_PG_LOG="$PG_LOG"
+export STACK_TEST_PUSHED_BRANCHES_FILE="$PUSHED_BRANCHES"
 export STACK_TEST_PG_CHECK_mho_feature_base="$fresh_lease"
-export STACK_TEST_PG_CHECK_mho_feature_api="$fresh_lease"
+export STACK_TEST_PG_CHECK_mho_feature_api="$fresh_async_lease"
 export STACK_TEST_PG_CHECK_mho_feature_ui="$fresh_lease"
+export STACK_TEST_PR_VIEW_42='{"number":42,"headRefName":"mho/feature-base","headRefOid":"old-base","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"main"}'
+export STACK_TEST_PR_VIEW_43='{"number":43,"headRefName":"mho/feature-api","headRefOid":"old-api","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"mho/feature-base"}'
 push_out=$(run_stack push 2>&1)
 
 expect_contains "$push_out" "Done."
@@ -644,13 +734,17 @@ push_calls=$(grep -c "^push " "$PG_LOG" || true)
 force_push_calls=$(grep -c "^push push --force-with-lease" "$PG_LOG" || true)
 [[ "$force_push_calls" == "3" ]] \
   || fail "expected pg push --force-with-lease for all pushes, got: $(cat "$PG_LOG")"
+pr_remote_push_calls=$(grep -c -- "--remote upstream" "$PG_LOG" || true)
+[[ "$pr_remote_push_calls" == "2" ]] \
+  || fail "expected existing PR pushes to target PR head remote upstream, got: $(cat "$PG_LOG")"
 set_upstream_calls=$(grep -c -- "--set-upstream" "$PG_LOG" || true)
 [[ "$set_upstream_calls" == "1" ]] \
   || fail "expected --set-upstream for no-PR branch push, got: $(cat "$PG_LOG")"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "0" ]] \
   || fail "expected 0 pg prepare calls when leases fresh, got $prep_calls"
-echo "ok 10 - stack push runs pg push --force-with-lease for fresh leases including no-PR branches"
+echo "ok 10 - stack push reuses fresh and async leases including no-PR branches"
+unset STACK_TEST_PR_VIEW_42 STACK_TEST_PR_VIEW_43
 
 # ------------------------------------------------------------------------
 # 11: stack push stops at first branch with stale/missing lease, runs
@@ -664,22 +758,23 @@ git -C "$REPO" checkout main >/dev/null 2>&1
 # feature-api first → expect stop on feature-api.
 unset STACK_TEST_PG_CHECK_mho_feature_base STACK_TEST_PG_CHECK_mho_feature_api STACK_TEST_PG_CHECK_mho_feature_ui
 export STACK_TEST_PG_CHECK_DEFAULT='{"allowed":false}'
-stop_out=$(run_stack push --prefix mho/feature- 2>&1)
+stop_out=$(run_stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite 2>&1)
 
 expect_contains "$stop_out" "needs approval, preparing brief"
 expect_contains "$stop_out" "Next step:"
 expect_contains "$stop_out" "Human approval: pg -C"
-expect_contains "$stop_out" "Agent re-run: stack push --prefix mho/feature-"
+expect_contains "$stop_out" "Agent re-run: stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite"
 expect_contains "$stop_out" "Agent handoff:"
 expect_contains "$stop_out" "Phase: needs approval"
-expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature-"
+expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "1" ]] \
   || fail "expected exactly 1 pg prepare call (stop on first), got $prep_calls: $(cat "$PG_LOG")"
+expect_contains "$(cat "$PG_LOG")" "prepare --async --expires 8h --max-pushes 5 --allow-rewrite"
 push_calls=$(grep -c "^push " "$PG_LOG" || true)
 [[ "$push_calls" == "0" ]] \
   || fail "expected 0 pg push calls when first lease stale, got $push_calls"
-echo "ok 11 - stack push stops at first stale lease with resume instructions"
+echo "ok 11 - stack push prepares async leases and stops with resume instructions"
 
 # ------------------------------------------------------------------------
 # 12: sync conflict preflight leaves real refs unchanged and auto-cleans
@@ -1368,7 +1463,7 @@ store_init=$(run_stack trunk init --name dolt-demo --base origin/main --trunk mh
 expect_contains "$store_init" "Stack stored: dolt-demo"
 expect_contains "$store_init" "stack trunk add --stack dolt-demo"
 
-store_add_base=$(run_stack trunk add --stack dolt-demo --id base --branch mho/feature-base 2>&1)
+store_add_base=$(run_stack trunk add --stack dolt-demo --id base --branch mho/feature-base --base origin/main 2>&1)
 expect_contains "$store_add_base" "Stack item stored: dolt-demo/base"
 store_add_insert=$(run_stack trunk add --stack dolt-demo --id insert --branch mho/dolt-insert --after base 2>&1)
 expect_contains "$store_add_insert" "Stack item stored: dolt-demo/insert"
@@ -1378,6 +1473,9 @@ store_add_ui=$(run_stack trunk add --stack dolt-demo --id ui --branch mho/featur
 expect_contains "$store_add_ui" "Stack item stored: dolt-demo/ui"
 store_add_remove=$(run_stack trunk add --stack dolt-demo --id remove-me --branch mho/remove-me --after ui 2>&1)
 expect_contains "$store_add_remove" "Stack item stored: dolt-demo/remove-me"
+store_list_with_item_base=$(run_stack trunk list --json 2>&1)
+[[ "$(jq -r '.stacks[] | select(.name == "dolt-demo") | .items[] | select(.id == "base") | .pr == null' <<<"$store_list_with_item_base")" == "true" ]] \
+  || fail "expected trunk list to preserve item base without treating it as PR: $store_list_with_item_base"
 
 set +e
 store_add_existing_after=$(run_stack trunk add --stack dolt-demo --id insert --branch mho/dolt-insert --after ui 2>&1)
@@ -1472,7 +1570,29 @@ expect_contains "$(cat "$PG_LOG")" "--remote upstream"
 expect_not_contains "$(cat "$PG_LOG")" "--branch mho/feature-ui"
 expect_not_contains "$(cat "$PG_LOG")" "--source-ref $(git -C "$REPO" rev-parse mho/dolt-demo.trunk)"
 
+git -C "$REPO" remote add upstream git@github.com:example/stack-pr-head.git >/dev/null 2>&1 || true
+export STACK_TEST_PR_VIEW_43='{"number":43,"headRefName":"mho/feature-api","headRefOid":"old-api","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"mho/feature-base"}'
 : >"$PG_LOG"
+: >"$PUSHED_BRANCHES"
+set +e
+store_push_pr_remote=$(run_stack trunk push --stack dolt-demo 2>&1)
+store_push_pr_remote_rc=$?
+set -e
+[[ "$store_push_pr_remote_rc" == "0" ]] \
+  || fail "expected trunk push to infer PR head remote, got $store_push_pr_remote_rc: $store_push_pr_remote"
+expect_contains "$store_push_pr_remote" "Trunk push complete for dolt-demo."
+expect_contains "$store_push_pr_remote" "verified #43 head"
+trunk_push_calls=$(grep -c "^push push --trunk-stack dolt-demo" "$PG_LOG" || true)
+[[ "$trunk_push_calls" == "4" ]] \
+  || fail "expected 4 trunk pg push calls with inferred remote, got $trunk_push_calls: $(cat "$PG_LOG")"
+pr_remote_push_calls=$(grep -c -- "--remote upstream" "$PG_LOG" || true)
+[[ "$pr_remote_push_calls" == "1" ]] \
+  || fail "expected only PR item trunk push to infer upstream, got: $(cat "$PG_LOG")"
+unset STACK_TEST_PR_VIEW_43
+
+: >"$PG_LOG"
+: >"$PUSHED_BRANCHES"
+export STACK_TEST_PR_VIEW_43='{"number":43,"headRefName":"mho/feature-api","headRefOid":"old-api","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"mho/feature-base"}'
 set +e
 store_push_live=$(run_stack trunk push --stack dolt-demo --remote upstream 2>&1)
 store_push_live_rc=$?
@@ -1493,6 +1613,7 @@ expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-base"
 expect_contains "$(cat "$PG_LOG")" "--source-ref mho/dolt-insert"
 expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-api"
 expect_contains "$(cat "$PG_LOG")" "--source-ref mho/feature-ui"
+unset STACK_TEST_PR_VIEW_43
 REPO="$OLD_REPO"
 echo "ok 31 - trunk commands use push-gate stack store as source of truth"
 
@@ -1558,7 +1679,11 @@ expect_contains "$help_out" "trunk init --name NAME --base REF --trunk BRANCH"
 expect_contains "$help_out" "trunk add --stack NAME --id ID --branch BRANCH"
 expect_contains "$help_out" "trunk move --stack NAME --id ID"
 expect_contains "$help_out" "trunk remove --stack NAME --id ID"
-expect_contains "$help_out" "trunk materialize --name NAME|--stack NAME|--manifest PATH"
+expect_contains "$help_out" "trunk materialize --stack NAME"
+expect_contains "$help_out" "trunk materialize --manifest PATH"
+expect_contains "$help_out" "Compatibility/import path"
+expect_contains "$help_out" "trunk review --stack NAME [--json]"
+expect_contains "$help_out" "trunk push-plan --stack NAME [--json]"
 expect_contains "$help_out" "trunk push --stack NAME [--tip]"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
 expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
@@ -1590,3 +1715,92 @@ expect_contains "$stack_doc" "Next step:"
 expect_contains "$stack_doc" "stack checkout --pr <N>"
 expect_not_contains "$skill_doc" "## Deferred"
 echo "ok 34 - help and stack skill docs match supported commands"
+
+# ------------------------------------------------------------------------
+# 35: status degrades when branch materialization lookup is slow.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  git checkout -b mho/slow-redundant --no-track >/dev/null 2>&1
+  printf 'slow redundant\n' >slow-redundant.txt
+  git add slow-redundant.txt
+  git commit -m "slow redundant parent" >/dev/null
+
+  git checkout -b mho/slow-root --no-track >/dev/null 2>&1
+  printf 'slow root\n' >slow-root.txt
+  git add slow-root.txt
+  git commit -m "slow root" >/dev/null
+
+  git checkout -b mho/slow-child --no-track >/dev/null 2>&1
+  printf 'slow child\n' >slow-child.txt
+  git add slow-child.txt
+  git commit -m "slow child" >/dev/null
+)
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":501,"headRefName":"mho/slow-root","baseRefName":"main","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/501","title":"slow root"},
+  {"number":502,"headRefName":"mho/slow-child","baseRefName":"mho/slow-root","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/502","title":"slow child"}
+]')
+export STACK_TEST_BRANCH_MATERIALIZATION_SLEEP=5
+SECONDS=0
+slow_status=$(STACK_BRANCH_MATERIALIZATION_TIMEOUT_SECONDS=1 run_stack status --pr 501 --children 2>&1)
+elapsed=$SECONDS
+unset STACK_TEST_BRANCH_MATERIALIZATION_SLEEP
+expect_contains "$slow_status" "Topology mismatch: PR #501 base is main"
+expect_contains "$slow_status" "mho/slow-root"
+expect_contains "$slow_status" "mho/slow-child"
+expect_contains "$slow_status" "Next step:"
+(( elapsed < 4 )) || fail "status waited too long for branch materialization lookup: ${elapsed}s"
+REPO="$OLD_REPO"
+echo "ok 35 - status falls back when branch materialization lookup is slow"
+
+# ------------------------------------------------------------------------
+# 36: removing the final Dolt-backed stack item prunes empty stack metadata.
+# ------------------------------------------------------------------------
+
+OLD_REPO="$REPO"
+REPO=$(make_stacked_repo)
+REPO=$(cd "$REPO" && git rev-parse --show-toplevel)
+jq -n '{}' >"$STACK_TEST_STACK_STORE"
+: >"$STACK_TEST_STACK_MATERIALIZATIONS"
+
+prune_init=$(run_stack trunk init --name prune-demo --base origin/main --trunk mho/prune-demo.trunk 2>&1)
+expect_contains "$prune_init" "Stack stored: prune-demo"
+prune_add=$(run_stack trunk add --stack prune-demo --id only --branch mho/feature-base 2>&1)
+expect_contains "$prune_add" "Stack item stored: prune-demo/only"
+
+prune_dry=$(run_stack trunk remove --stack prune-demo --id only --dry-run 2>&1)
+expect_contains "$prune_dry" "Proposed order:"
+expect_contains "$prune_dry" "  (empty)"
+expect_contains "$prune_dry" "This will prune empty stack metadata; no materialize step remains."
+
+prune_live=$(run_stack trunk remove --stack prune-demo --id only 2>&1)
+expect_contains "$prune_live" "Stack pruned: prune-demo (removed final item only)"
+expect_contains "$prune_live" "Empty stack metadata pruned: prune-demo"
+expect_contains "$prune_live" "Confirm it is gone: stack trunk list"
+expect_not_contains "$prune_live" "unbound variable"
+expect_not_contains "$prune_live" "invalid stack trunk manifest"
+
+prune_list=$(run_stack trunk list --json)
+[[ "$(jq -r '[.stacks[].name] | index("prune-demo") == null' <<<"$prune_list")" == "true" ]] \
+  || fail "expected prune-demo omitted from trunk list after final removal: $prune_list"
+
+set +e
+prune_status=$(run_stack trunk status --stack prune-demo 2>&1)
+prune_status_rc=$?
+prune_materialize=$(run_stack trunk materialize --stack prune-demo 2>&1)
+prune_materialize_rc=$?
+set -e
+[[ "$prune_status_rc" != "0" ]] || fail "expected pruned stack status to fail"
+[[ "$prune_materialize_rc" != "0" ]] || fail "expected pruned stack materialize to fail"
+expect_contains "$prune_status" "stack not found in Dolt store: prune-demo"
+expect_contains "$prune_materialize" "stack not found in Dolt store: prune-demo"
+expect_not_contains "$prune_status" "invalid stack trunk manifest"
+expect_not_contains "$prune_materialize" "invalid stack trunk manifest"
+
+REPO="$OLD_REPO"
+echo "ok 36 - final stack item removal prunes empty Dolt stack metadata"

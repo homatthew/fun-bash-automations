@@ -17,7 +17,9 @@ Human-readable output is guided: every command ends with a `Next step:` block
 that states the safe command or human approval action to run next.
 
 `stack push` never bypasses `pg` — it stops and waits for the human to
-approve each lease, then resumes on re-invocation.
+approve missing leases, then resumes on re-invocation. With `--async`, it
+prepares async per-branch leases so one human review can authorize repeated
+pushes inside the approved scope and budget.
 
 ## Stale context reset
 
@@ -69,6 +71,10 @@ explicitly re-read or run the helper.
 - User wants to push the whole stack — run `stack push`. Walks parents
   first, runs `pg push` where leases are fresh, runs `pg prepare` and
   stops where they are not. Re-run after the user approves to continue.
+- User wants unattended or overnight iteration on a stack — run
+  `stack push --async --expires 8h --max-pushes <N>` so generated
+  per-branch prepares carry async metadata. Add `--allow-rewrite` only
+  when rebases/squashes are part of the approved workflow.
 - Starting a push workflow and want a current-state snapshot before handing
   to `pg` — `stack status`.
 
@@ -85,6 +91,7 @@ explicitly re-read or run the helper.
 ## Commands
 
 ```
+stack -C <repo> <command> [...]
 stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
 stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
@@ -94,15 +101,21 @@ stack trunk add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--ba
 stack trunk move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
 stack trunk remove --stack NAME --id ID [--dry-run]
 stack trunk list [--json] [--base REF] [--prefix PREFIX]
-stack trunk status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
-stack trunk materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack trunk status --stack NAME [--json] [--base REF] [--prefix PREFIX]
+stack trunk materialize --stack NAME [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+stack trunk status --manifest PATH [--json] [--base REF] [--prefix PREFIX]                 # compatibility/import
+stack trunk materialize --manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX] # compatibility/import
+stack trunk review --stack NAME [--json]
+stack trunk push-plan --stack NAME [--json]
 stack trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
-stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--async --expires 8h --max-pushes N --allow-rewrite]
 ```
 
 Base ref auto-detected from `upstream/main` or `origin/main`. Branch
 prefix defaults to `mho/` (override via `git config stack.prefix`).
+Use `stack -C <repo> ...` for all copied commands so terminal cwd and worktree
+layout cannot change the target repository.
 
 `stack sync` runs two cascade passes in a scratch clone:
 1. **PR-state pass** (via `gh pr list --head <branch>`): for any branch
@@ -162,10 +175,17 @@ handled separately; this command only moves local refs, records the
 materialization in Dolt, and reports stale push-gate leases.
 Use `stack trunk move --stack <name> --id <item> --after <item>` or
 `--before` / `--first` / `--last` to reorder existing items. Use
-`stack trunk remove --stack <name> --id <item>` to prune an item. These commands
-change the Dolt manifest order only; run `stack trunk materialize --stack <name>`
-afterwards to rebuild the private trunk commits and branch pointers. Do not
-create a `-v2` stack just to reorder items.
+`stack trunk remove --stack <name> --id <item>` to prune an item. Removing the
+final item deletes the empty Dolt stack metadata, so no materialize step remains.
+Otherwise, these commands change the Dolt manifest order only; run
+`stack trunk materialize --stack <name>` afterwards to rebuild the private trunk
+commits and branch pointers. Do not create a `-v2` stack just to reorder items.
+`stack trunk review --stack <name> --json` is the Stack Review diff contract:
+it reports full-stack, item-only, and cumulative-through-item review sections
+with base/head refs, contained commits, changed files, and shortstats.
+`stack trunk push-plan --stack <name> --json` is the final readiness contract:
+it reports materialization, prepare/approval checklist state, ordered push
+units, remote relationship, approval coverage, and exact repo-pinned commands.
 If the checked-out branch is one of the refs moved by materialization, `stack`
 refreshes the worktree to the new branch tip so the checkout does not appear
 dirty with inverse changes from the old tip. Dolt must be on PATH for
@@ -234,9 +254,18 @@ rails:
 - No unpushed commits → skipped silently.
 - Lease fresh (`pg check` returns `allowed && anchor==HEAD`) → runs
   `pg push --force-with-lease --assert-flow "update pr #N\nbranch <name>\n..."`.
+- Async lease valid (`pg check` returns `allowed` with
+  `async_iteration.enabled`) → runs the same `pg push` even when `HEAD` moved
+  from the original approved anchor. Push-gate still enforces expiry, budget,
+  branch/remote scope, rewrite approval, semantic scope, and self-assertion.
 - Lease missing or stale → runs `pg prepare` with auto-derived
   what/why/approach, prints "Run `pg -C <repo>` to approve, then re-run
   `stack push`", and exits 0. Idempotent: re-invoke after each approval.
+
+Use `stack push --async --expires 8h --max-pushes 20` when the user has asked
+for one review to cover repeated iteration. The flags are forwarded only to
+new `pg prepare` calls for stale/missing branch leases; existing valid async
+leases are reused. Normal `stack push` still produces exact-tip prepares.
 
 At the end of a push attempt, `stack push` prints an **Agent handoff** block.
 Use it as the checklist for the next agent action. It includes a phase
@@ -253,11 +282,11 @@ The canonical long-form guide is `llm/stack/README.md`.
 
 1. **Do not bypass `pg`.** `stack sync` only flags which leases go stale — it
    never revokes or re-approves. After `stack sync` moves a branch tip, the
-   user must re-run `pg` on that branch. `stack push` is the same: it
-   prepares briefs and runs `pg push` against fresh leases, but every
-   first-push for a tip still requires the human to run `pg`. Never set
-   `PG_SKIP_EDIT`, `PG_ALLOW_DESCENDANT`, `PG_SCOPE_OVERRIDE`, or pipe
-   `yes` into the approval prompt.
+   user must re-run `pg` on that branch unless an approved async lease covers
+   the new tip and scope. `stack push` prepares briefs and runs `pg push`
+   against fresh or valid async leases, but every new authorization still
+   requires the human to run `pg`. Never set bypass env vars or pipe automated
+   confirmation into the approval prompt.
 2. **Guard working tree.** `stack sync`, `stack insert`, `stack squash`, and
    `stack push` hard-fail on a dirty tree. Don't `git stash` for them —
    surface the message and let them choose.

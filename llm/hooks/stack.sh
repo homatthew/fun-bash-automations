@@ -11,11 +11,13 @@
 #   trunk  move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
 #   trunk  remove --stack NAME --id ID [--dry-run]
 #   trunk  list [--json] [--base REF] [--prefix PREFIX]
-#   trunk  materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
-#   trunk  push --stack NAME [--tip] [--dry-run] [--remote NAME]
 #   trunk  status --name NAME|--stack NAME|--manifest PATH [--json] [--base REF] [--prefix PREFIX]
+#   trunk  materialize --name NAME|--stack NAME|--manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
+#   trunk  review --stack NAME [--json]
+#   trunk  push-plan --stack NAME [--json]
+#   trunk  push --stack NAME [--tip] [--dry-run] [--remote NAME]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
-#   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+#   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--async --expires 8h --max-pushes N --allow-rewrite]
 #
 # Data sources merged into one view:
 #   1. git topology        (for-each-ref + merge-base)
@@ -61,6 +63,84 @@ stack_debug_enabled() {
 stack_debug() {
   stack_debug_enabled || return 0
   echo "stack: debug: $*" >&2
+}
+
+stack_timeout_command() {
+  local seconds="$1"
+  shift
+
+  if ! [[ "$seconds" =~ ^[0-9]+$ ]] || (( seconds <= 0 )); then
+    "$@"
+    return $?
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+seconds = int(sys.argv[1])
+cmd = sys.argv[2:]
+proc = subprocess.Popen(cmd, start_new_session=True)
+try:
+    proc.wait(timeout=seconds)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    sys.exit(124)
+sys.exit(proc.returncode)
+PY
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+    return $?
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+    return $?
+  fi
+
+  "$@"
+}
+
+stack_branch_materialization_timeout_seconds() {
+  local seconds="${STACK_BRANCH_MATERIALIZATION_TIMEOUT_SECONDS:-2}"
+  if ! [[ "$seconds" =~ ^[0-9]+$ ]] || (( seconds <= 0 )); then
+    seconds=2
+  fi
+  printf '%s\n' "$seconds"
+}
+
+stack_branch_materialization_cache_file() {
+  printf '%s\n' "${STACK_BRANCH_MATERIALIZATION_CACHE_FILE:-${TMPDIR:-/tmp}/stack-branch-materialization.$$}"
+}
+
+stack_branch_materialization_cache_get() {
+  local branch="$1" cache_file
+  cache_file=$(stack_branch_materialization_cache_file)
+  [[ -f "$cache_file" ]] || return 1
+  awk -F'\t' -v branch="$branch" '$1 == branch { print $2; found=1; exit } END { exit(found ? 0 : 1) }' "$cache_file"
+}
+
+stack_branch_materialization_cache_put() {
+  local branch="$1" output="$2" cache_file
+  cache_file=$(stack_branch_materialization_cache_file)
+  mkdir -p "$(dirname "$cache_file")" 2>/dev/null || true
+  [[ -n "$output" ]] || output="__STACK_EMPTY__"
+  printf '%s\t%s\n' "$branch" "$output" >>"$cache_file"
 }
 
 stack_helper_dir() {
@@ -207,6 +287,18 @@ stack_append_flag() {
   local cmd="$1" flag="$2" value="$3"
   [[ -z "$value" ]] && { printf '%s\n' "$cmd"; return 0; }
   printf '%s %s %s\n' "$cmd" "$flag" "$(stack_shell_quote "$value")"
+}
+
+stack_command_prefix() {
+  local repo_root
+  repo_root=$(stack_repo_root)
+  printf 'stack -C %s\n' "$(stack_shell_quote "$repo_root")"
+}
+
+stack_pg_command_prefix() {
+  local repo_root
+  repo_root=$(stack_repo_root)
+  printf 'pg -C %s\n' "$(stack_shell_quote "$repo_root")"
 }
 
 stack_print_next_step() {
@@ -534,13 +626,23 @@ stack_ci_summary() {
 stack_lease_summary() {
   local lease="$1" head_sha="$2"
   [[ -z "$lease" || "$lease" == "null" ]] && { echo "—"; return 0; }
-  local status anchor
+  local status anchor async_enabled expires_at max_pushes used_pushes
   status=$(jq -r '.status // "unknown"' <<<"$lease")
   anchor=$(jq -r '.approved_anchor // ""' <<<"$lease")
+  async_enabled=$(jq -r '(.async_iteration // (.async_json | fromjson? // {enabled:false})).enabled // false' <<<"$lease")
+  expires_at=$(jq -r '(.async_iteration // (.async_json | fromjson? // {})).expires_at // ""' <<<"$lease")
+  max_pushes=$(jq -r '(.async_iteration // (.async_json | fromjson? // {})).max_pushes // 0' <<<"$lease")
+  used_pushes=$(jq -r '(.async_iteration // (.async_json | fromjson? // {})).used_pushes // 0' <<<"$lease")
   case "$status" in
     active)
-      if [[ -n "$anchor" && "$anchor" != "$head_sha" ]]; then
+      if [[ "$async_enabled" == "true" && -n "$expires_at" && "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$expires_at" ]]; then
+        echo "async-expired"
+      elif [[ "$async_enabled" == "true" && "$used_pushes" -ge "$max_pushes" ]]; then
+        echo "async-budget"
+      elif [[ -n "$anchor" && "$anchor" != "$head_sha" && "$async_enabled" != "true" ]]; then
         echo "stale-tip"
+      elif [[ -n "$anchor" && "$anchor" != "$head_sha" ]]; then
+        echo "async"
       else
         echo "allowed"
       fi
@@ -836,7 +938,20 @@ stack_topology_mismatch_lines() {
 stack_trunk_materialized_branch_context() {
   local branch="$1" helper
   helper=$(stack_pg_helper)
-  bash "$helper" stack-store-branch-materialization --branch "$branch" --json 2>/dev/null || true
+  local cached output rc=0 timeout
+  if cached=$(stack_branch_materialization_cache_get "$branch" 2>/dev/null); then
+    [[ "$cached" == "__STACK_EMPTY__" ]] || printf '%s\n' "$cached"
+    return 0
+  fi
+  timeout=$(stack_branch_materialization_timeout_seconds)
+  output=$(stack_timeout_command "$timeout" bash "$helper" stack-store-branch-materialization --branch "$branch" --json 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    [[ "$rc" == "124" ]] && stack_debug "branch materialization lookup timed out after ${timeout}s for $branch"
+    stack_branch_materialization_cache_put "$branch" ""
+    return 0
+  fi
+  stack_branch_materialization_cache_put "$branch" "$output"
+  printf '%s\n' "$output"
 }
 
 stack_topology_expected_trunk_context() {
@@ -880,11 +995,16 @@ stack_warn_topology_mismatches() {
 
 stack_push_rerun_command() {
   local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="${4:-false}"
+  local async_enabled="${5:-false}" async_expires="${6:-}" async_max_pushes="${7:-}" async_allow_rewrite="${8:-false}"
   local cmd="stack push"
   cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
   cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
   cmd=$(stack_append_flag "$cmd" "--pr" "$pr_filter")
   [[ "$include_children" == "true" ]] && cmd="$cmd --children"
+  [[ "$async_enabled" == "true" ]] && cmd="$cmd --async"
+  cmd=$(stack_append_flag "$cmd" "--expires" "$async_expires")
+  cmd=$(stack_append_flag "$cmd" "--max-pushes" "$async_max_pushes")
+  [[ "$async_allow_rewrite" == "true" ]] && cmd="$cmd --allow-rewrite"
   printf '%s\n' "$cmd"
 }
 
@@ -904,6 +1024,84 @@ stack_push_remote_ref() {
       return 0
     fi
   done
+}
+
+stack_remote_repo_spec() {
+  local remote="$1" url path
+  url=$(git remote get-url "$remote" 2>/dev/null || true)
+  [[ -n "$url" ]] || return 1
+  url="${url%.git}"
+  case "$url" in
+    git@*:*)
+      path="${url#*:}"
+      ;;
+    ssh://*@*/*)
+      path="${url#ssh://*@*/}"
+      ;;
+    http://*/*|https://*/*)
+      path="${url#*://*/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  path="${path#/}"
+  [[ "$path" == */* ]] || return 1
+  printf '%s\n' "$path"
+}
+
+stack_remote_for_repo() {
+  local owner="$1" repo="$2" want remote spec
+  [[ -n "$owner" && -n "$repo" ]] || return 1
+  want="$owner/$repo"
+  while read -r remote; do
+    [[ -z "$remote" ]] && continue
+    spec=$(stack_remote_repo_spec "$remote" 2>/dev/null || true)
+    if [[ "$spec" == "$want" ]]; then
+      printf '%s\n' "$remote"
+      return 0
+    fi
+  done < <(git remote)
+  return 1
+}
+
+stack_pr_live_json() {
+  local pr_num="$1"
+  [[ -n "$pr_num" ]] || { echo '{}'; return 0; }
+  gh pr view "$pr_num" \
+    --json number,headRefName,headRefOid,headRepository,headRepositoryOwner,baseRefName,url \
+    2>/dev/null || echo '{}'
+}
+
+stack_pr_head_remote() {
+  local pr_json="$1" branch="$2" pr_num="$3"
+  local head_branch owner repo remote
+  head_branch=$(jq -r '.headRefName // ""' <<<"$pr_json")
+  owner=$(jq -r '.headRepositoryOwner.login // ""' <<<"$pr_json")
+  repo=$(jq -r '.headRepository.name // ""' <<<"$pr_json")
+  [[ -n "$head_branch" ]] \
+    || stack_fail "Could not read PR #$pr_num head branch from GitHub; refusing to push $branch."
+  [[ "$head_branch" == "$branch" ]] \
+    || stack_fail "PR #$pr_num head branch is $head_branch, but stack item branch is $branch"
+  [[ -n "$owner" && -n "$repo" ]] \
+    || stack_fail "Could not read PR #$pr_num head repository from GitHub; refusing to push $branch."
+  remote=$(stack_remote_for_repo "$owner" "$repo" 2>/dev/null || true)
+  [[ -n "$remote" ]] || stack_fail "PR #$pr_num head is ${owner}/${repo}:${branch}, but no git remote points at ${owner}/${repo}."
+  printf '%s\n' "$remote"
+}
+
+stack_verify_pr_head() {
+  local pr_num="$1" branch="$2" expected_sha="$3" attempt live after_sha
+  for attempt in 1 2 3; do
+    live=$(stack_pr_live_json "$pr_num")
+    after_sha=$(jq -r '.headRefOid // ""' <<<"$live")
+    if [[ "$after_sha" == "$expected_sha" ]]; then
+      echo "  verified #$pr_num head is ${expected_sha:0:12}"
+      return 0
+    fi
+    sleep 1
+  done
+  stack_fail "pg push completed for $branch, but PR #$pr_num head is ${after_sha:-unknown}, expected $expected_sha."
 }
 
 stack_push_assert_flow() {
@@ -1725,24 +1923,92 @@ ${detail}"
 }
 
 stack_trunk_approval_json() {
-  local check="$1" allowed reason state async
+  local check="$1" prepare="${2:-}" allowed reason state async prepare_state prepare_path prepared_at commands
+  local next_actor="" next_label="" next_command="" next_reason=""
+  [[ -n "$prepare" ]] || prepare='{}'
   allowed=$(jq -r '.allowed // false' <<<"$check")
   reason=$(jq -r '.reason // ""' <<<"$check")
   async=$(jq -c '.async_iteration // {enabled:false}' <<<"$check")
+  prepare_state=$(jq -r '.state // "unknown"' <<<"$prepare")
+  prepare_path=$(jq -r '.path // ""' <<<"$prepare")
+  prepared_at=$(jq -r '.prepared_at // ""' <<<"$prepare")
+  commands=$(jq -c '.commands // {}' <<<"$prepare")
   if [[ "$allowed" == "true" ]]; then
     state="approved"
     [[ -n "$reason" ]] || reason="Trunk approval is current."
+  elif grep -qi 'No materialization recorded' <<<"$reason"; then
+    state="needs_materialization"
   elif grep -qi 'expired' <<<"$reason"; then
     state="expired"
   elif grep -qiE 'changed|stale|not active' <<<"$reason"; then
     state="stale"
   elif grep -qiE 'No active trunk lease|prepare-trunk|pg trunk|approval' <<<"$reason"; then
-    state="needs_approval"
+    if [[ "$prepare_state" == "ready" ]]; then
+      state="needs_approval"
+    else
+      state="needs_prepare"
+    fi
   else
     state="unknown"
   fi
-  jq -n --arg state "$state" --arg reason "$reason" --argjson async_iteration "$async" \
-    '{state:$state, reason:(if $reason == "" then null else $reason end), async_iteration:$async_iteration}'
+
+  case "$state" in
+    needs_prepare)
+      next_actor="agent"
+      next_label="Prepare trunk brief"
+      next_command=$(jq -r '.prepare // ""' <<<"$commands")
+      next_reason="Approval drafts require an agent-authored prepare-trunk brief first."
+      ;;
+    needs_approval)
+      next_actor="human"
+      next_label="Review trunk approval"
+      next_command=$(jq -r '.review // ""' <<<"$commands")
+      next_reason="A prepared trunk brief exists; the human can review the approval draft."
+      ;;
+    stale|expired)
+      next_actor="agent"
+      next_label="Refresh trunk brief"
+      next_command=$(jq -r '.prepare // ""' <<<"$commands")
+      next_reason="The previous approval can no longer authorize the current materialized stack."
+      ;;
+    needs_materialization)
+      next_actor="agent"
+      next_label="Materialize private trunk"
+      next_reason="Approval requires a recorded materialization to define the exact stack commits."
+      ;;
+  esac
+
+  jq -n \
+    --arg state "$state" \
+    --arg reason "$reason" \
+    --arg prepare_state "$prepare_state" \
+    --arg prepare_path "$prepare_path" \
+    --arg prepared_at "$prepared_at" \
+    --arg next_actor "$next_actor" \
+    --arg next_label "$next_label" \
+    --arg next_command "$next_command" \
+    --arg next_reason "$next_reason" \
+    --argjson async_iteration "$async" \
+    --argjson commands "$commands" \
+    '{
+      state:$state,
+      reason:(if $reason == "" then null else $reason end),
+      prepare_state:$prepare_state,
+      prepare_path:(if $prepare_path == "" then null else $prepare_path end),
+      prepared_at:(if $prepared_at == "" then null else $prepared_at end),
+      commands:$commands,
+      next_action:(
+        if $next_label == "" then null
+        else {
+          actor:$next_actor,
+          label:$next_label,
+          command:(if $next_command == "" then null else $next_command end),
+          reason:$next_reason
+        }
+        end
+      ),
+      async_iteration:$async_iteration
+    }'
 }
 
 stack_remote_tip_state_json() {
@@ -1764,8 +2030,213 @@ stack_remote_tip_state_json() {
   else
     state="diverged"
   fi
-  jq -n --arg remote_tip "$remote_tip" --arg state "$state" \
-    '{remote_tip:(if $remote_tip == "" then null else $remote_tip end), remote_state:$state}'
+  jq -n --arg remote_ref "$remote_ref" --arg remote_tip "$remote_tip" --arg state "$state" \
+    '{
+      remote_ref:(if $remote_ref == "" then null else $remote_ref end),
+      remote_tip:(if $remote_tip == "" then null else $remote_tip end),
+      remote_state:$state
+    }'
+}
+
+stack_trunk_stack_entry_json() {
+  local stack_name="$1" store entry
+  store=$(stack_trunk_list_store_json)
+  entry=$(jq -c --arg stack "$stack_name" '.stacks[]? | select(.manifest.name == $stack)' <<<"$store" | head -1)
+  [[ -n "$entry" ]] || stack_fail "stack not found in Dolt store: $stack_name"
+  printf '%s\n' "$entry"
+}
+
+stack_git_log_json_for_range() {
+  local range="$1" commits='[]' sha short subject
+  while IFS=$'\t' read -r sha short subject; do
+    [[ -z "$sha" ]] && continue
+    commits=$(jq \
+      --arg sha "$sha" \
+      --arg short "$short" \
+      --arg subject "$subject" \
+      '. + [{sha:$sha, short:$short, subject:$subject}]' <<<"$commits")
+  done < <(git log --reverse --format='%H%x09%h%x09%s' "$range" 2>/dev/null | awk 'NR <= 100')
+  printf '%s\n' "$commits"
+}
+
+stack_changed_files_json_for_range() {
+  local range="$1" files='[]' status path extra change previous_path
+  while IFS=$'\t' read -r status path extra; do
+    [[ -z "$status" || -z "$path" ]] && continue
+    previous_path=""
+    case "$status" in
+      A) change="added" ;;
+      M) change="modified" ;;
+      D) change="deleted" ;;
+      R*)
+        change="renamed"
+        previous_path="$path"
+        path="$extra"
+        ;;
+      C*)
+        change="copied"
+        previous_path="$path"
+        path="$extra"
+        ;;
+      T) change="type_changed" ;;
+      U) change="unmerged" ;;
+      *) change="$status" ;;
+    esac
+    files=$(jq \
+      --arg change "$change" \
+      --arg path "$path" \
+      --arg previous_path "$previous_path" \
+      '. + [{
+        change:$change,
+        path:$path,
+        previous_path:(if $previous_path == "" then null else $previous_path end)
+      }]' <<<"$files")
+  done < <(git diff --name-status -M "$range" 2>/dev/null | awk 'NR <= 500')
+  printf '%s\n' "$files"
+}
+
+stack_review_section_json() {
+  local mode="$1" base_ref="$2" base_commit="$3" head_ref="$4" head_commit="$5"
+  local range commits files stat shortstat
+  [[ -n "$head_commit" ]] || stack_fail "review section requires a head commit"
+  if [[ -n "$base_commit" ]]; then
+    range="${base_commit}..${head_commit}"
+    commits=$(stack_git_log_json_for_range "$range")
+    files=$(stack_changed_files_json_for_range "$range")
+    stat=$(git diff --stat "$range" 2>/dev/null | awk 'NR <= 80')
+    shortstat=$(git diff --shortstat "$range" 2>/dev/null | sed 's/^ *//')
+  else
+    range="$head_commit"
+    commits=$(jq -n --arg sha "$head_commit" --arg short "${head_commit:0:12}" --arg subject "$(git log -1 --format='%s' "$head_commit" 2>/dev/null || echo "")" '[{sha:$sha, short:$short, subject:$subject}]')
+    files='[]'
+    stat=""
+    shortstat=""
+  fi
+  jq -n \
+    --arg mode "$mode" \
+    --arg base_ref "$base_ref" \
+    --arg base_commit "$base_commit" \
+    --arg head_ref "$head_ref" \
+    --arg head_commit "$head_commit" \
+    --arg range "$range" \
+    --arg stat "$stat" \
+    --arg shortstat "$shortstat" \
+    --argjson commits "$commits" \
+    --argjson files "$files" \
+    '{
+      mode:$mode,
+      base_ref:(if $base_ref == "" then null else $base_ref end),
+      base_commit:(if $base_commit == "" then null else $base_commit end),
+      head_ref:$head_ref,
+      head_commit:$head_commit,
+      range:$range,
+      contained_commits:$commits,
+      files:$files,
+      changed_file_groups:(
+        $files
+        | sort_by(.change)
+        | group_by(.change)
+        | map({change: .[0].change, paths: map(.path)})
+      ),
+      stat:(if $stat == "" then null else $stat end),
+      shortstat:(if $shortstat == "" then null else $shortstat end)
+    }'
+}
+
+stack_trunk_workflow_commands_json() {
+  local stack_name="$1" stack_prefix pg_prefix
+  stack_prefix=$(stack_command_prefix)
+  pg_prefix=$(stack_pg_command_prefix)
+  jq -n \
+    --arg stack "$stack_name" \
+    --arg stack_prefix "$stack_prefix" \
+    --arg pg_prefix "$pg_prefix" \
+    '{
+      materialize:($stack_prefix + " trunk materialize --stack " + ($stack | @sh)),
+      prepare:($pg_prefix + " prepare-trunk --stack " + ($stack | @sh) + " --what <what> --why <why> --approach <approach>"),
+      review:($pg_prefix + " trunk --stack " + ($stack | @sh)),
+      draft:($pg_prefix + " trunk-draft --stack " + ($stack | @sh) + " --format yaml"),
+      approve_saved_draft:($pg_prefix + " approve-trunk --draft <draft-file> --reviewed-in-vscode"),
+      review_payload:($stack_prefix + " trunk review --stack " + ($stack | @sh) + " --json"),
+      push_plan:($stack_prefix + " trunk push-plan --stack " + ($stack | @sh) + " --json"),
+      push:($stack_prefix + " trunk push --stack " + ($stack | @sh))
+    }'
+}
+
+stack_trunk_workflow_json() {
+  local alignment_state="$1" approval="$2" commands="$3"
+  local materialized prepare_state approval_state
+  [[ "$alignment_state" == "up_to_date" ]] && materialized="true" || materialized="false"
+  prepare_state=$(jq -r '.prepare_state // "unknown"' <<<"$approval")
+  approval_state=$(jq -r '.state // "unknown"' <<<"$approval")
+  jq -n \
+    --arg alignment_state "$alignment_state" \
+    --arg prepare_state "$prepare_state" \
+    --arg approval_state "$approval_state" \
+    --argjson materialized "$materialized" \
+    --argjson approval "$approval" \
+    --argjson commands "$commands" \
+    '{
+      current_step: (
+        if ($materialized | not) then "materialize"
+        elif $prepare_state != "ready" then "prepare"
+        elif $approval_state != "approved" then "approve"
+        else "push"
+        end
+      ),
+      steps: [
+        {
+          id:"materialize",
+          label:"Materialize",
+          actor:"agent",
+          state:(if $materialized then "complete" else "current" end),
+          command:$commands.materialize,
+          writes_lease:false,
+          pushes:false
+        },
+        {
+          id:"prepare",
+          label:"Prepare",
+          actor:"agent",
+          state:(if $prepare_state == "ready" then "complete" elif $materialized then "current" else "blocked" end),
+          command:$commands.prepare,
+          writes_lease:false,
+          pushes:false
+        },
+        {
+          id:"review",
+          label:"Review",
+          actor:"human",
+          state:(if $prepare_state == "ready" then "available" elif $materialized then "blocked" else "blocked" end),
+          command:$commands.draft,
+          writes_lease:false,
+          pushes:false
+        },
+        {
+          id:"approve",
+          label:"Approve",
+          actor:"human",
+          state:(if $approval_state == "approved" then "complete" elif $prepare_state == "ready" then "current" else "blocked" end),
+          command:($approval.next_action.command // $commands.review),
+          writes_lease:true,
+          pushes:false
+        },
+        {
+          id:"push",
+          label:"Push",
+          actor:"agent",
+          state:(if $approval_state == "approved" then "current" else "blocked" end),
+          command:$commands.push,
+          writes_lease:false,
+          pushes:true
+        }
+      ],
+      commands:$commands,
+      materialization:{state:$alignment_state, ready:$materialized},
+      prepare:{state:$prepare_state, ready:($prepare_state == "ready")},
+      approval:{state:$approval_state, ready:($approval_state == "approved")},
+      push:{state:(if $approval_state == "approved" then "ready" else "blocked" end), ready:($approval_state == "approved")}
+    }'
 }
 
 stack_cmd_trunk_list() {
@@ -1782,31 +2253,37 @@ stack_cmd_trunk_list() {
   stack_require jq
   stack_repo_root >/dev/null
 
-  local store repo prefix prs stacks='[]' first_base=""
+  local store repo store_repo prefix prs stacks='[]' first_base=""
   store=$(stack_trunk_list_store_json)
   repo=$(jq -r '.repo // ""' <<<"$store")
+  store_repo=$(jq -r '.store_repo // .repo // ""' <<<"$store")
   prefix=$(stack_prefix "$prefix_override")
   prs=$(stack_fetch_prs)
 
-  local stack_entry manifest materialization approval_raw approval stack_name manifest_base base trunk trunk_head alignment_state
+  local stack_entry manifest materialization approval_raw prepare_raw approval commands workflow stack_name manifest_base base trunk trunk_head alignment_state
   while IFS= read -r stack_entry; do
     [[ -z "$stack_entry" ]] && continue
     manifest=$(jq -c '.manifest' <<<"$stack_entry")
     materialization=$(jq -c '.materialization // null' <<<"$stack_entry")
     approval_raw=$(jq -c '.approval // {}' <<<"$stack_entry")
-    approval=$(stack_trunk_approval_json "$approval_raw")
+    prepare_raw=$(jq -c '.prepare // {}' <<<"$stack_entry")
+    approval=$(stack_trunk_approval_json "$approval_raw" "$prepare_raw")
     stack_name=$(stack_trunk_manifest_field "$manifest" "name")
+    commands=$(stack_trunk_workflow_commands_json "$stack_name")
     manifest_base=$(stack_trunk_manifest_field "$manifest" "base")
     base=$(stack_upstream_ref "${base_override:-$manifest_base}")
     [[ -n "$first_base" ]] || first_base="$base"
     trunk=$(stack_trunk_manifest_field "$manifest" "trunk")
     trunk_head=$(git rev-parse --verify "$trunk" 2>/dev/null || echo "")
     alignment_state=$(stack_trunk_alignment_state "$manifest")
+    workflow=$(stack_trunk_workflow_json "$alignment_state" "$approval" "$commands")
 
     local items='[]' id branch pr_manifest item_base local_tip remote pr pr_number pr_title pr_base mat_item commit approval_state item
     approval_state=$(jq -r '.state' <<<"$approval")
     while IFS=$'\t' read -r id branch pr_manifest item_base; do
       [[ -z "$branch" ]] && continue
+      [[ "$pr_manifest" == "-" ]] && pr_manifest=""
+      [[ "$item_base" == "-" ]] && item_base=""
       local_tip=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
       remote=$(stack_remote_tip_state_json "$branch" "$local_tip")
       pr=$(jq -c --arg branch "$branch" '.[$branch] // null' <<<"$prs")
@@ -1839,7 +2316,7 @@ stack_cmd_trunk_list() {
           commit:(if $commit == "" then null else $commit end)
         }')
       items=$(jq --argjson item "$item" '. + [$item]' <<<"$items")
-    done < <(jq -r '.items[] | [.id, .branch, ((.pr // "") | tostring), (.base // "")] | @tsv' <<<"$manifest")
+    done < <(stack_trunk_item_lines "$manifest")
 
     stacks=$(jq \
       --arg name "$stack_name" \
@@ -1849,6 +2326,8 @@ stack_cmd_trunk_list() {
       --arg alignment_state "$alignment_state" \
       --argjson materialization "$materialization" \
       --argjson approval "$approval" \
+      --argjson workflow "$workflow" \
+      --argjson commands "$commands" \
       --argjson items "$items" \
       '. + [{
         name:$name,
@@ -1858,13 +2337,15 @@ stack_cmd_trunk_list() {
         alignment_state:$alignment_state,
         materialization:$materialization,
         approval:$approval,
+        workflow:$workflow,
+        commands:$commands,
         items:$items
       }]' <<<"$stacks")
   done < <(jq -c '.stacks[]?' <<<"$store")
 
   if [[ "$format" == "json" ]]; then
-    jq -n --arg repo "$repo" --arg base "$first_base" --arg prefix "$prefix" --argjson stacks "$stacks" \
-      '{repo:$repo, base:$base, prefix:$prefix, stacks:$stacks}'
+    jq -n --arg repo "$repo" --arg store_repo "$store_repo" --arg base "$first_base" --arg prefix "$prefix" --argjson stacks "$stacks" \
+      '{repo:$repo, store_repo:$store_repo, base:$base, prefix:$prefix, stacks:$stacks}'
     return 0
   fi
 
@@ -2083,14 +2564,27 @@ stack_cmd_trunk_remove() {
     else
       echo "  (empty)"
     fi
-    stack_print_next_step \
-      "Refs unchanged in dry-run." \
-      "Apply removal: stack trunk remove --stack $(stack_shell_quote "$stack_name") --id $(stack_shell_quote "$item_id")" \
-      "Then materialize: stack trunk materialize --stack $(stack_shell_quote "$stack_name")"
+    if [[ -n "$proposed" ]]; then
+      stack_print_next_step \
+        "Refs unchanged in dry-run." \
+        "Apply removal: stack trunk remove --stack $(stack_shell_quote "$stack_name") --id $(stack_shell_quote "$item_id")" \
+        "Then materialize: stack trunk materialize --stack $(stack_shell_quote "$stack_name")"
+    else
+      stack_print_next_step \
+        "Refs unchanged in dry-run." \
+        "Apply final removal: stack trunk remove --stack $(stack_shell_quote "$stack_name") --id $(stack_shell_quote "$item_id")" \
+        "This will prune empty stack metadata; no materialize step remains."
+    fi
     return 0
   fi
   helper=$(stack_pg_helper)
   stack_run_pg_store_command "$helper" stack-store-remove --stack "$stack_name" --id "$item_id"
+  if [[ -z "$proposed" ]]; then
+    stack_print_next_step \
+      "Empty stack metadata pruned: $stack_name" \
+      "Confirm it is gone: stack trunk list"
+    return 0
+  fi
   echo "New order:"
   stack_trunk_print_item_order "$(stack_trunk_load_manifest "$stack_name" "")"
   stack_print_next_step \
@@ -2294,6 +2788,276 @@ stack_cmd_trunk_status() {
   esac
 }
 
+stack_cmd_trunk_review() {
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --json) format="json"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk review flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || stack_fail "stack trunk review requires --stack NAME"
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local repo_root store_repo common_dir entry manifest materialization prepare prepare_path prepare_brief commands
+  local base_ref base_commit trunk_ref trunk_tip state full_stack items='[]' previous_commit previous_label
+  repo_root=$(stack_repo_root)
+  common_dir=$(stack_common_dir)
+  store_repo=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd || printf '%s\n' "$repo_root")
+  entry=$(stack_trunk_stack_entry_json "$stack_name")
+  manifest=$(jq -c '.manifest' <<<"$entry")
+  materialization=$(jq -c '.materialization // null' <<<"$entry")
+  prepare=$(jq -c '.prepare // {}' <<<"$entry")
+  prepare_path=$(jq -r '.path // ""' <<<"$prepare")
+  if [[ -n "$prepare_path" && -f "$prepare_path" ]]; then
+    prepare_brief=$(jq -c . "$prepare_path" 2>/dev/null || echo '{}')
+  else
+    prepare_brief='{}'
+  fi
+  commands=$(stack_trunk_workflow_commands_json "$stack_name")
+
+  if [[ "$materialization" == "null" ]]; then
+    state="needs_materialization"
+    jq -n \
+      --argjson manifest "$manifest" \
+      --arg repo "$repo_root" \
+      --arg store_repo "$store_repo" \
+      --arg state "$state" \
+      --argjson commands "$commands" \
+      '{
+        schema_version:1,
+        repo:$repo,
+        store_repo:$store_repo,
+        stack:$manifest.name,
+        state:$state,
+        manifest:$manifest,
+        materialization:null,
+        modes:["full_stack","item","cumulative"],
+        full_stack:null,
+        items:[],
+        commands:$commands
+      }'
+    return 0
+  fi
+
+  base_ref=$(stack_trunk_manifest_field "$manifest" "base")
+  base_commit=$(git rev-parse --verify "$base_ref" 2>/dev/null || true)
+  trunk_ref=$(stack_trunk_manifest_field "$manifest" "trunk")
+  trunk_tip=$(jq -r '.trunk_tip // ""' <<<"$materialization")
+  [[ -n "$trunk_tip" ]] || stack_fail "stack $stack_name has no materialized trunk tip"
+  full_stack=$(stack_review_section_json "full_stack" "$base_ref" "$base_commit" "$trunk_ref" "$trunk_tip")
+
+  previous_commit="$base_commit"
+  previous_label="$base_ref"
+  local id order_index branch commit_sha pr delta cumulative item_brief item_brief_state
+  while IFS=$'\t' read -r id order_index branch commit_sha pr; do
+    [[ -z "$id" ]] && continue
+    delta=$(stack_review_section_json "item" "$previous_label" "$previous_commit" "$branch" "$commit_sha")
+    cumulative=$(stack_review_section_json "cumulative" "$base_ref" "$base_commit" "$branch" "$commit_sha")
+    item_brief=$(jq -c --arg id "$id" '.item_briefs // [] | map(select(.id == $id)) | first // null' <<<"$prepare_brief")
+    item_brief_state=$(jq -r '
+      if . == null then "missing"
+      elif ((.what // .summary // []) | length) > 0
+        and ((.why // .motivation // []) | length) > 0
+        and ((.approach // []) | length) > 0
+      then "ready"
+      else "incomplete"
+      end
+    ' <<<"$item_brief")
+    items=$(jq \
+      --arg id "$id" \
+      --argjson order_index "$order_index" \
+      --arg branch "$branch" \
+      --arg pr "$pr" \
+      --arg commit "$commit_sha" \
+      --arg item_brief_state "$item_brief_state" \
+      --argjson delta "$delta" \
+      --argjson cumulative "$cumulative" \
+      --argjson item_brief "$item_brief" \
+      '. + [{
+        id:$id,
+        order_index:$order_index,
+        branch:$branch,
+        pr:(if $pr == "" or $pr == "null" then null else ($pr | tonumber) end),
+        commit:$commit,
+        item_brief:{
+          state:$item_brief_state,
+          what:($item_brief.what // $item_brief.summary // null),
+          why:($item_brief.why // $item_brief.motivation // null),
+          approach:($item_brief.approach // null),
+          risks:($item_brief.risks // null),
+          verification:($item_brief.verification // $item_brief.testing // null)
+        },
+        delta:$delta,
+        cumulative:$cumulative
+      }]' <<<"$items")
+    previous_commit="$commit_sha"
+    previous_label="$branch"
+  done < <(jq -r '.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' <<<"$materialization")
+
+  state="ready"
+  if [[ "$format" == "json" ]]; then
+    jq -n \
+      --arg repo "$repo_root" \
+      --arg store_repo "$store_repo" \
+      --arg common_dir "$common_dir" \
+      --arg state "$state" \
+      --argjson manifest "$manifest" \
+      --argjson materialization "$materialization" \
+      --argjson full_stack "$full_stack" \
+      --argjson items "$items" \
+      --argjson commands "$commands" \
+      '{
+        schema_version:1,
+        repo:$repo,
+        store_repo:$store_repo,
+        common_dir:$common_dir,
+        stack:$manifest.name,
+        state:$state,
+        modes:["full_stack","item","cumulative"],
+        manifest:$manifest,
+        materialization:$materialization,
+        full_stack:$full_stack,
+        items:$items,
+        commands:$commands
+      }'
+    return 0
+  fi
+
+  jq -r '
+    "Stack review: " + .stack,
+    "Full stack: " + (.full_stack.shortstat // "no diff"),
+    (.items[] | "  - " + .id + ": " + (.delta.shortstat // "no diff"))
+  ' < <(stack_cmd_trunk_review --stack "$stack_name" --json)
+}
+
+stack_cmd_trunk_push_plan() {
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --json) format="json"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk push-plan flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || stack_fail "stack trunk push-plan requires --stack NAME"
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local repo_root store_repo common_dir entry manifest materialization prepare approval commands
+  local approval_state approval_allowed state checklist units='[]'
+  repo_root=$(stack_repo_root)
+  common_dir=$(stack_common_dir)
+  store_repo=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd || printf '%s\n' "$repo_root")
+  entry=$(stack_trunk_stack_entry_json "$stack_name")
+  manifest=$(jq -c '.manifest' <<<"$entry")
+  materialization=$(jq -c '.materialization // null' <<<"$entry")
+  prepare=$(jq -c '.prepare // {}' <<<"$entry")
+  approval=$(stack_trunk_approval_json "$(jq -c '.approval // {}' <<<"$entry")" "$prepare")
+  approval_state=$(jq -r '.state // "unknown"' <<<"$approval")
+  [[ "$approval_state" == "approved" ]] && approval_allowed="true" || approval_allowed="false"
+  commands=$(stack_trunk_workflow_commands_json "$stack_name")
+
+  if [[ "$materialization" == "null" ]]; then
+    state="needs_materialization"
+  elif [[ "$approval_allowed" == "true" ]]; then
+    state="ready_to_push"
+  else
+    state="needs_approval"
+  fi
+
+  checklist=$(jq -n \
+    --argjson materialized "$([[ "$materialization" != "null" ]] && echo true || echo false)" \
+    --arg prepare_state "$(jq -r '.state // "unknown"' <<<"$prepare")" \
+    --argjson approved "$approval_allowed" \
+    '[
+      {id:"materialized", label:"Private trunk materialized", ok:$materialized},
+      {id:"prepared", label:"Prepare-trunk brief ready", ok:($prepare_state == "ready")},
+      {id:"approved", label:"Trunk approval covers current materialization", ok:$approved}
+    ]')
+
+  if [[ "$materialization" != "null" ]]; then
+    local id order_index branch commit_sha pr remote assert_flow pg_command action remote_state_json
+    while IFS=$'\t' read -r id order_index branch commit_sha pr; do
+      [[ -z "$id" ]] && continue
+      remote_state_json=$(stack_remote_tip_state_json "$branch" "$commit_sha")
+      remote=$(jq -r '.remote_ref // ""' <<<"$remote_state_json")
+      assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\napproved commit %s\n' "$stack_name" "$id" "$branch" "$branch" "$commit_sha")
+      pg_command="$(stack_pg_command_prefix) push --trunk-stack $(stack_shell_quote "$stack_name") --branch $(stack_shell_quote "$branch") --source-ref $(stack_shell_quote "$branch") --force-with-lease --assert-flow $(stack_shell_quote "$assert_flow")"
+      if [[ "$approval_allowed" != "true" ]]; then
+        action="needs_approval"
+      elif [[ "$(jq -r '.remote_state' <<<"$remote_state_json")" == "synced" ]]; then
+        action="already_pushed"
+      else
+        action="ready_to_push"
+      fi
+      units=$(jq \
+        --arg id "$id" \
+        --argjson order_index "$order_index" \
+        --arg branch "$branch" \
+        --arg pr "$pr" \
+        --arg source_ref "$branch" \
+        --arg source_commit "$commit_sha" \
+        --arg action "$action" \
+        --arg pg_command "$pg_command" \
+        --argjson approval_covered "$approval_allowed" \
+        --argjson remote "$remote_state_json" \
+        '. + [{
+          id:$id,
+          order_index:$order_index,
+          branch:$branch,
+          pr:(if $pr == "" or $pr == "null" then null else ($pr | tonumber) end),
+          source_ref:$source_ref,
+          source_commit:$source_commit,
+          approval_covered:$approval_covered,
+          remote:$remote,
+          action:$action,
+          command:$pg_command
+        }]' <<<"$units")
+    done < <(jq -r '.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' <<<"$materialization")
+  fi
+
+  if [[ "$format" == "json" ]]; then
+    jq -n \
+      --arg repo "$repo_root" \
+      --arg store_repo "$store_repo" \
+      --arg common_dir "$common_dir" \
+      --arg state "$state" \
+      --argjson manifest "$manifest" \
+      --argjson materialization "$materialization" \
+      --argjson approval "$approval" \
+      --argjson checklist "$checklist" \
+      --argjson units "$units" \
+      --argjson commands "$commands" \
+      '{
+        schema_version:1,
+        repo:$repo,
+        store_repo:$store_repo,
+        common_dir:$common_dir,
+        stack:$manifest.name,
+        state:$state,
+        manifest:$manifest,
+        materialization:$materialization,
+        approval:$approval,
+        checklist:$checklist,
+        push_units:$units,
+        commands:$commands
+      }'
+    return 0
+  fi
+
+  jq -r '
+    "Stack push plan: " + .stack,
+    "State: " + .state,
+    (.checklist[] | "  [" + (if .ok then "x" else " " end) + "] " + .label),
+    (.push_units[]? | "  - " + .id + ": " + .action + " " + .branch)
+  ' < <(stack_cmd_trunk_push_plan --stack "$stack_name" --json)
+}
+
 stack_cmd_trunk_push() {
   local stack_name="" dry_run="false" remote="" tip_only="false"
   while [[ $# -gt 0 ]]; do
@@ -2379,14 +3143,27 @@ ${detail}"
     return 0
   fi
 
-  jq -r '.materialization.items[] | [.id, .branch, .commit] | @tsv' <<<"$check" |
-  while IFS=$'\t' read -r id branch commit_sha; do
+  jq -r '.materialization.items[] | [.id, .branch, .commit, ((.pr // "") | tostring)] | @tsv' <<<"$check" |
+  while IFS=$'\t' read -r id branch commit_sha pr_num; do
     [[ -z "$branch" ]] && continue
+    local item_remote="$remote"
+    if [[ "$pr_num" =~ ^[0-9]+$ ]]; then
+      local pr_live pr_head_remote
+      pr_live=$(stack_pr_live_json "$pr_num")
+      pr_head_remote=$(stack_pr_head_remote "$pr_live" "$branch" "$pr_num")
+      if [[ -n "$item_remote" && "$item_remote" != "$pr_head_remote" ]]; then
+        stack_fail "PR #$pr_num head remote is $pr_head_remote, but --remote $item_remote was requested."
+      fi
+      item_remote="$pr_head_remote"
+    fi
     local assert_flow
     assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\napproved commit %s\n' "$stack_name" "$id" "$branch" "$branch" "$commit_sha")
     local args=(push --trunk-stack "$stack_name" --branch "$branch" --source-ref "$branch" --force-with-lease --assert-flow "$assert_flow")
-    [[ -n "$remote" ]] && args+=(--remote "$remote")
+    [[ -n "$item_remote" ]] && args+=(--remote "$item_remote")
     bash "$helper" "${args[@]}"
+    if [[ "$pr_num" =~ ^[0-9]+$ ]]; then
+      stack_verify_pr_head "$pr_num" "$branch" "$commit_sha"
+    fi
   done
 
   stack_print_next_step "Trunk push complete for $stack_name."
@@ -2394,7 +3171,7 @@ ${detail}"
 
 stack_cmd_trunk() {
   local sub="${1:-}"
-  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, list, status, materialize, or push"
+  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, list, status, materialize, review, push-plan, or push"
   shift
   case "$sub" in
     init) stack_cmd_trunk_init "$@" ;;
@@ -2404,6 +3181,8 @@ stack_cmd_trunk() {
     list) stack_cmd_trunk_list "$@" ;;
     status) stack_cmd_trunk_status "$@" ;;
     materialize) stack_cmd_trunk_materialize "$@" ;;
+    review) stack_cmd_trunk_review "$@" ;;
+    push-plan) stack_cmd_trunk_push_plan "$@" ;;
     push) stack_cmd_trunk_push "$@" ;;
     -h|--help|help) stack_usage ;;
     *) stack_fail "unknown trunk subcommand: $sub" ;;
@@ -2970,6 +3749,7 @@ stack_cmd_squash() {
 stack_cmd_push() {
   local dry_run="false"
   local base_override="" prefix_override="" pr_filter="" include_children="false"
+  local async_enabled="false" async_expires="" async_max_pushes="" async_allow_rewrite="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) dry_run="true"; shift ;;
@@ -2977,6 +3757,10 @@ stack_cmd_push() {
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
       --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
       --children) include_children="true"; shift ;;
+      --async) async_enabled="true"; shift ;;
+      --expires) async_expires="${2:-}"; [[ -n "$async_expires" ]] || stack_fail "--expires requires a duration"; shift 2 ;;
+      --max-pushes) async_max_pushes="${2:-}"; [[ "$async_max_pushes" =~ ^[0-9]+$ ]] || stack_fail "--max-pushes requires a number"; shift 2 ;;
+      --allow-rewrite) async_allow_rewrite="true"; shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown push flag: $1" ;;
     esac
@@ -2997,7 +3781,7 @@ stack_cmd_push() {
   local base prefix local_parent_map parent_map prs rerun_cmd
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
-  rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$include_children")
+  rerun_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "$pr_filter" "$include_children" "$async_enabled" "$async_expires" "$async_max_pushes" "$async_allow_rewrite")
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
   stack_debug "push base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") dry_run=$dry_run pr=${pr_filter:-none} children=$include_children"
   prs=$(stack_fetch_prs_for_scope "$pr_filter")
@@ -3059,27 +3843,41 @@ stack_cmd_push() {
       delayed_after_first="${delayed_after_first}${delayed_after_first:+, }$name"
     fi
 
-    local pr pr_num create_pr_base
+    local pr pr_num create_pr_base pr_live pr_head_oid pr_push_remote push_remote remote_tip_ref
     pr=$(jq -c --arg k "$name" '.[$k] // null' <<<"$prs")
     if [[ "$pr" == "null" ]]; then
       pr_num=""
       create_pr_base=$(stack_pr_base_from_parent "$parent")
+      pr_live="{}"
+      pr_head_oid=""
+      pr_push_remote=""
     else
       pr_num=$(jq -r '.number' <<<"$pr")
       create_pr_base=""
+      pr_live=$(stack_pr_live_json "$pr_num")
+      pr_head_oid=$(jq -r '.headRefOid // ""' <<<"$pr_live")
+      pr_push_remote=""
     fi
 
     local remote_ref ahead_remote=""
-    remote_ref=$(stack_push_remote_ref "$name")
-    if [[ -n "$remote_ref" ]]; then
-      ahead_remote=$(git rev-list --count "${remote_ref}..${name}" 2>/dev/null || echo 0)
-      stack_debug "push branch=$name pr=${pr_num:-none} upstream=$remote_ref ahead_upstream=$ahead_remote"
-      if [[ "$ahead_remote" == "0" ]]; then
-        if [[ -n "$pr_num" ]]; then
-          echo "[$idx/$total] $name: up to date with $remote_ref (#$pr_num); skip"
-        else
-          echo "[$idx/$total] $name: pushed branch exists at $remote_ref, but no PR yet; create draft PR with base $create_pr_base"
-        fi
+    push_remote="$pr_push_remote"
+    if [[ -n "$push_remote" ]]; then
+      remote_ref="${push_remote}/${name}"
+    else
+      remote_ref=$(stack_push_remote_ref "$name")
+      [[ "$remote_ref" == */* ]] && push_remote="${remote_ref%%/*}"
+    fi
+    remote_tip_ref="${pr_head_oid:-$remote_ref}"
+    if [[ -n "$remote_tip_ref" ]]; then
+      ahead_remote=$(git rev-list --count "${remote_tip_ref}..${name}" 2>/dev/null || echo "")
+      stack_debug "push branch=$name pr=${pr_num:-none} remote_ref=${remote_ref:-none} live_head=${pr_head_oid:-none} ahead_remote=${ahead_remote:-unknown}"
+      if [[ -n "$pr_num" && "$pr_head_oid" == "$(git rev-parse --verify "$name" 2>/dev/null || echo "")" ]]; then
+        echo "[$idx/$total] $name: up to date with PR #$pr_num head (${pr_head_oid:0:12}); skip"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if [[ -z "$pr_num" && "$ahead_remote" == "0" ]]; then
+        echo "[$idx/$total] $name: pushed branch exists at $remote_ref, but no PR yet; create draft PR with base $create_pr_base"
         skipped=$((skipped + 1))
         continue
       fi
@@ -3090,21 +3888,30 @@ stack_cmd_push() {
         || { restore_branch; stack_fail "checkout failed: $name"; }
     fi
 
-    local check_json allowed anchor_matches
+    local check_json allowed anchor_matches async_lease
     check_json=$(bash "$pg_helper" check "$name" 2>/dev/null || echo '{"allowed":false}')
     allowed=$(jq -r '.allowed // false' <<<"$check_json")
     anchor_matches=$(jq -r '.current.anchor_matches_head // false' <<<"$check_json")
+    async_lease=$(jq -r '.async_iteration.enabled // false' <<<"$check_json")
     stack_debug "push branch=$name pr=${pr_num:-none} lease_allowed=$allowed anchor_matches_head=$anchor_matches"
 
-    if [[ "$allowed" == "true" && "$anchor_matches" == "true" ]]; then
+    if [[ "$allowed" == "true" && ( "$anchor_matches" == "true" || "$async_lease" == "true" ) ]]; then
+      if [[ -n "$pr_num" ]]; then
+        pr_live=$(stack_pr_live_json "$pr_num")
+        pr_head_oid=$(jq -r '.headRefOid // ""' <<<"$pr_live")
+        pr_push_remote=$(stack_pr_head_remote "$pr_live" "$name" "$pr_num")
+        push_remote="$pr_push_remote"
+        remote_ref="${push_remote}/${name}"
+        remote_tip_ref="${pr_head_oid:-$remote_ref}"
+      fi
       local assert_flow rewrite_note="no rewrite"
-      if [[ -n "$remote_ref" ]] && ! git merge-base --is-ancestor "$remote_ref" "$name" 2>/dev/null; then
+      if [[ -n "$remote_tip_ref" ]] && ! git merge-base --is-ancestor "$remote_tip_ref" "$name" 2>/dev/null; then
         rewrite_note="rewrite branch"
       fi
       assert_flow=$(stack_push_assert_flow "$name" "$pr_num" "$rewrite_note" "$create_pr_base")
       if [[ "$dry_run" == "true" ]]; then
         if [[ -n "$pr_num" ]]; then
-          echo "[$idx/$total] $name: (dry-run) lease fresh; would update #$pr_num with pg push --force-with-lease"
+          echo "[$idx/$total] $name: (dry-run) lease fresh; would update #$pr_num on ${push_remote:-default remote} with pg push --force-with-lease"
         else
           echo "[$idx/$total] $name: (dry-run) lease fresh; would push branch with pg push --force-with-lease --set-upstream, then create draft PR with base $create_pr_base"
         fi
@@ -3114,11 +3921,15 @@ stack_cmd_push() {
         else
           echo "[$idx/$total] $name: pushing branch for new stacked PR (base $create_pr_base)..."
         fi
-        local -a pg_push_args=(push --force-with-lease --assert-flow "$assert_flow")
+        local -a pg_push_args=(push --force-with-lease --assert-flow "$assert_flow" --branch "$name" --source-ref "$name")
+        [[ -n "$push_remote" ]] && pg_push_args+=(--remote "$push_remote")
         [[ -z "$pr_num" ]] && pg_push_args+=(--set-upstream)
         if ! bash "$pg_helper" "${pg_push_args[@]}"; then
           restore_branch
           stack_fail "pg push failed for $name. Aborting."
+        fi
+        if [[ -n "$pr_num" ]]; then
+          stack_verify_pr_head "$pr_num" "$name" "$(git rev-parse --verify "$name")"
         fi
         pushed=$((pushed + 1))
       fi
@@ -3150,6 +3961,13 @@ stack_cmd_push() {
 
     if [[ "$dry_run" == "true" ]]; then
       echo "[$idx/$total] $name: (dry-run) lease missing/stale; would: pg prepare \\"
+      if [[ "$async_enabled" == "true" ]]; then
+        local async_line="    --async"
+        [[ -n "$async_expires" ]] && async_line="$async_line --expires '$async_expires'"
+        [[ -n "$async_max_pushes" ]] && async_line="$async_line --max-pushes '$async_max_pushes'"
+        [[ "$async_allow_rewrite" == "true" ]] && async_line="$async_line --allow-rewrite"
+        echo "$async_line \\"
+      fi
       echo "    --what '$what' --why '$why' --approach '$approach'"
       if [[ -z "$pr_num" ]]; then
         echo "    then push branch and create draft PR with base '$create_pr_base'"
@@ -3162,8 +3980,15 @@ stack_cmd_push() {
     fi
 
     echo "[$idx/$total] $name: needs approval, preparing brief..."
-    if ! bash "$pg_helper" prepare \
-           --what "$what" --why "$why" --approach "$approach"; then
+    local -a pg_prepare_args=(prepare)
+    if [[ "$async_enabled" == "true" ]]; then
+      pg_prepare_args+=(--async)
+      [[ -n "$async_expires" ]] && pg_prepare_args+=(--expires "$async_expires")
+      [[ -n "$async_max_pushes" ]] && pg_prepare_args+=(--max-pushes "$async_max_pushes")
+      [[ "$async_allow_rewrite" == "true" ]] && pg_prepare_args+=(--allow-rewrite)
+    fi
+    pg_prepare_args+=(--what "$what" --why "$why" --approach "$approach")
+    if ! bash "$pg_helper" "${pg_prepare_args[@]}"; then
       restore_branch
       stack_fail "pg prepare failed for $name."
     fi
@@ -3218,6 +4043,10 @@ stack_usage() {
 Usage: stack <command> [options]
 
 Commands:
+  -C <path>
+    Git-style repo targeting. Must appear before the command, for example:
+    stack -C /repo trunk review --stack demo --json.
+
   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
     Show one-table view merging git topology, gh PR state, and pg leases.
     With --pr N, scope the view to that PR; --children follows GitHub PR
@@ -3263,18 +4092,31 @@ Commands:
     materialization, trunk approval, PR, and local/remote tip state. Inferred
     loose branches from stack status are intentionally omitted.
 
-  trunk status --name NAME|--stack NAME|--manifest PATH [--json]
-               [--base REF] [--prefix PREFIX]
-  trunk materialize --name NAME|--stack NAME|--manifest PATH
-                   [--dry-run] [--keep-scratch] [--base REF]
-                   [--prefix PREFIX]
+  trunk status --stack NAME [--json] [--base REF] [--prefix PREFIX]
+  trunk materialize --stack NAME [--dry-run] [--keep-scratch]
+                   [--base REF] [--prefix PREFIX]
     Use a per-stack private trunk manifest as the source of truth. --name and
-    --stack read the manifest from push-gate's Dolt store; --manifest is a
-    compatibility/import path. Materialize builds the trunk in scratch by
+    --stack read the manifest from push-gate's Dolt store. Materialize builds
+    the trunk in scratch by
     replaying item branches in manifest order, then atomically moves the trunk
     ref and each item branch pointer to the corresponding trunk commit. If the
     checked-out branch moves, the worktree is refreshed to the new HEAD.
     Dolt is required for --stack: brew install dolt && dolt version.
+
+  trunk status --manifest PATH [--json] [--base REF] [--prefix PREFIX]
+  trunk materialize --manifest PATH [--dry-run] [--keep-scratch]
+                   [--base REF] [--prefix PREFIX]
+    Compatibility/import path for legacy manifest files. Prefer Dolt-backed
+    --stack NAME for all Stack Review workflows.
+
+  trunk review --stack NAME [--json]
+    Emit the stack-owned review payload for a materialized trunk. JSON includes
+    full-stack, item-only, and cumulative-through-item diff sections with
+    base/head refs, contained commits, changed files, and shortstats.
+
+  trunk push-plan --stack NAME [--json]
+    Emit the stack-owned push readiness checklist and ordered push units,
+    including approval coverage, remote state, and exact repo-pinned commands.
 
   trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
     Push each approved item commit from the materialized private trunk through
@@ -3288,12 +4130,14 @@ Commands:
     --onto-pr-base when local ancestry disagrees with PR topology.
 
   push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+       [--async --expires 8h --max-pushes N --allow-rewrite]
     Walk stack parents-first. Existing PR branches update through
     `pg push --force-with-lease`. Branches without PRs are still pushed
     through push-gate when their lease is fresh, using --set-upstream, then
     listed as draft-PR creation targets. If any branch needs approval, run
-    `pg prepare` and stop with instructions to run `pg`; re-run after
-    approval to continue. Never bypasses push-gate.
+    `pg prepare` and stop with instructions to run `pg`; --async adds async
+    lease metadata to those prepares so one review can cover repeated pushes
+    inside the approved scope. Never bypasses push-gate.
 
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).
@@ -3315,6 +4159,11 @@ EOF
 }
 
 stack_main() {
+  while [[ "${1:-}" == "-C" ]]; do
+    [[ -n "${2:-}" ]] || stack_fail "-C requires a path"
+    cd "$2" || stack_fail "-C: cannot cd to $2"
+    shift 2
+  done
   local cmd="${1:-}"
   [[ -n "$cmd" ]] || { stack_usage; exit 1; }
   shift
