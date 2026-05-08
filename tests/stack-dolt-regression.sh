@@ -41,7 +41,7 @@ git_commit() {
 
 echo "1..1"
 
-REPO="$TEST_TMP/repo"
+REPO="$TEST_TMP/repo-$$"
 mkdir -p "$REPO"
 (
   cd "$REPO"
@@ -124,14 +124,60 @@ mkdir -p "$REPO"
     || fail "expected materialized stack to be up to date: $trunk_list"
   [[ "$(jq -r '.stacks[0].materialization.manifest_hash | length > 0' <<<"$trunk_list")" == "true" ]] \
     || fail "expected latest materialization in trunk list: $trunk_list"
-  [[ "$(jq -r '.stacks[0].approval.state' <<<"$trunk_list")" == "needs_approval" ]] \
-    || fail "expected missing trunk lease to need approval: $trunk_list"
+  [[ "$(jq -r '.store_repo | length > 0' <<<"$trunk_list")" == "true" ]] \
+    || fail "expected trunk list to include backing store repo path: $trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.state' <<<"$trunk_list")" == "needs_prepare" ]] \
+    || fail "expected missing trunk prepare to be explicit: $trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.prepare_state' <<<"$trunk_list")" == "missing" ]] \
+    || fail "expected missing trunk prepare state: $trunk_list"
+  expect_contains "$(jq -r '.stacks[0].approval.next_action.command' <<<"$trunk_list")" "pg -C $repo_physical prepare-trunk --stack demo"
+  [[ "$(jq -r '.stacks[0].workflow.current_step' <<<"$trunk_list")" == "prepare" ]] \
+    || fail "expected workflow stepper to point at prepare: $trunk_list"
+  [[ "$(jq -r '.stacks[0].workflow.steps[] | select(.id == "materialize") | .state' <<<"$trunk_list")" == "complete" ]] \
+    || fail "expected materialize step complete: $trunk_list"
+  [[ "$(jq -r '.stacks[0].workflow.steps[] | select(.id == "prepare") | .actor' <<<"$trunk_list")" == "agent" ]] \
+    || fail "expected prepare step to identify agent actor: $trunk_list"
+  expect_contains "$(jq -r '.stacks[0].commands.materialize' <<<"$trunk_list")" "stack -C $repo_physical trunk materialize --stack"
   [[ "$(jq -r '.stacks[0].items | map(.id) | join(",")' <<<"$trunk_list")" == "base,api" ]] \
     || fail "expected manifest order in trunk list: $trunk_list"
   [[ "$(jq -r '[.stacks[].items[].branch] | index("mho/loose") == null' <<<"$trunk_list")" == "true" ]] \
     || fail "expected trunk list to omit loose inferred branches: $trunk_list"
   [[ "$(jq -r '.stacks[0].items[0].remote_state' <<<"$trunk_list")" == "not_pushed" ]] \
     || fail "expected item remote state in trunk list: $trunk_list"
+  targeted_list=$(cd "$TEST_TMP" && bash "$STACK" -C "$REPO" trunk list --json)
+  [[ "$(jq -r '.repo' <<<"$targeted_list")" == "$repo_physical" ]] \
+    || fail "expected stack -C to target repo from outside worktree: $targeted_list"
+
+  json_stderr="$TEST_TMP/json-stderr.txt"
+  prepare_status_missing=$(bash "$PG" prepare-trunk status --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected prepare-trunk status JSON stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.state' <<<"$prepare_status_missing")" == "missing" ]] \
+    || fail "expected missing prepare-trunk status: $prepare_status_missing"
+  expect_contains "$(jq -r '.commands.prepare' <<<"$prepare_status_missing")" "pg -C $repo_physical prepare-trunk --stack demo"
+
+  review_payload=$(cd "$TEST_TMP" && bash "$STACK" -C "$REPO" trunk review --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected stack review JSON stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.state' <<<"$review_payload")" == "ready" ]] \
+    || fail "expected stack review payload to be ready: $review_payload"
+  [[ "$(jq -r '.modes | join(",")' <<<"$review_payload")" == "full_stack,item,cumulative" ]] \
+    || fail "expected review modes in payload: $review_payload"
+  [[ "$(jq -r '.full_stack.files[] | select(.path == "base.txt") | .change' <<<"$review_payload")" == "added" ]] \
+    || fail "expected full-stack review to include base.txt as added: $review_payload"
+  [[ "$(jq -r '.items[] | select(.id == "api") | .delta.files[] | select(.path == "api.txt") | .change' <<<"$review_payload")" == "added" ]] \
+    || fail "expected api item delta to include api.txt as added: $review_payload"
+  [[ "$(jq -r '.items[] | select(.id == "api") | .cumulative.files | map(.path) | index("base.txt") != null' <<<"$review_payload")" == "true" ]] \
+    || fail "expected api cumulative review to include base item file: $review_payload"
+  expect_contains "$(jq -r '.commands.push_plan' <<<"$review_payload")" "stack -C $repo_physical trunk push-plan --stack"
+
+  push_plan_needs_approval=$(bash "$STACK" trunk push-plan --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected push-plan JSON stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.state' <<<"$push_plan_needs_approval")" == "needs_approval" ]] \
+    || fail "expected push-plan to need approval before pg trunk: $push_plan_needs_approval"
+  [[ "$(jq -r '.push_units | length' <<<"$push_plan_needs_approval")" == "2" ]] \
+    || fail "expected push-plan units for both stack items: $push_plan_needs_approval"
+  [[ "$(jq -r '.push_units[0].approval_covered' <<<"$push_plan_needs_approval")" == "false" ]] \
+    || fail "expected push-plan units to report missing approval coverage: $push_plan_needs_approval"
+  expect_contains "$(jq -r '.push_units[0].command' <<<"$push_plan_needs_approval")" "pg -C $repo_physical push --trunk-stack demo"
 
   item_briefs="$TEST_TMP/item-briefs.json"
   jq -n '[
@@ -163,6 +209,35 @@ mkdir -p "$REPO"
     --approach "review each materialized item before pushing" \
     --item-briefs "$item_briefs" 2>&1)
   expect_contains "$prepare_out" "Prepared trunk brief written"
+  prepared_trunk_list=$(bash "$STACK" trunk list --json)
+  [[ "$(jq -r '.stacks[0].approval.state' <<<"$prepared_trunk_list")" == "needs_approval" ]] \
+    || fail "expected prepared trunk to be ready for approval: $prepared_trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.prepare_state' <<<"$prepared_trunk_list")" == "ready" ]] \
+    || fail "expected prepared trunk state: $prepared_trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.next_action.actor' <<<"$prepared_trunk_list")" == "human" ]] \
+    || fail "expected prepared trunk to identify human review action: $prepared_trunk_list"
+  expect_contains "$(jq -r '.stacks[0].approval.next_action.command' <<<"$prepared_trunk_list")" "pg -C $repo_physical trunk --stack demo"
+  [[ "$(jq -r '.stacks[0].workflow.current_step' <<<"$prepared_trunk_list")" == "approve" ]] \
+    || fail "expected prepared workflow to point at approval: $prepared_trunk_list"
+  [[ "$(jq -r '.stacks[0].workflow.steps[] | select(.id == "approve") | .writes_lease' <<<"$prepared_trunk_list")" == "true" ]] \
+    || fail "expected approve step to disclose lease write: $prepared_trunk_list"
+  prepared_review_payload=$(bash "$STACK" trunk review --stack demo --json)
+  [[ "$(jq -r '.items[] | select(.id == "base") | .item_brief.state' <<<"$prepared_review_payload")" == "ready" ]] \
+    || fail "expected review payload to report ready item brief coverage: $prepared_review_payload"
+  expect_contains "$(jq -r '.items[] | select(.id == "api") | .item_brief.why[0]' <<<"$prepared_review_payload")" "Verify child item review context."
+  prepare_status_ready=$(bash "$PG" prepare-trunk status --stack demo --json)
+  [[ "$(jq -r '.state' <<<"$prepare_status_ready")" == "ready" ]] \
+    || fail "expected ready prepare-trunk status: $prepare_status_ready"
+  [[ "$(jq -r '.target.worktree_root' <<<"$prepare_status_ready")" == "$repo_physical" ]] \
+    || fail "expected prepare-trunk status target worktree: $prepare_status_ready"
+  prepare_path=$(jq -r '.path' <<<"$prepare_status_ready")
+  cp "$prepare_path" "$prepare_path.good"
+  jq '.materialization.manifest_hash = "stale-test-manifest-hash"' "$prepare_path" >"$prepare_path.tmp"
+  mv "$prepare_path.tmp" "$prepare_path"
+  prepare_status_stale=$(bash "$PG" prepare-trunk status --stack demo --json)
+  [[ "$(jq -r '.state' <<<"$prepare_status_stale")" == "stale" ]] \
+    || fail "expected stale prepare-trunk status after materialization mismatch: $prepare_status_stale"
+  mv "$prepare_path.good" "$prepare_path"
   trunk_out=$(PG_AUTO_RUN_APPROVAL=0 bash "$PG" trunk --stack demo 2>&1)
   expect_contains "$trunk_out" "Draft file:"
   draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/Draft file:/ {print $2; exit}')
@@ -265,6 +340,13 @@ mkdir -p "$REPO"
   vscode_check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   [[ "$(jq -r '.allowed' <<<"$vscode_check_out")" == "true" ]] \
     || fail "expected VS Code-reviewed YAML approval to allow trunk: $vscode_check_out"
+  push_plan_ready=$(bash "$STACK" trunk push-plan --stack demo --json)
+  [[ "$(jq -r '.state' <<<"$push_plan_ready")" == "ready_to_push" ]] \
+    || fail "expected push-plan to be ready after approval: $push_plan_ready"
+  [[ "$(jq -r '.checklist[] | select(.id == "approved") | .ok' <<<"$push_plan_ready")" == "true" ]] \
+    || fail "expected push-plan approval checklist to pass: $push_plan_ready"
+  [[ "$(jq -r '.push_units[] | select(.id == "api") | .action' <<<"$push_plan_ready")" == "ready_to_push" ]] \
+    || fail "expected api push unit ready_to_push: $push_plan_ready"
 
   repo_key=$(git rev-parse --git-common-dir)
   [[ "$repo_key" == /* ]] || repo_key="$(git rev-parse --show-toplevel)/$repo_key"

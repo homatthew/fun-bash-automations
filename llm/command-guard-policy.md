@@ -57,8 +57,8 @@ workaround when a push is blocked:
 - `PG_SKIP_EDIT=1` (bypasses the editor review step)
 - `PG_ALLOW_DESCENDANT=1` (overrides lease-anchor drift)
 - `PG_SCOPE_OVERRIDE=1` (overrides the approved_scope path/commit/line caps)
-- `PG_ALLOW_INFERENCE=1` (escape hatch for HUMANS working without an agent
-  — agents must run `pg prepare` instead)
+- `PG_ALLOW_INFERENCE=1` (legacy inference bypass; agents must run
+  `pg prepare` instead)
 - Piping `yes`, `echo y`, or any non-interactive confirmation into the
   approval prompt
 - Manually editing `~/.push-gate/` lease state, the Dolt stack-trunk store, or

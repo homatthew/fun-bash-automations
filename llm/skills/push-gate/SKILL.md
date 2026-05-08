@@ -42,9 +42,8 @@ examples:
 - `PG_SKIP_EDIT=1` — skips the vim review step, which IS the policy.
 - `PG_ALLOW_DESCENDANT=1` — bypasses anchor-exact on legacy leases.
 - `PG_SCOPE_OVERRIDE=1` — bypasses semantic scope validation.
-- `PG_ALLOW_INFERENCE=1` — skips the agent prepare step and falls back
-  to LLM-inferred brief from commits. Reserved for humans working
-  without an agent; agents must call `pg prepare` instead.
+- `PG_ALLOW_INFERENCE=1` — legacy inference bypass. It is disabled in the
+  approval path; agents must call `pg prepare` instead.
 - `yes | …`, `<<<y`, here-strings, or any other pattern that pipes an
   automated confirmation into the approval prompt.
 - Running `/tmp/pg-approve-*.sh` directly with env overrides when bare `pg`
@@ -52,12 +51,13 @@ examples:
 
 If you find yourself about to type any of those, STOP.
 
-## Step 3 — Sanctioned flow (three commands, nothing else)
+## Step 3 — Sanctioned flow
 
 ```
-1. pg [-C <path>]                   ← human in their terminal: approve
-2. pg push --assert-flow "..."      ← agent: push under the active lease
-3. pg leases                        ← (optional) list active leases
+1. pg prepare --what ... --why ... --approach ...
+2. pg [-C <path>] [--yes]           ← human in their terminal: review + approve
+3. pg push --assert-flow "..."      ← agent: push under the active lease
+4. pg leases                        ← (optional) list active leases
 ```
 
 **Step 1** runs a single flow:
@@ -67,6 +67,10 @@ If you find yourself about to type any of those, STOP.
 - script renders preview, prompts `Proceed? [y/N]`
 - `y` → lease written at `<repo>/.git/push-gate/leases/refs/heads/<branch>.json`
 - sentinel at `/tmp/pg-approved/<repo>__<branch>` + macOS banner fire
+
+`--yes` / `-y` is allowed only on the human approval command. It still opens the
+editor first and renders the preview; it only skips the final `Proceed? [Y/n]`
+prompt after the editor exits.
 
 **Step 2** (agent) invokes guard layers automatically: anchor → scope → semantic
 intent match. Scope drift or intent drift → blocked with a specific reason.
@@ -80,6 +84,34 @@ you see a user output referencing them, re-read `pg --help` to re-ground.
 See the `push-gate-prepare` skill for the required arguments. If `pg`
 blocks with "NO PREPARED BRIEF", your fix is `pg prepare`, not a bypass.
 
+### Async iteration mode
+
+Async is opt-in and still uses the same human editor review. It lets one human
+approval cover repeated pushes for the same branch or stack while the lease is
+unexpired, under budget, and still inside the approved semantic scope.
+For low-stakes iteration, `--low-stakes` is shorthand on `pg prepare` and
+`pg prepare-trunk` for a reviewed async lease with `--expires 1h` and
+`--max-pushes 5`.
+
+Branch flow:
+
+```bash
+pg prepare --async --expires 8h --max-pushes 20 \
+  --what "..." --why "..." --approach "..."
+pg -C <repo-root>          # human
+pg push --assert-flow "..."
+```
+
+Use `--allow-rewrite` only when the reviewed workflow includes intentional
+rebases/squashes/force-with-lease updates. Otherwise async permits only
+descendant commits. Normal non-async approvals are exact-tip approvals; if
+`HEAD` changes after review, re-run `pg prepare` and ask for review again.
+
+`pg check`, `pg check-trunk`, and `pg leases --json` expose
+`async_iteration.enabled`, expiry, push budget, remaining pushes, scope, and a
+block reason. Treat a block reason as final until the agent re-prepares and the
+human reviews again.
+
 For stack trunks, the same split applies at trunk scope:
 
 ```
@@ -87,6 +119,26 @@ For stack trunks, the same split applies at trunk scope:
 2. Human: pg trunk --stack S
 3. Agent: pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
 ```
+
+Use `pg -C <repo> prepare-trunk status --stack S --json` when a UI or script
+needs prepare state. It reports `missing`, `ready`, or detectable `stale`
+state plus the repo/worktree target and exact next commands; consumers must not
+parse `pg trunk` stderr or inspect `/tmp/pg-prepare-trunk-*` directly.
+
+Async stack trunk flow:
+
+```bash
+pg prepare-trunk --stack S --async --expires 8h --max-pushes 30 --allow-rewrite \
+  --what "..." --why "..." --approach "..." --item-briefs FILE
+pg trunk --stack S         # human
+stack trunk push --stack S # agent
+```
+
+Trunk async scope is intentionally narrow: same stack name, same private trunk
+ref, same manifest hash, same item ids, and same item branch names. The draft
+will still show SHA-specific materialization details because those are the
+initial reviewed/audited commits. Future async materializations may move those
+commit SHAs only inside the unchanged scope and only when rewrite was approved.
 
 The stack manifest and trunk materialization live in the Dolt store under
 `~/.push-gate/dolt-store` by default. Use `stack trunk init/add/status/materialize
@@ -157,6 +209,11 @@ current diff against it:
 When a push is blocked, the correct response is **not** to override —
 it is to ask the user to re-run `pg` (which re-populates scope from the
 current branch state) and approve again.
+
+For async leases, first read the `async_iteration.block_reason`. Expired or
+budget-exhausted leases require a fresh prepare and human review. Use
+`pg revoke <branch>` or `pg revoke-trunk --stack <name>` as the kill switch if
+the user wants to end an async authorization early.
 
 ## Step 6 — Checking for existing approvals
 

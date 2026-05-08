@@ -123,12 +123,16 @@ Private trunk refs must be private branches such as
 
 ## Safety Model
 
-Push-gate leases are per branch tip. If `stack sync`, `stack insert`,
+Push-gate leases are per branch or per Dolt stack scope. Normal branch leases
+approve the reviewed tip exactly. If `stack sync`, `stack insert`,
 `stack trunk materialize`, or `stack squash` rewrites a branch and its
-descendants, every moved branch with an existing lease is stale and needs
-separate human approval. There is no batch approval and no agent bypass.
-`stack push` prepares one branch, stops, prints `pg -C <repo>`, and waits for
-the human before continuing on the next invocation.
+descendants, every moved branch with a normal lease is stale and needs human
+review again. Async leases are opt-in: `pg prepare --async` or
+`stack push --async` lets one review cover repeated pushes only while expiry,
+push budget, branch/remote scope, semantic scope, and optional rewrite approval
+still pass. There is no agent bypass. `stack push` prepares one branch, stops,
+prints `pg -C <repo>`, and waits for the human before continuing on the next
+invocation.
 
 ## Command Behavior
 
@@ -175,7 +179,8 @@ materialized stacks with manifest order, latest materialization, trunk approval,
 PR details, and local/remote tip state. It intentionally omits inferred loose
 branches from `stack status`. `stack trunk move` reorders existing items with `--after`,
 `--before`, `--first`, or `--last`; `stack trunk remove` prunes an item and
-compacts order. These commands only change manifest order. `stack trunk
+compacts order. Removing the final item deletes the empty stack metadata, so it
+no longer appears in `stack trunk list`. These commands only change manifest order. `stack trunk
 materialize --stack <name>` reads that manifest, builds the private trunk in a
 scratch clone by replaying item branches in manifest order, then atomically
 moves the trunk ref and each item branch pointer to the corresponding commit on
@@ -215,6 +220,13 @@ items and invokes `pg push --trunk-stack` for each branch, so each item commit
 can be pushed from the private trunk without requiring a separate per-branch
 lease.
 
+Async trunk approvals still show SHA-specific materialization details in the
+draft. Those SHAs are the initial reviewed/audited stack state. The async scope
+is narrower and more durable: same stack name, same private trunk ref, same
+manifest hash, same item ids, and same item branch names. With
+`--allow-rewrite`, later materializations may move item commit SHAs inside that
+unchanged scope until expiry or push budget is exhausted.
+
 For squash-merge-heavy stacks, push only the composed validation ref first:
 
 ```bash
@@ -239,6 +251,11 @@ The approval draft shows each ordered stack item with:
 
 That restores branch-by-branch detail without losing the whole-stack approval
 flow.
+
+The canonical Stack Review command classifications live in
+[`command-surface.md`](command-surface.md). Use that matrix when deciding which
+commands remain primary UI actions, advanced diagnostics, compatibility paths,
+or plumbing-only internals.
 
 `stack squash` collapses a branch's incremental commits into one commit and
 restacks descendants. Use `--pr <N> --onto-pr-base` when GitHub says a PR's base

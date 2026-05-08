@@ -803,6 +803,19 @@ WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$s
 ORDER BY order_index;
 " | tail -n +2)
   pg_dolt_sql "DELETE FROM stack_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND item_id = $(pg_sql_quote "$item_id");" >/dev/null
+  if (( ${#remaining[@]} == 0 )); then
+    pg_dolt_sql "
+DELETE FROM trunk_lease_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM trunk_leases WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM pending_trunk_assertions WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM trunk_materialization_items WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM trunk_materializations WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
+DELETE FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");
+" >/dev/null
+    pg_dolt_commit "stack prune $stack_name"
+    echo "Stack pruned: $stack_name (removed final item $item_id)"
+    return 0
+  fi
   pg_stack_store_update_order "$repo_key" "$stack_name" "$now" "${remaining[@]}"
   pg_dolt_sql "UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" >/dev/null
   version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
@@ -840,9 +853,10 @@ pg_cmd_stack_store_list() {
     esac
   done
   pg_store_upsert_repo || return 1
-  local repo_key repo_root stack_names='[]' stack_name manifest materialization approval stacks='[]'
+  local repo_key repo_root worktree_root stack_names='[]' stack_name manifest materialization approval prepare stacks='[]'
   repo_key=$(pg_repo_key) || return 1
   repo_root=$(pg_main_repo_path) || return 1
+  worktree_root=$(pg_repo_root) || return 1
   while IFS=, read -r stack_name; do
     [[ -z "$stack_name" ]] && continue
     stack_name=$(pg_csv_unquote "$stack_name")
@@ -860,16 +874,18 @@ ORDER BY updated_at DESC, name;
     [[ -n "$manifest" ]] || continue
     materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || echo 'null')
     approval=$(pg_trunk_check_json "$stack_name" 2>/dev/null || echo '{"allowed":false,"reason":"Unable to check trunk approval."}')
+    prepare=$(pg_trunk_prepare_status_json "$stack_name")
     stacks=$(jq \
       --argjson manifest "$manifest" \
       --argjson materialization "$materialization" \
       --argjson approval "$approval" \
-      '. + [{manifest:$manifest, materialization:$materialization, approval:$approval}]' <<<"$stacks")
+      --argjson prepare "$prepare" \
+      '. + [{manifest:$manifest, materialization:$materialization, approval:$approval, prepare:$prepare}]' <<<"$stacks")
   done < <(jq -r '.[]' <<<"$stack_names")
 
   if [[ "$format" == "json" ]]; then
-    jq -n --arg repo "$repo_root" --arg repo_key "$repo_key" --argjson stacks "$stacks" \
-      '{repo:$repo, repo_key:$repo_key, stacks:$stacks}'
+    jq -n --arg repo "$worktree_root" --arg store_repo "$repo_root" --arg repo_key "$repo_key" --argjson stacks "$stacks" \
+      '{repo:$repo, store_repo:$store_repo, repo_key:$repo_key, stacks:$stacks}'
   else
     jq -r '.[] | .manifest.name' <<<"$stacks"
   fi
@@ -994,6 +1010,105 @@ pg_trunk_draft_path() {
   repo_name=$(pg_repo_name)
   printf '/tmp/pg-approve-trunk-%s-%s.json' \
     "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$stack_name")"
+}
+
+pg_trunk_prepare_status_json() {
+  local stack_name="$1" worktree_root store_repo common_dir prepare_path state reason prepared_at=""
+  local prepare_command review_command draft_command approve_saved_draft_command
+  local latest_materialization prepared_materialization latest_manifest latest_tip prepared_manifest prepared_tip
+  worktree_root=$(pg_repo_root) || worktree_root=""
+  store_repo=$(pg_main_repo_path 2>/dev/null || printf '%s\n' "$worktree_root")
+  common_dir=$(pg_git_common_dir 2>/dev/null || true)
+  prepare_path=$(pg_trunk_prepare_path "$stack_name")
+  if [[ -f "$prepare_path" ]]; then
+    if ! jq -e . "$prepare_path" >/dev/null 2>&1; then
+      state="stale"
+      reason="Prepared trunk brief is not valid JSON. Re-run pg prepare-trunk."
+    else
+      prepared_at=$(jq -r '.prepared_at // ""' "$prepare_path" 2>/dev/null || echo "")
+      latest_materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || true)
+      prepared_materialization=$(jq -c '.materialization // null' "$prepare_path")
+      latest_manifest=$(jq -r '.manifest_hash // ""' <<<"${latest_materialization:-{}}" 2>/dev/null || true)
+      latest_tip=$(jq -r '.trunk_tip // ""' <<<"${latest_materialization:-{}}" 2>/dev/null || true)
+      prepared_manifest=$(jq -r '.manifest_hash // ""' <<<"$prepared_materialization" 2>/dev/null || true)
+      prepared_tip=$(jq -r '.trunk_tip // ""' <<<"$prepared_materialization" 2>/dev/null || true)
+      if [[ -z "$latest_materialization" ]]; then
+        state="stale"
+        reason="Prepared trunk brief exists, but no current materialization is recorded. Re-run stack trunk materialize and pg prepare-trunk."
+      elif [[ "$prepared_manifest" != "$latest_manifest" ]]; then
+        state="stale"
+        reason="Stack manifest changed after prepare-trunk. Re-run pg prepare-trunk."
+      elif [[ "$prepared_tip" != "$latest_tip" ]]; then
+        state="stale"
+        reason="Stack trunk materialization changed after prepare-trunk. Re-run pg prepare-trunk."
+      else
+        state="ready"
+        reason="Prepared trunk brief is ready for human review."
+      fi
+    fi
+  else
+    state="missing"
+    reason="Agent must prepare a trunk brief before approval draft review."
+  fi
+  prepare_command="pg -C $(pg_shell_quote "$worktree_root") prepare-trunk --stack $(pg_shell_quote "$stack_name") --what <what> --why <why> --approach <approach>"
+  review_command="pg -C $(pg_shell_quote "$worktree_root") trunk --stack $(pg_shell_quote "$stack_name")"
+  draft_command="pg -C $(pg_shell_quote "$worktree_root") trunk-draft --stack $(pg_shell_quote "$stack_name") --format yaml"
+  approve_saved_draft_command="pg -C $(pg_shell_quote "$worktree_root") approve-trunk --draft <draft-file> --reviewed-in-vscode"
+  jq -n \
+    --arg state "$state" \
+    --arg reason "$reason" \
+    --arg path "$prepare_path" \
+    --arg prepared_at "$prepared_at" \
+    --arg worktree_root "$worktree_root" \
+    --arg store_repo "$store_repo" \
+    --arg common_dir "$common_dir" \
+    --arg prepare_command "$prepare_command" \
+    --arg review_command "$review_command" \
+    --arg draft_command "$draft_command" \
+    --arg approve_saved_draft_command "$approve_saved_draft_command" \
+    '{
+      state:$state,
+      reason:$reason,
+      path:$path,
+      prepared_at:(if $prepared_at == "" then null else $prepared_at end),
+      repo_root:$worktree_root,
+      target:{
+        worktree_root:$worktree_root,
+        store_repo:$store_repo,
+        common_dir:(if $common_dir == "" then null else $common_dir end)
+      },
+      commands:{
+        prepare:$prepare_command,
+        review:$review_command,
+        draft:$draft_command,
+        approve_saved_draft:$approve_saved_draft_command
+      }
+    }'
+}
+
+pg_cmd_prepare_trunk_status() {
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown prepare-trunk status option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "pg prepare-trunk status requires --stack NAME"
+  local status_json
+  status_json=$(pg_trunk_prepare_status_json "$stack_name")
+  if [[ "$format" == "json" ]]; then
+    printf '%s\n' "$status_json"
+    return 0
+  fi
+  jq -r '
+    "Prepare-trunk: " + .state,
+    "Reason: " + .reason,
+    "Target: " + .target.worktree_root,
+    "Prepare: " + .commands.prepare,
+    "Review: " + .commands.review
+  ' <<<"$status_json"
 }
 
 pg_trunk_latest_materialization_json() {
@@ -1379,6 +1494,11 @@ pg_trunk_stack_items_json() {
 }
 
 pg_cmd_prepare_trunk() {
+  if [[ "${1:-}" == "status" ]]; then
+    shift
+    pg_cmd_prepare_trunk_status "$@"
+    return $?
+  fi
   local stack_name="" what="" why="" approach="" scope="" risks="" item_briefs_file="" item_briefs_raw="" item_briefs="[]"
   local async_enabled="false" async_expires="" async_max_pushes="" async_allow_rewrite="false"
   while [[ $# -gt 0 ]]; do
@@ -2099,6 +2219,12 @@ pg_branch_display() {
 
 pg_branch_slug() {
   echo "$1" | tr '/: ' '___'
+}
+
+pg_shell_quote() {
+  local quoted
+  printf -v quoted '%q' "$1"
+  printf '%s' "$quoted"
 }
 
 # Resolve the MAIN repo path even when we're inside a worktree. Worktrees
@@ -3327,7 +3453,7 @@ pg_validate_push_guard() {
 
   lease_json=$(pg_load_lease_for_ref "$branch_ref" 2>/dev/null || true)
   if [[ -z "$lease_json" ]]; then
-    jq -n --arg reason "Blocked: git push requires a durable lease for $lease_branch. Ask the user to run: pg -C $(pg_repo_root) draft-approve --branch $lease_branch" '{allowed:false, reason:$reason}'
+    jq -n --arg reason "Blocked: git push requires a durable lease for $lease_branch. Ask the agent to run pg prepare, then ask the user to review with: pg -C $(pg_repo_root)" '{allowed:false, reason:$reason}'
     return 0
   fi
 
@@ -3612,16 +3738,16 @@ pg_cmd_draft_approve() {
 EOF
       fi
     elif [[ "${PG_ALLOW_INFERENCE:-0}" == "1" ]]; then
-      # Explicit opt-in: let the LLM infer from commits.
-      local _pg_brief
-      _pg_brief=$(pg_semantic_brief)
-      if [[ -n "$_pg_brief" ]]; then
-        _pg_what=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="what"{sub(/^what: */,""); print; exit}')
-        _pg_why=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="why"{sub(/^why: */,""); print; exit}')
-        _pg_approach=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="approach"{sub(/^approach: */,""); print; exit}')
-        _pg_scope=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="scope"{sub(/^scope: */,""); print; exit}')
-        _pg_risks=$(printf '%s\n' "$_pg_brief" | awk -F': *' '$1=="risks"{sub(/^risks: */,""); print; exit}')
-      fi
+      cat >&2 <<EOF
+─────────────────────────────────────────────────────────────────────
+✗  PG_ALLOW_INFERENCE is no longer accepted.
+
+Agents must run pg prepare with explicit what/why/approach before approval.
+Commit-inferred briefs are not a valid workaround for the editor review flow.
+─────────────────────────────────────────────────────────────────────
+EOF
+      pg_fail "pg prepare required before approval; PG_ALLOW_INFERENCE is disabled."
+      return 1
     else
       # Fail-fast: no prepared brief, no inference opt-in → block.
       cat >&2 <<EOF
@@ -4596,7 +4722,7 @@ pg_main() {
         set -- --yes "$@"
         ;;
       *)
-        pg_fail "--yes is only valid with approval commands: pg [--yes], pg draft-approve --yes, or pg trunk --stack S --yes"
+        pg_fail "--yes is only valid with approval commands: pg [--yes] or pg trunk --stack S --yes"
         return 1
         ;;
     esac
@@ -4746,6 +4872,9 @@ Stack trunks:
   pg prepare-trunk --stack S --what "..." --why "..." --approach "..." [--item-briefs FILE] [--async --expires 8h --max-pushes 30 --allow-rewrite]
                          Agent handoff for approving a materialized trunk.
                          --low-stakes is reviewed shorthand for --async --expires 1h --max-pushes 5.
+  pg prepare-trunk status --stack S --json
+                         Structured prepare-trunk state and repo-pinned next
+                         commands for UIs and automation.
   pg trunk --stack S [--yes]
                          Human review/approval for the whole stack trunk.
                          --yes still opens the editor; it only skips the final y/N prompt.
@@ -4761,7 +4890,7 @@ Stack trunks:
                          brew install dolt && dolt version
                          Store defaults to ~/.push-gate/dolt-store; PG_STORE_DIR overrides it.
 
-Plumbing (called by pg itself — you rarely invoke these directly):
+Internal plumbing (called by pg/stack themselves; not primary user workflow):
 
   pg draft-approve      First half of pg: writes the YAML draft.
   pg approve --draft F  Second half: writes the lease after y/N.
