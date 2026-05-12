@@ -64,6 +64,9 @@ workflows across Claude, Codex, and future harnesses.
 - Second-brain knowledge lives at:
   - Index: `~/repos/dump/second-brain/README.md`
   - Topics: `~/repos/dump/second-brain/topics/<topic>/README.md`
+- If Sourcegraph MCP returns a 502, especially `downstream` or
+  `ngp-mcp-sourcegraph`, treat it as likely auth expiry. Ask the user to open
+  `http://go/authorize-sourcegraph`, then retry the Sourcegraph query.
 
 ## Shared Skills
 

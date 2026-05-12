@@ -71,6 +71,17 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "mcp__sourcegraph.*|sourcegraph.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/sourcegraph-auth-hint.sh",
+            "statusMessage": "Checking Sourcegraph auth failure",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
