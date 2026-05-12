@@ -14,6 +14,11 @@ plugin behavior.
 
 ## Portable MCP (configure in Codex)
 
+- Sourcegraph MCP
+  - If Sourcegraph returns a 502, especially `downstream` or
+    `ngp-mcp-sourcegraph`, ask the user to open
+    `http://go/authorize-sourcegraph`, then retry the query.
+
 - `chrome-devtools-mcp@chrome-devtools-plugins`
   - Claude plugin contains an MCP server definition:
     - command: `npx`

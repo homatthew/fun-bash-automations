@@ -94,6 +94,30 @@
         "matcher": "Bash"
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/sourcegraph-auth-hint.sh",
+            "type": "command",
+            "timeout": 5
+          }
+        ],
+        "matcher": "mcp__sourcegraph.*|sourcegraph.*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/sourcegraph-auth-hint.sh",
+            "type": "command",
+            "timeout": 5
+          }
+        ],
+        "matcher": "mcp__sourcegraph.*|sourcegraph.*"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
