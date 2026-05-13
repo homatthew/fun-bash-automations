@@ -1,0 +1,9 @@
+# Allow-list for check-push-safety.sh
+# Format: path:pattern-label (bash =~ regex match against "<file>:<label>")
+# Comments start with #. Blank lines ignored.
+#
+# Example: allow matthewho@ in a single intentional file
+#   docs/about.md:personal-email
+
+# Fake xoxb-token used by Slack regression test to mock the `security` binary.
+tests/notify-slack-regression\.sh:slack-bot-token

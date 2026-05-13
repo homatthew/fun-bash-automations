@@ -4,6 +4,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="all"
 
+# Optional install log: when FBA_DEPLOY_LOG is set, every projection action is
+# appended there (used by dotfiles workspace installers to share a unified log).
+fba_log() {
+    local msg="$*"
+    if [[ -n "${FBA_DEPLOY_LOG:-}" ]]; then
+        printf '[%s] [fba-deploy] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$FBA_DEPLOY_LOG" || true
+    fi
+}
+
+# Resolve the Netflix email for OTEL_RESOURCE_ATTRIBUTES substitution.
+# Prefer explicit env, then git config, then empty (acceptable: workspace OTEL
+# endpoint is internal and the attribute is non-load-bearing if empty).
+resolve_user_netflix_email() {
+    if [[ -n "${USER_NETFLIX_EMAIL:-}" ]]; then
+        printf '%s\n' "$USER_NETFLIX_EMAIL"
+        return
+    fi
+    local email
+    email="$(git config --get user.email 2>/dev/null || true)"
+    if [[ "$email" == *"@netflix.com" ]]; then
+        printf '%s\n' "$email"
+        return
+    fi
+    printf '%s\n' ""
+}
+
 usage() {
     cat <<'EOF'
 Usage: fba-deploy [--claude-only | --codex-only | --shared-only]
@@ -144,7 +170,11 @@ deploy_claude() {
     project_shared "$HOME/.claude"
 
     if [[ -f "$ROOT/claude/settings.json" ]]; then
-        copy_path "$ROOT/claude/settings.json" "$HOME/.claude/settings.json"
+        local user_email
+        user_email="$(resolve_user_netflix_email)"
+        sed "s|__USER_NETFLIX_EMAIL__|${user_email}|g" "$ROOT/claude/settings.json" \
+            > "$HOME/.claude/settings.json"
+        fba_log "rendered claude/settings.json (email=${user_email:-<empty>})"
     fi
 
     if [[ -f "$ROOT/claude/statusline.sh" ]]; then
@@ -164,16 +194,16 @@ deploy_claude() {
         chmod +x "$HOME/.claude/hooks/$(basename "$hook")"
     done
 
-    # Placeholder app so terminal-notifier -sender resolves to a working bundle
-    # with Claude's icon. See bin/install-claude-notify-app for rationale.
-    if [[ -x "$ROOT/bin/install-claude-notify-app" ]]; then
-        "$ROOT/bin/install-claude-notify-app" || true
-    fi
-
-    # Forked VS Code extension that lets hook-fired banners focus the
-    # exact originating terminal. See bin/install-osc-notifier.
-    if [[ -x "$ROOT/bin/install-osc-notifier" ]]; then
-        "$ROOT/bin/install-osc-notifier" || true
+    # macOS-only extras: placeholder Claude Notify.app bundle and the forked
+    # VS Code OSC notifier extension. Skipped on Linux workspaces where they
+    # would error out, and skippable via FBA_DEPLOY_SKIP_MAC_EXTRAS=1.
+    if [[ "${FBA_DEPLOY_SKIP_MAC_EXTRAS:-0}" != "1" && "$(uname -s)" == "Darwin" ]]; then
+        if [[ -x "$ROOT/bin/install-claude-notify-app" ]]; then
+            "$ROOT/bin/install-claude-notify-app" || true
+        fi
+        if [[ -x "$ROOT/bin/install-osc-notifier" ]]; then
+            "$ROOT/bin/install-osc-notifier" || true
+        fi
     fi
 }
 
