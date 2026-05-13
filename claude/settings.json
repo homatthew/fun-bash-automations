@@ -24,7 +24,7 @@
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=matthewho@netflix.com,runtime_environment=local,wrapper.version=2603081044"
+    "OTEL_RESOURCE_ATTRIBUTES": "user.netflix_email=__USER_NETFLIX_EMAIL__,runtime_environment=local,wrapper.version=2603081044"
   },
   "fastMode": false,
   "hooks": {

@@ -3,6 +3,21 @@
 
 set -euo pipefail
 
+# On non-Darwin (Linux workspaces), short-circuit to the Slack-only hook.
+# This file uses terminal-notifier/alerter/osascript/open which don't exist
+# on Linux. dotfiles workspace installer overwrites ~/.claude/hooks/notify-slack.sh
+# (and codex equivalent) with a Linux Slack poster. If that file is absent
+# or non-executable, exit silently so settings.json/hooks.json references
+# don't spam errors on a workspace box.
+if [ "$(uname -s)" != "Darwin" ]; then
+  notify_slack="$(dirname "$0")/notify-slack.sh"
+  if [ -x "$notify_slack" ]; then
+    exec "$notify_slack"
+  fi
+  case "${RUNTIME:-$0}" in *codex*) printf '{}\n' ;; esac
+  exit 0
+fi
+
 INPUT=$(cat)
 
 emit_success() {
