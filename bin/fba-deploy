@@ -129,6 +129,41 @@ project_agent_bins() {
     fi
 }
 
+append_preserved_codex_config_sections() {
+    local existing_config="$1"
+    [[ -f "$existing_config" ]] || return 0
+
+    awk '
+        function is_preserved_header(line) {
+            return (line ~ /^\[hooks\.state(\.|])/ || line == "[tui.model_availability_nux]")
+        }
+        /^\[[^]]+\]$/ {
+            keep = is_preserved_header($0)
+        }
+        keep {
+            print
+            emitted = 1
+        }
+        END {
+            if (emitted) {
+                print ""
+            }
+        }
+    ' "$existing_config"
+}
+
+render_codex_config() {
+    local base_url="$1"
+    local target="$HOME/.codex/config.toml"
+    local tmp
+    tmp="$(mktemp "$HOME/.codex/config.toml.XXXXXX")"
+
+    sed "s|__CODEX_BASE_URL__|$base_url|g" "$ROOT/codex/config.toml" > "$tmp"
+    append_preserved_codex_config_sections "$target" >> "$tmp"
+    mv "$tmp" "$target"
+    chmod 600 "$target"
+}
+
 project_shared() {
     local home_dir="$1"
     mkdir -p "$home_dir/skills"
@@ -215,8 +250,7 @@ deploy_codex() {
     project_shared "$HOME/.codex"
 
     if [[ -f "$ROOT/codex/config.toml" ]]; then
-        sed "s|__CODEX_BASE_URL__|$base_url|g" "$ROOT/codex/config.toml" > "$HOME/.codex/config.toml"
-        chmod 600 "$HOME/.codex/config.toml"
+        render_codex_config "$base_url"
     fi
 
     if [[ -f "$ROOT/codex/auth.json" ]]; then
