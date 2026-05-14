@@ -3090,7 +3090,11 @@ stack_cmd_trunk_push_plan() {
     --argjson approved "$approval_allowed" \
     '[
       {id:"materialized", label:"Private trunk materialized", ok:$materialized},
-      {id:"prepared", label:"Prepare-trunk brief ready", ok:($prepare_state == "ready")},
+      {
+        id:"prepared",
+        label:(if $approved then "Prepare brief captured by approval" else "Prepare-trunk brief ready" end),
+        ok:($approved or $prepare_state == "ready")
+      },
       {id:"approved", label:"Trunk approval covers current materialization", ok:$approved}
     ]')
 

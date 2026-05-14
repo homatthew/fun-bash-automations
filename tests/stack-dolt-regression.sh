@@ -451,6 +451,7 @@ mkdir -p "$REPO"
   vscode_check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   [[ "$(jq -r '.allowed' <<<"$vscode_check_out")" == "true" ]] \
     || fail "expected VS Code-reviewed YAML approval to allow trunk: $vscode_check_out"
+  rm -f "$prepare_path"
   approved_trunk_list=$(bash "$STACK" trunk list --json --fast)
   [[ "$(jq -r '.stacks[0].workflow.current_step' <<<"$approved_trunk_list")" == "push" ]] \
     || fail "expected approved workflow to point at push even if prepare file is missing: $approved_trunk_list"
@@ -459,6 +460,10 @@ mkdir -p "$REPO"
   push_plan_ready=$(bash "$STACK" trunk push-plan --stack demo --json)
   [[ "$(jq -r '.state' <<<"$push_plan_ready")" == "ready_to_push" ]] \
     || fail "expected push-plan to be ready after approval: $push_plan_ready"
+  [[ "$(jq -r '.checklist[] | select(.id == "prepared") | .ok' <<<"$push_plan_ready")" == "true" ]] \
+    || fail "expected approved push-plan to satisfy prepare checklist even if prepare file is missing: $push_plan_ready"
+  [[ "$(jq -r '.checklist[] | select(.id == "prepared") | .label' <<<"$push_plan_ready")" == "Prepare brief captured by approval" ]] \
+    || fail "expected approved push-plan prepare checklist label to explain approval coverage: $push_plan_ready"
   [[ "$(jq -r '.checklist[] | select(.id == "approved") | .ok' <<<"$push_plan_ready")" == "true" ]] \
     || fail "expected push-plan approval checklist to pass: $push_plan_ready"
   [[ "$(jq -r '.push_units[] | select(.id == "api") | .action' <<<"$push_plan_ready")" == "ready_to_push" ]] \
