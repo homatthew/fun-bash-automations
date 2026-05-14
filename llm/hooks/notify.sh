@@ -1,20 +1,35 @@
 #!/bin/bash
-# Claude/Codex macOS notification hook.
+# Claude/Codex notification hook.
 
 set -euo pipefail
 
-# On non-Darwin (Linux workspaces), short-circuit to the Slack-only hook.
-# This file uses terminal-notifier/alerter/osascript/open which don't exist
-# on Linux. dotfiles workspace installer overwrites ~/.claude/hooks/notify-slack.sh
-# (and codex equivalent) with a Linux Slack poster. If that file is absent
-# or non-executable, exit silently so settings.json/hooks.json references
-# don't spam errors on a workspace box.
+notification_context_allowed() {
+  case "${TERM_PROGRAM:-}" in
+    vscode|ghostty) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+emit_early_success() {
+  case "${NOTIFY_RUNTIME:-${RUNTIME:-$0}}" in *codex*) printf '{}\n' ;; esac
+}
+
+if ! notification_context_allowed; then
+  emit_early_success
+  exit 0
+fi
+
+# On non-Darwin (Linux workspaces), short-circuit to the Slack-only hook, but
+# only in explicitly supported terminal contexts above. dotfiles workspace
+# installer overwrites ~/.claude/hooks/notify-slack.sh (and Codex equivalent)
+# with a Linux Slack poster. If that file is absent or non-executable, exit
+# silently so settings.json/hooks.json references don't spam errors.
 if [ "$(uname -s)" != "Darwin" ]; then
   notify_slack="$(dirname "$0")/notify-slack.sh"
   if [ -x "$notify_slack" ]; then
     exec "$notify_slack"
   fi
-  case "${RUNTIME:-$0}" in *codex*) printf '{}\n' ;; esac
+  emit_early_success
   exit 0
 fi
 
@@ -605,11 +620,7 @@ dispatch_input_summary() {
 pick_backend() {
   [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && { printf 'suppressed'; return; }
   [ "${TERM_PROGRAM:-}" = "ghostty" ] && can_use_tty_backend && { printf 'ghostty'; return; }
-  if command -v alerter >/dev/null 2>&1; then
-    [ "${TERM_PROGRAM:-}" = "vscode" ] && { printf 'vscode'; return; }
-    printf 'alerter'
-    return
-  fi
+  [ "${TERM_PROGRAM:-}" = "vscode" ] && { printf 'vscode'; return; }
   printf 'suppressed'
 }
 
@@ -968,13 +979,11 @@ nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subt
 case "$_chosen_backend" in
   ghostty)
     if ! backend_ghostty "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$SOUND"; then
-      nlog "ghostty failed; falling back to alerter"
-      _chosen_backend="alerter"
-      backend_alerter "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK"
+      nlog "ghostty failed; suppressed by backend allowlist"
+      _chosen_backend="suppressed"
     fi
     ;;
   vscode)            backend_vscode            "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
-  alerter)           backend_alerter           "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "$SENDER_BUNDLE" "$OPEN_URL" "$ALERT_STYLE" "$ACTION_LABEL" "$SOUND" "$STATE_FILE" "$CURRENT_STATE_ID" "$STICKY_AFTER_CLICK" ;;
   suppressed)        nlog "suppressed: no banner sent" ;;
 esac
 
