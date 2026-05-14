@@ -135,6 +135,16 @@ else
   fail "skills missing: ${missing_skills[*]}"
 fi
 
+echo "-- CLI wrappers --"
+assert_executable "$ROOT/bin/stack" "bin/stack executable"
+assert_executable "$ROOT/bin/pg" "bin/pg executable"
+assert_executable "$ROOT/bin/push-gate" "bin/push-gate executable"
+if PATH="$ROOT/bin:/usr/bin:/bin" pg --help >/dev/null 2>&1; then
+  pass "pg works without shell aliases"
+else
+  fail "pg works without shell aliases"
+fi
+
 # Email substitution
 echo "-- settings.json templating --"
 assert_not_contains_file "$TMP_HOME/.claude/settings.json" "__USER_NETFLIX_EMAIL__" \
