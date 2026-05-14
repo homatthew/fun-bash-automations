@@ -355,6 +355,8 @@ alias stack-latest="$HOME/.local/bin/agent-stack-refresh"
 # push-gate: Manage durable push leases for agent pushes.
 # Generates approval drafts, stamps leases, and wraps agent pushes with
 # required self-assertions.
+# A real `pg` executable also lives in ~/repos/fun-bash-automations/bin so
+# non-interactive remote shells do not depend on this zsh function.
 push-gate() {
     local helper="$HOME/repos/fun-bash-automations/llm/hooks/push-gate.sh"
     if [ ! -x "$helper" ]; then
