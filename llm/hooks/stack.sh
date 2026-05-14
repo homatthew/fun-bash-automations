@@ -42,7 +42,7 @@ stack_warn() {
 stack_dolt_required_message() {
   cat <<'EOF'
 Dolt is required for stack trunk store commands.
-Install: brew install dolt
+Install: rerun dotfiles installers, or run: brew install dolt
 Verify: dolt version
 Store: ~/.push-gate/dolt-store by default; set PG_STORE_DIR to override.
 EOF
@@ -4216,7 +4216,7 @@ Commands:
     replaying item branches in manifest order, then atomically moves the trunk
     ref and each item branch pointer to the corresponding trunk commit. If the
     checked-out branch moves, the worktree is refreshed to the new HEAD.
-    Dolt is required for --stack: brew install dolt && dolt version.
+    Dolt is required for --stack: rerun dotfiles installers, or run brew install dolt; verify with dolt version.
 
   trunk status --manifest PATH [--json] [--base REF] [--prefix PREFIX]
   trunk materialize --manifest PATH [--dry-run] [--keep-scratch]

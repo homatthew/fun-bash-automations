@@ -38,9 +38,10 @@ push-gate's Dolt store at `~/.push-gate/dolt-store` by default, not a repo
 hard-points each branch to its corresponding commit on the trunk, and records
 the materialization back to Dolt.
 
-Dolt must be on PATH for `--stack` trunk commands. Install it with
-`brew install dolt`, verify with `dolt version`, and set `PG_STORE_DIR` only if
-the default store location should be overridden.
+Dolt must be on PATH for `--stack` trunk commands. Dotfiles installs it during
+workspace utility bootstrap; otherwise install it with `brew install dolt`,
+verify with `dolt version`, and set `PG_STORE_DIR` only if the default store
+location should be overridden.
 
 Private trunk refs must be private branches such as
 `mho/trunk/scm-cassandra-dev`; protected refs like `main`, `origin/main`, and
