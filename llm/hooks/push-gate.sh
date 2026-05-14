@@ -347,7 +347,7 @@ pg_dolt_author_email() {
 pg_dolt_required_message() {
   cat <<'EOF'
 dolt is required for stack-trunk workflows.
-Install: brew install dolt
+Install: rerun dotfiles installers, or run: brew install dolt
 Verify: dolt version
 Store: ~/.push-gate/dolt-store by default; set PG_STORE_DIR to override.
 EOF
@@ -5178,7 +5178,7 @@ Stack trunks:
                          Push one approved item ref, or the approved private
                          trunk ref at trunk_tip.
   Dolt is required for trunk manifests/leases:
-                         brew install dolt && dolt version
+                         rerun dotfiles installers, or run brew install dolt && dolt version
                          Store defaults to ~/.push-gate/dolt-store; PG_STORE_DIR overrides it.
 
 Internal plumbing (called by pg/stack themselves; not primary user workflow):

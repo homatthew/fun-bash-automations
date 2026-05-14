@@ -73,7 +73,7 @@ Current rules:
   - Use the stack skill before stack commands.
   - Use the push-gate skill before pg / push-gate commands.
   - Dolt is required for stack trunk commands:
-      install: brew install dolt
+      install: rerun dotfiles installers, or run brew install dolt
       verify: dolt version
       store: ~/.push-gate/dolt-store by default; PG_STORE_DIR overrides it.
   - Stack manifests are Dolt-backed through push-gate, not repo .stack JSON.

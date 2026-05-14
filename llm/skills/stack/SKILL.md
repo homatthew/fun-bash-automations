@@ -199,9 +199,9 @@ units, remote relationship, approval coverage, and exact repo-pinned commands.
 If the checked-out branch is one of the refs moved by materialization, `stack`
 refreshes the worktree to the new branch tip so the checkout does not appear
 dirty with inverse changes from the old tip. Dolt must be on PATH for
-`--stack` commands; install with `brew install dolt`, verify with `dolt version`,
-and use `PG_STORE_DIR` only when the default `~/.push-gate/dolt-store` should be
-overridden.
+`--stack` commands. Dotfiles installs it during workspace utility bootstrap;
+otherwise install with `brew install dolt`, verify with `dolt version`, and use
+`PG_STORE_DIR` only when the default `~/.push-gate/dolt-store` should be overridden.
 After the human approves the materialized trunk with `pg trunk --stack <name>`,
 `stack trunk push --stack <name>` walks the approved item commits and invokes
 `pg push --trunk-stack` for each branch. If the trunk lease is missing or stale,
