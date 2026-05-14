@@ -67,6 +67,16 @@ run_deploy() {
 
 # --- Phase 1: full projection ---
 echo "== Phase 1: fba-deploy (full) =="
+mkdir -p "$TMP_HOME/.codex"
+cat > "$TMP_HOME/.codex/config.toml" <<'EOF'
+[hooks.state]
+
+[hooks.state."sentinel-hook"]
+trusted_hash = "sha256:sentinel"
+
+[tui.model_availability_nux]
+"gpt-5.5" = 2
+EOF
 run_deploy
 
 # Hooks referenced by claude/settings.json must exist
@@ -133,6 +143,26 @@ if grep -Fq "user.netflix_email=ci-bot@netflix.com" "$TMP_HOME/.claude/settings.
   pass "email substitution applied"
 else
   fail "email substitution applied"
+fi
+
+echo "-- codex feature flags --"
+assert_not_contains_file "$TMP_HOME/.codex/config.toml" "codex_hooks" \
+  "deprecated codex_hooks flag absent"
+if grep -Eq '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex hooks feature enabled"
+else
+  fail "codex hooks feature enabled"
+fi
+if grep -Fq '[hooks.state."sentinel-hook"]' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'trusted_hash = "sha256:sentinel"' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex hook trust state preserved"
+else
+  fail "codex hook trust state preserved"
+fi
+if grep -Fq "[tui.model_availability_nux]" "$TMP_HOME/.codex/config.toml"; then
+  pass "codex model availability state preserved"
+else
+  fail "codex model availability state preserved"
 fi
 
 # --- Phase 2: Linux notify.sh smoke ---
