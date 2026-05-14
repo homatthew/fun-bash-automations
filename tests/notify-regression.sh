@@ -85,7 +85,7 @@ run_notify() {
     NOTIFY_MACOS_DRY_RUN=1 \
     NOTIFY_SUPPRESS_CODEX_GUI=0 \
     NOTIFY_LOG="$LOG" \
-    TERM_PROGRAM=not-vscode \
+    TERM_PROGRAM=vscode \
     bash "$HOOK" <<<"$payload" 2>&1
 }
 
@@ -142,6 +142,17 @@ assert_contains "$out" "sound=<none>"
 assert_equals "$codex_running_group" "codex-$REPO_NAME-$DEFAULT_SESSION" "Codex running macOS group"
 assert_file_equals "$CODEX_STATE" "notify-running"
 echo "ok 1 - Codex UserPromptSubmit renders running"
+
+payload="$(jq -n --arg cwd "$WORKSPACE" '{
+  hook_event_name: "Stop",
+  turn_id: "notify-suppressed",
+  cwd: $cwd,
+  last_assistant_message: "This should not render outside allowlisted terminals."
+}')"
+out="$(run_notify_session codex not-vscode notify-suppressed "$payload")"
+assert_equals "$out" "{}" "non-allowlisted Codex output"
+assert_file_missing "$(state_path codex notify-suppressed)"
+echo "ok 1a - non-VS Code/Ghostty contexts suppress notifications"
 
 payload="$(jq -n --arg cwd "$WORKSPACE" '{
   hook_event_name: "Stop",
@@ -299,14 +310,14 @@ payload="$(jq -n --arg cwd "$WORKSPACE" '{
   cwd: $cwd,
   prompt: "Session A should stay isolated"
 }')"
-codex_a_group="$(run_notify_session codex not-vscode notify-codex-a "$payload" | notification_group)"
+codex_a_group="$(run_notify_session codex vscode notify-codex-a "$payload" | notification_group)"
 payload="$(jq -n --arg cwd "$WORKSPACE" '{
   hook_event_name: "UserPromptSubmit",
   turn_id: "codex-b-running",
   cwd: $cwd,
   prompt: "Session B should stay isolated"
 }')"
-codex_b_group="$(run_notify_session codex not-vscode notify-codex-b "$payload" | notification_group)"
+codex_b_group="$(run_notify_session codex vscode notify-codex-b "$payload" | notification_group)"
 assert_not_equals "$codex_a_group" "$codex_b_group" "Codex macOS groups"
 assert_file_equals "$codex_a_state" "codex-a-running"
 assert_file_equals "$codex_b_state" "codex-b-running"
@@ -316,7 +327,7 @@ payload="$(jq -n --arg cwd "$WORKSPACE" '{
   cwd: $cwd,
   last_assistant_message: "Finished session A."
 }')"
-run_notify_session codex not-vscode notify-codex-a "$payload" >/dev/null
+run_notify_session codex vscode notify-codex-a "$payload" >/dev/null
 assert_file_equals "$codex_a_state" "final:codex-a-done"
 assert_file_equals "$codex_b_state" "codex-b-running"
 echo "ok 9 - Codex sessions keep independent notification state"
@@ -331,7 +342,7 @@ payload="$(jq -n --arg cwd "$WORKSPACE" --arg transcript "$TRANSCRIPT" '{
   title: "Needs input",
   message: "Claude needs your attention"
 }')"
-claude_a_group="$(run_notify_session claude not-vscode notify-claude-a "$payload" | notification_group)"
+claude_a_group="$(run_notify_session claude vscode notify-claude-a "$payload" | notification_group)"
 payload="$(jq -n --arg cwd "$WORKSPACE" --arg transcript "$TRANSCRIPT" '{
   hook_event_name: "Notification",
   session_id: "claude-b-input",
@@ -340,7 +351,7 @@ payload="$(jq -n --arg cwd "$WORKSPACE" --arg transcript "$TRANSCRIPT" '{
   title: "Needs input",
   message: "Claude needs your attention"
 }')"
-claude_b_group="$(run_notify_session claude not-vscode notify-claude-b "$payload" | notification_group)"
+claude_b_group="$(run_notify_session claude vscode notify-claude-b "$payload" | notification_group)"
 assert_not_equals "$claude_a_group" "$claude_b_group" "Claude macOS groups"
 assert_file_equals "$claude_a_state" "input:claude-a-input"
 assert_file_equals "$claude_b_state" "input:claude-b-input"
@@ -350,7 +361,7 @@ payload="$(jq -n --arg cwd "$WORKSPACE" '{
   cwd: $cwd,
   last_assistant_message: "Finished session A."
 }')"
-run_notify_session claude not-vscode notify-claude-a "$payload" >/dev/null
+run_notify_session claude vscode notify-claude-a "$payload" >/dev/null
 assert_file_equals "$claude_a_state" "final:claude-a-done"
 assert_file_equals "$claude_b_state" "input:claude-b-input"
 echo "ok 10 - Claude sessions keep independent notification state"

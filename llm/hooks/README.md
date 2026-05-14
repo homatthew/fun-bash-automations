@@ -44,7 +44,6 @@ pick_backend()
   Codex GUI without tty       → suppressed
   TERM_PROGRAM=ghostty + tty  → ghostty   (native OSC 9)
   TERM_PROGRAM=vscode         → vscode    (PID scrape + alerter)
-  alerter in $PATH            → alerter
   else                        → suppressed
 ```
 
@@ -52,10 +51,14 @@ pick_backend()
 |---|---|---|
 | `backend_ghostty` | `(title, subtitle, message, sound)` | Emits Ghostty's native `OSC 9` desktop notification to `/dev/tty`, plus a terminal bell for audible final/input states. It does not build or open a VS Code URI. Async AI summary re-posts are skipped because detached launchd helpers do not reliably keep the originating TTY. |
 | `backend_vscode` | `(title, subtitle, message, group, sender, style, action_label, sound)` | Rings the terminal bell for audible notifications, captures ancestor PIDs, then calls `backend_alerter` with a URL pointing at the forked extension's URI handler. |
-| `backend_alerter` | `(title, subtitle, message, group, sender, open_url, style, action_label, sound)` | Dispatches `notify-dispatch.sh` via launchd; the detached helper uses `alerter --json`, then opens `open_url` on `contentsClicked` / `actionClicked`. |
+| `backend_alerter` | `(title, subtitle, message, group, sender, open_url, style, action_label, sound)` | VS Code helper backend only. Dispatches `notify-dispatch.sh` via launchd; the detached helper uses `alerter --json`, then opens `open_url` on `contentsClicked` / `actionClicked`. |
 | `backend_suppressed` | – | no-op |
 
-`notify-slack.sh` predates the launchd-detached helper and may lag this shape. Do not copy behavior from it back into `notify.sh` without rechecking this section.
+Notification delivery is allowlist-only: outside `TERM_PROGRAM=vscode` or
+`TERM_PROGRAM=ghostty`, the hook exits successfully without updating state,
+posting Slack, or invoking macOS notification binaries. `notify-slack.sh`
+predates the launchd-detached helper and may lag this shape. Do not copy
+behavior from it back into `notify.sh` without rechecking this section.
 
 Codex Desktop/App-originated turns already have native Codex app
 notifications. When a hook invocation is identifiable as Codex GUI without a

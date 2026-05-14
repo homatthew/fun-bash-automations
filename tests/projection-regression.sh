@@ -205,6 +205,7 @@ done
 
 linux_output=$(
   PATH="$LINUX_TMP/bin:/usr/bin:/bin" \
+    TERM_PROGRAM=vscode \
     bash "$LINUX_TMP/.claude/hooks/notify.sh" \
     <<<'{"hook_event_name":"Stop","stop_hook_active":false,"cwd":"/tmp","transcript_path":"/dev/null"}' \
     2>&1
@@ -228,10 +229,25 @@ else
   pass "no macOS binaries invoked on Linux"
 fi
 
+blocked_output=$(
+  PATH="$LINUX_TMP/bin:/usr/bin:/bin" \
+    TERM_PROGRAM=not-vscode \
+    bash "$LINUX_TMP/.claude/hooks/notify.sh" \
+    <<<'{"hook_event_name":"Stop","stop_hook_active":false,"cwd":"/tmp","transcript_path":"/dev/null"}' \
+    2>&1
+) && rc=0 || rc=$?
+
+if [[ "$rc" -eq 0 && "$blocked_output" != *"SLACK_FIRED"* && "$blocked_output" != *"FATAL:"* ]]; then
+  pass "Linux notify.sh suppresses outside allowlisted terminals"
+else
+  fail "Linux notify.sh suppresses outside allowlisted terminals (rc=$rc, output=$blocked_output)"
+fi
+
 # Also: silent no-op when notify-slack.sh is missing
 rm -f "$LINUX_TMP/.claude/hooks/notify-slack.sh"
 silent_output=$(
   PATH="$LINUX_TMP/bin:/usr/bin:/bin" \
+    TERM_PROGRAM=vscode \
     bash "$LINUX_TMP/.claude/hooks/notify.sh" \
     <<<'{"hook_event_name":"Stop","stop_hook_active":false,"cwd":"/tmp","transcript_path":"/dev/null"}' \
     2>&1
