@@ -111,7 +111,7 @@ run_codex_summary() {
   NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
     -m gpt-5-nano \
     -C "$CWD" \
-    -c features.codex_hooks=false \
+    --disable hooks \
     -c model_reasoning_effort='"low"' \
     --output-last-message "$tmp" \
     "Generate concise macOS notification text for a completed agent task.
