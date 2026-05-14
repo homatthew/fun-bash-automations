@@ -14,7 +14,8 @@ push-gate, and Gitless. The ownership boundary is:
 | --- | --- | --- | --- | --- |
 | Select | `stack -C <repo> trunk list --json` | stack | Canonical UI contract | Lists Dolt-backed materialized stacks only; no loose-branch inference. |
 | Materialize | `stack -C <repo> trunk materialize --stack <name>` | stack | Canonical action | Writes materialization records to the Dolt store. |
-| Prepare | `pg -C <repo> prepare-trunk --stack <name> ...` | pg | Agent action | Creates the reviewed prepare brief; agents must run this before asking for approval. |
+| Prepare context | `stack -C <repo> trunk context --stack <name> --json` / `stack -C <repo> trunk context write --stack <name> --file context.yaml` | stack | Canonical UI contract/action | Reads/writes durable handoff context for the exact materialization. |
+| Prepare | `pg -C <repo> prepare-trunk --stack <name> --from-context` | pg | Agent action | Creates the reviewed prepare brief from durable context; agents must run this before asking for approval. |
 | Prepare status | `pg -C <repo> prepare-trunk status --stack <name> --json` | pg | Canonical UI contract | Reports `missing`, `ready`, or detectable `stale` state plus next commands. |
 | Review payload | `stack -C <repo> trunk review --stack <name> --json` | stack | Canonical UI contract | Full-stack, item-only, and cumulative diff payload. Gitless must not recompute this. |
 | Draft review | `pg -C <repo> trunk-draft --stack <name> --format yaml` | pg | UI support contract | Produces the same approval draft without opening a terminal editor. |
@@ -31,6 +32,7 @@ push-gate, and Gitless. The ownership boundary is:
 | `stack checkout --pr <N>` | stack | Advanced workflow | CLI-only helper for branch editing. |
 | `stack sync`, `stack insert`, `stack squash` | stack | Advanced workflow | CLI-only stack maintenance. |
 | `stack trunk init/add/move/remove/status` | stack | Advanced stack authoring | Visible in CLI/docs; Gitless can show copyable commands but should not make these primary review buttons. |
+| `pg prepare-trunk --what ... --item-briefs FILE` | pg | Compatibility/manual prepare | Prefer durable `stack trunk context write` plus `pg prepare-trunk --from-context` in new Stack Review UX. |
 | `stack trunk push --tip` | stack | Advanced validation | Use for composed-stack CI validation before item pushes. |
 | `stack trunk --manifest <path>` forms | stack | Compatibility/import | Prefer Dolt-backed `--stack <name>` in all new UX. |
 | `pg check`, `pg check-trunk`, `pg leases --json`, `pg show`, `pg revoke`, `pg revoke-trunk` | pg | Advanced diagnostics | Keep out of primary Gitless workflow; can appear in troubleshooting/copy-command sections. |

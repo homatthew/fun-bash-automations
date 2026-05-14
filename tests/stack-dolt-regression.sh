@@ -113,13 +113,20 @@ mkdir -p "$REPO"
   git checkout main >/dev/null 2>&1
 
   trunk_list=$(bash "$STACK" trunk list --json)
+  fast_trunk_list=$(bash "$STACK" trunk list --json --fast)
   repo_physical=$(pwd -P)
   [[ "$(jq -r '.repo' <<<"$trunk_list")" == "$repo_physical" ]] \
     || fail "expected trunk list repo to be current repo: $trunk_list"
+  [[ "$(jq -r '.repo' <<<"$fast_trunk_list")" == "$repo_physical" ]] \
+    || fail "expected fast trunk list repo to be current repo: $fast_trunk_list"
   [[ "$(jq -r '.stacks | length' <<<"$trunk_list")" == "1" ]] \
     || fail "expected one Dolt-backed stack in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks | length' <<<"$fast_trunk_list")" == "1" ]] \
+    || fail "expected one Dolt-backed stack in fast trunk list: $fast_trunk_list"
   [[ "$(jq -r '.stacks[0].name' <<<"$trunk_list")" == "demo" ]] \
     || fail "expected demo stack in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks[0].name' <<<"$fast_trunk_list")" == "demo" ]] \
+    || fail "expected demo stack in fast trunk list: $fast_trunk_list"
   [[ "$(jq -r '.stacks[0].alignment_state' <<<"$trunk_list")" == "up_to_date" ]] \
     || fail "expected materialized stack to be up to date: $trunk_list"
   [[ "$(jq -r '.stacks[0].materialization.manifest_hash | length > 0' <<<"$trunk_list")" == "true" ]] \
@@ -128,6 +135,8 @@ mkdir -p "$REPO"
     || fail "expected trunk list to include backing store repo path: $trunk_list"
   [[ "$(jq -r '.stacks[0].approval.state' <<<"$trunk_list")" == "needs_prepare" ]] \
     || fail "expected missing trunk prepare to be explicit: $trunk_list"
+  [[ "$(jq -r '.stacks[0].approval.state' <<<"$fast_trunk_list")" == "needs_prepare" ]] \
+    || fail "expected fast trunk list to preserve approval state: $fast_trunk_list"
   [[ "$(jq -r '.stacks[0].approval.prepare_state' <<<"$trunk_list")" == "missing" ]] \
     || fail "expected missing trunk prepare state: $trunk_list"
   expect_contains "$(jq -r '.stacks[0].approval.next_action.command' <<<"$trunk_list")" "pg -C $repo_physical prepare-trunk --stack demo"
@@ -140,6 +149,8 @@ mkdir -p "$REPO"
   expect_contains "$(jq -r '.stacks[0].commands.materialize' <<<"$trunk_list")" "stack -C $repo_physical trunk materialize --stack"
   [[ "$(jq -r '.stacks[0].items | map(.id) | join(",")' <<<"$trunk_list")" == "base,api" ]] \
     || fail "expected manifest order in trunk list: $trunk_list"
+  [[ "$(jq -r '.stacks[0].items | map(.id) | join(",")' <<<"$fast_trunk_list")" == "base,api" ]] \
+    || fail "expected manifest order in fast trunk list: $fast_trunk_list"
   [[ "$(jq -r '[.stacks[].items[].branch] | index("mho/loose") == null' <<<"$trunk_list")" == "true" ]] \
     || fail "expected trunk list to omit loose inferred branches: $trunk_list"
   [[ "$(jq -r '.stacks[0].items[0].remote_state' <<<"$trunk_list")" == "not_pushed" ]] \
@@ -178,6 +189,106 @@ mkdir -p "$REPO"
   [[ "$(jq -r '.push_units[0].approval_covered' <<<"$push_plan_needs_approval")" == "false" ]] \
     || fail "expected push-plan units to report missing approval coverage: $push_plan_needs_approval"
   expect_contains "$(jq -r '.push_units[0].command' <<<"$push_plan_needs_approval")" "pg -C $repo_physical push --trunk-stack demo"
+
+  context_initial=$(bash "$STACK" trunk context --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected stack context JSON stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.materialization.materialization_id | length > 0' <<<"$context_initial")" == "true" ]] \
+    || fail "expected stack context to include current materialization: $context_initial"
+  [[ "$(jq -r '.completeness.complete' <<<"$context_initial")" == "false" ]] \
+    || fail "expected missing context to be incomplete: $context_initial"
+  expect_contains "$(jq -r '.completeness.missing | join(",")' <<<"$context_initial")" "brief.what"
+  expect_contains "$(jq -r '.completeness.missing | join(",")' <<<"$context_initial")" "item_briefs[base].what"
+  expect_contains "$(jq -r '.commands.prepare_from_context' <<<"$context_initial")" "prepare-trunk --stack 'demo' --from-context"
+  expect_contains "$(jq -r '.generated_hints.files[] | select(.path == "base.txt") | .path' <<<"$context_initial")" "base.txt"
+
+  partial_context="$TEST_TMP/partial-context.json"
+  jq -n '{
+    brief:{what:"Partial context"},
+    item_briefs:[
+      {id:"base", what:"Base only", why:"Partial", approach:"Partial"}
+    ],
+    source:{kind:"agent", tool:"stack-dolt-regression"}
+  }' >"$partial_context"
+  partial_write=$(bash "$STACK" trunk context write --stack demo --file "$partial_context" 2>&1)
+  expect_contains "$partial_write" "Prepare context stored: demo"
+  expect_contains "$partial_write" "Missing:"
+  partial_context_status=$(bash "$STACK" trunk context --stack demo --json)
+  [[ "$(jq -r '.context.brief.what' <<<"$partial_context_status")" == "Partial context" ]] \
+    || fail "expected partial context to round-trip: $partial_context_status"
+  [[ "$(jq -r '.completeness.complete' <<<"$partial_context_status")" == "false" ]] \
+    || fail "expected partial context to remain incomplete: $partial_context_status"
+  set +e
+  partial_prepare=$(bash "$PG" prepare-trunk --stack demo --from-context 2>&1)
+  partial_prepare_rc=$?
+  set -e
+  [[ "$partial_prepare_rc" != "0" ]] || fail "expected from-context prepare to reject partial context"
+  expect_contains "$partial_prepare" "prepare context incomplete"
+  expect_contains "$partial_prepare" "brief.why"
+
+  complete_context="$TEST_TMP/complete-context.json"
+  jq -n '{
+    brief:{
+      what:"ship demo stack from durable context",
+      why:"verify shared prepare context storage",
+      approach:"write context once and prepare from it"
+    },
+    item_briefs:[
+      {
+        id:"base",
+        summary:["Add the base stack item from context."],
+        motivation:["Provide the first durable context review unit."],
+        approach:["Commit base.txt as the item patch from context."],
+        testing:["stack-dolt regression"]
+      },
+      {
+        id:"api",
+        summary:["Add the API stack item from context."],
+        motivation:["Verify child item context handoff."],
+        approach:["Commit api.txt after the base item from context."],
+        testing:["stack-dolt regression"]
+      }
+    ],
+    references:{beads:["dump-ztf"], sessions:["test-session"], files:["base.txt","api.txt"], commands:["tests/stack-dolt-regression.sh"]},
+    source:{kind:"agent", tool:"stack-dolt-regression"}
+  }' >"$complete_context"
+  complete_write=$(bash "$STACK" trunk context write --stack demo --file "$complete_context" 2>&1)
+  expect_contains "$complete_write" "Prepare context stored: demo"
+  complete_context_status=$(bash "$STACK" trunk context --stack demo --json)
+  [[ "$(jq -r '.completeness.complete' <<<"$complete_context_status")" == "true" ]] \
+    || fail "expected complete context: $complete_context_status"
+  [[ "$(jq -r '.current_context.source.kind' <<<"$complete_context_status")" == "agent" ]] \
+    || fail "expected context source to round-trip: $complete_context_status"
+  context_prepare_out=$(bash "$PG" prepare-trunk --stack demo --from-context 2>&1)
+  expect_contains "$context_prepare_out" "Prepared trunk brief written"
+  context_review_payload=$(bash "$STACK" trunk review --stack demo --json)
+  expect_contains "$(jq -r '.items[] | select(.id == "api") | .item_brief.why[0]' <<<"$context_review_payload")" "Verify child item context handoff."
+
+  fake_materialization=$(jq '.materialization_id = (.materialization_id + "-new")' <<<"$(jq -c '.materialization' <<<"$complete_context_status")")
+  fake_materialize_out=$(bash "$PG" stack-store-record-materialization --stack demo --json "$fake_materialization" 2>&1)
+  expect_contains "$fake_materialize_out" "Materialization stored: demo"
+  stale_context_status=$(bash "$STACK" trunk context --stack demo --json)
+  [[ "$(jq -r '.context == null' <<<"$stale_context_status")" == "true" ]] \
+    || fail "expected current context to be empty after rematerialization: $stale_context_status"
+  [[ "$(jq -r '.stale_contexts | length > 0' <<<"$stale_context_status")" == "true" ]] \
+    || fail "expected stale prior context after rematerialization: $stale_context_status"
+  expect_contains "$(jq -r '.stale_contexts[0].stale_reason' <<<"$stale_context_status")" "materialization differs"
+
+  mismatched_context="$TEST_TMP/mismatched-context.json"
+  jq -n '{
+    brief:{what:"mismatch", why:"mismatch", approach:"mismatch"},
+    item_briefs:[
+      {id:"base", what:"Base", why:"Base", approach:"Base"}
+    ],
+    source:{kind:"agent", tool:"stack-dolt-regression"}
+  }' >"$mismatched_context"
+  mismatch_write=$(bash "$STACK" trunk context write --stack demo --file "$mismatched_context" 2>&1)
+  expect_contains "$mismatch_write" "Prepare context stored: demo"
+  set +e
+  mismatch_prepare=$(bash "$PG" prepare-trunk --stack demo --from-context 2>&1)
+  mismatch_prepare_rc=$?
+  set -e
+  [[ "$mismatch_prepare_rc" != "0" ]] || fail "expected item id mismatch prepare to fail"
+  expect_contains "$mismatch_prepare" "item_briefs[api].what"
 
   item_briefs="$TEST_TMP/item-briefs.json"
   jq -n '[
@@ -340,6 +451,11 @@ mkdir -p "$REPO"
   vscode_check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   [[ "$(jq -r '.allowed' <<<"$vscode_check_out")" == "true" ]] \
     || fail "expected VS Code-reviewed YAML approval to allow trunk: $vscode_check_out"
+  approved_trunk_list=$(bash "$STACK" trunk list --json --fast)
+  [[ "$(jq -r '.stacks[0].workflow.current_step' <<<"$approved_trunk_list")" == "push" ]] \
+    || fail "expected approved workflow to point at push even if prepare file is missing: $approved_trunk_list"
+  [[ "$(jq -r '.stacks[0].workflow.steps[] | select(.id == "prepare") | .state' <<<"$approved_trunk_list")" == "complete" ]] \
+    || fail "expected approved workflow to mark prepare complete: $approved_trunk_list"
   push_plan_ready=$(bash "$STACK" trunk push-plan --stack demo --json)
   [[ "$(jq -r '.state' <<<"$push_plan_ready")" == "ready_to_push" ]] \
     || fail "expected push-plan to be ready after approval: $push_plan_ready"
@@ -396,7 +512,7 @@ WHERE repo_key = $(sql_quote "$repo_key") AND stack_name = 'demo';
     || fail "failed trunk push consumed async budget: $trunk_used_pushes output: $failed_trunk_push"
 
   materializations=$(cd "$PG_STORE_DIR" && dolt sql -r csv -q "SELECT COUNT(*) FROM trunk_materializations;" | tail -n +2)
-  [[ "$materializations" == "1" ]] || fail "expected one trunk materialization row, got $materializations"
+  [[ "$materializations" -ge "2" ]] || fail "expected context stale test to record at least two trunk materializations, got $materializations"
 )
 
 echo "ok 1 - real Dolt stack store supports init add status materialize and check-trunk"

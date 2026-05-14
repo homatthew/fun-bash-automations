@@ -1922,6 +1922,24 @@ ${detail}"
   printf '%s\n' "$list_json"
 }
 
+stack_run_pg_store_command_output() {
+  local helper="$1"
+  shift
+  local err output detail
+  err=$(mktemp "${TMPDIR:-/tmp}/stack-pg.XXXXXX")
+  if ! output=$(bash "$helper" "$@" 2>"$err"); then
+    detail=$(cat "$err")
+    rm -f "$err"
+    if stack_is_dolt_missing_output "$detail"; then
+      stack_fail "$(stack_dolt_required_message)"
+    fi
+    stack_fail "push-gate stack store command failed: $*
+${detail}"
+  fi
+  rm -f "$err"
+  printf '%s\n' "$output"
+}
+
 stack_trunk_approval_json() {
   local check="$1" prepare="${2:-}" allowed reason state async prepare_state prepare_path prepared_at commands
   local next_actor="" next_label="" next_command="" next_reason=""
@@ -2153,7 +2171,10 @@ stack_trunk_workflow_commands_json() {
     --arg pg_prefix "$pg_prefix" \
     '{
       materialize:($stack_prefix + " trunk materialize --stack " + ($stack | @sh)),
-      prepare:($pg_prefix + " prepare-trunk --stack " + ($stack | @sh) + " --what <what> --why <why> --approach <approach>"),
+      prepare:($pg_prefix + " prepare-trunk --stack " + ($stack | @sh) + " --from-context"),
+      prepare_direct:($pg_prefix + " prepare-trunk --stack " + ($stack | @sh) + " --what <what> --why <why> --approach <approach>"),
+      context:($stack_prefix + " trunk context --stack " + ($stack | @sh) + " --json"),
+      write_context:($stack_prefix + " trunk context write --stack " + ($stack | @sh) + " --file <context.yaml>"),
       review:($pg_prefix + " trunk --stack " + ($stack | @sh)),
       draft:($pg_prefix + " trunk-draft --stack " + ($stack | @sh) + " --format yaml"),
       approve_saved_draft:($pg_prefix + " approve-trunk --draft <draft-file> --reviewed-in-vscode"),
@@ -2179,9 +2200,9 @@ stack_trunk_workflow_json() {
     '{
       current_step: (
         if ($materialized | not) then "materialize"
+        elif $approval_state == "approved" then "push"
         elif $prepare_state != "ready" then "prepare"
-        elif $approval_state != "approved" then "approve"
-        else "push"
+        else "approve"
         end
       ),
       steps: [
@@ -2198,7 +2219,7 @@ stack_trunk_workflow_json() {
           id:"prepare",
           label:"Prepare",
           actor:"agent",
-          state:(if $prepare_state == "ready" then "complete" elif $materialized then "current" else "blocked" end),
+          state:(if $approval_state == "approved" or $prepare_state == "ready" then "complete" elif $materialized then "current" else "blocked" end),
           command:$commands.prepare,
           writes_lease:false,
           pushes:false
@@ -2207,7 +2228,7 @@ stack_trunk_workflow_json() {
           id:"review",
           label:"Review",
           actor:"human",
-          state:(if $prepare_state == "ready" then "available" elif $materialized then "blocked" else "blocked" end),
+          state:(if $approval_state == "approved" then "complete" elif $prepare_state == "ready" then "available" elif $materialized then "blocked" else "blocked" end),
           command:$commands.draft,
           writes_lease:false,
           pushes:false
@@ -2233,17 +2254,18 @@ stack_trunk_workflow_json() {
       ],
       commands:$commands,
       materialization:{state:$alignment_state, ready:$materialized},
-      prepare:{state:$prepare_state, ready:($prepare_state == "ready")},
+      prepare:{state:$prepare_state, ready:($approval_state == "approved" or $prepare_state == "ready")},
       approval:{state:$approval_state, ready:($approval_state == "approved")},
       push:{state:(if $approval_state == "approved" then "ready" else "blocked" end), ready:($approval_state == "approved")}
     }'
 }
 
 stack_cmd_trunk_list() {
-  local format="table" base_override="" prefix_override=""
+  local format="table" base_override="" prefix_override="" fast=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json) format="json"; shift ;;
+      --fast) fast=1; shift ;;
       --base) base_override="${2:-}"; [[ -n "$base_override" ]] || stack_fail "--base requires a ref"; shift 2 ;;
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
       -h|--help) stack_usage; return 0 ;;
@@ -2258,7 +2280,11 @@ stack_cmd_trunk_list() {
   repo=$(jq -r '.repo // ""' <<<"$store")
   store_repo=$(jq -r '.store_repo // .repo // ""' <<<"$store")
   prefix=$(stack_prefix "$prefix_override")
-  prs=$(stack_fetch_prs)
+  if (( fast )); then
+    prs='{}'
+  else
+    prs=$(stack_fetch_prs)
+  fi
 
   local stack_entry manifest materialization approval_raw prepare_raw approval commands workflow stack_name manifest_base base trunk trunk_head alignment_state
   while IFS= read -r stack_entry; do
@@ -2788,12 +2814,99 @@ stack_cmd_trunk_status() {
   esac
 }
 
+stack_trunk_context_hints_json() {
+  local stack_name="$1" review
+  review=$(stack_cmd_trunk_review --stack "$stack_name" --json 2>/dev/null || echo '{}')
+  jq -c '
+    {
+      review_state:(.state // "unknown"),
+      shortstat:(.full_stack.shortstat // null),
+      commits:([.full_stack.contained_commits[]?] | unique_by(.sha)),
+      files:([.full_stack.files[]? | {path, change, previous_path:(.previous_path // null)}] | unique_by([.path, .change])),
+      prs:([.items[]? | select(.pr != null) | {id, branch, pr}]),
+      items:[
+        .items[]?
+        | {
+            id,
+            branch,
+            pr,
+            commit,
+            shortstat:(.delta.shortstat // null),
+            commits:(.delta.contained_commits // []),
+            files:(.delta.files // [])
+          }
+      ]
+    }
+  ' <<<"$review"
+}
+
+stack_cmd_trunk_context_write() {
+  local stack_name="" file="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --file) file="${2:-}"; [[ -n "$file" ]] || stack_fail "--file requires a value"; shift 2 ;;
+      --json) format="json"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk context write flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$file" ]] || stack_fail "stack trunk context write requires --stack NAME and --file FILE"
+  local helper args=()
+  helper=$(stack_pg_helper)
+  args=(stack-store-prepare-context-write --stack "$stack_name" --file "$file")
+  [[ "$format" == "json" ]] && args+=(--json)
+  stack_run_pg_store_command_output "$helper" "${args[@]}"
+}
+
+stack_cmd_trunk_context() {
+  if [[ "${1:-}" == "write" ]]; then
+    shift
+    stack_cmd_trunk_context_write "$@"
+    return $?
+  fi
+
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
+      --json) format="json"; shift ;;
+      -h|--help) stack_usage; return 0 ;;
+      *) stack_fail "unknown trunk context flag: $1" ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || stack_fail "stack trunk context requires --stack NAME"
+  stack_require jq
+  stack_repo_root >/dev/null
+
+  local helper context hints payload
+  helper=$(stack_pg_helper)
+  context=$(stack_run_pg_store_command_output "$helper" stack-store-prepare-context --stack "$stack_name" --json)
+  hints=$(stack_trunk_context_hints_json "$stack_name")
+  payload=$(jq -n --argjson context "$context" --argjson hints "$hints" '$context + {generated_hints:$hints}')
+
+  if [[ "$format" == "json" ]]; then
+    printf '%s\n' "$payload"
+    return 0
+  fi
+
+  jq -r '
+    "Prepare context: " + .stack,
+    "Materialization: " + (.materialization.materialization_id // "none"),
+    "State: " + (if .completeness.complete then "complete" else "incomplete" end),
+    (if (.completeness.missing | length) > 0 then "Missing: " + (.completeness.missing | join(", ")) else empty end),
+    (if (.completeness.unexpected_item_ids | length) > 0 then "Unexpected item ids: " + (.completeness.unexpected_item_ids | join(", ")) else empty end),
+    "Hints: " + ((.generated_hints.files | length) | tostring) + " files, " + ((.generated_hints.commits | length) | tostring) + " commits"
+  ' <<<"$payload"
+}
+
 stack_cmd_trunk_review() {
   local stack_name="" format="text"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
       --json) format="json"; shift ;;
+      --no-diagnostics) shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown trunk review flag: $1" ;;
     esac
@@ -2940,6 +3053,7 @@ stack_cmd_trunk_push_plan() {
     case "$1" in
       --stack|--name) stack_name="${2:-}"; [[ -n "$stack_name" ]] || stack_fail "--stack requires a value"; shift 2 ;;
       --json) format="json"; shift ;;
+      --no-diagnostics) shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown trunk push-plan flag: $1" ;;
     esac
@@ -3171,7 +3285,7 @@ ${detail}"
 
 stack_cmd_trunk() {
   local sub="${1:-}"
-  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, list, status, materialize, review, push-plan, or push"
+  [[ -n "$sub" ]] || stack_fail "stack trunk requires a subcommand: init, add, move, remove, list, status, materialize, context, review, push-plan, or push"
   shift
   case "$sub" in
     init) stack_cmd_trunk_init "$@" ;;
@@ -3181,6 +3295,7 @@ stack_cmd_trunk() {
     list) stack_cmd_trunk_list "$@" ;;
     status) stack_cmd_trunk_status "$@" ;;
     materialize) stack_cmd_trunk_materialize "$@" ;;
+    context) stack_cmd_trunk_context "$@" ;;
     review) stack_cmd_trunk_review "$@" ;;
     push-plan) stack_cmd_trunk_push_plan "$@" ;;
     push) stack_cmd_trunk_push "$@" ;;
@@ -4087,7 +4202,7 @@ Commands:
   trunk remove --stack NAME --id ID [--dry-run]
     Remove one item from the Dolt-backed stack manifest and compact order.
 
-  trunk list [--json] [--base REF] [--prefix PREFIX]
+  trunk list [--json] [--fast] [--base REF] [--prefix PREFIX]
     List current-repository Dolt-backed materialized stack manifests with
     materialization, trunk approval, PR, and local/remote tip state. Inferred
     loose branches from stack status are intentionally omitted.
@@ -4108,6 +4223,13 @@ Commands:
                    [--base REF] [--prefix PREFIX]
     Compatibility/import path for legacy manifest files. Prefer Dolt-backed
     --stack NAME for all Stack Review workflows.
+
+  trunk context --stack NAME [--json]
+  trunk context write --stack NAME --file context.yaml
+    Read or write durable prepare context for the current materialized stack.
+    JSON includes completeness, stale prior contexts, generated review hints,
+    and repo-pinned commands. Write stores compact agent/UI/human context in
+    push-gate's Dolt store; human approval remains separate.
 
   trunk review --stack NAME [--json]
     Emit the stack-owned review payload for a materialized trunk. JSON includes

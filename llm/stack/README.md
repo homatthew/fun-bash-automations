@@ -198,20 +198,28 @@ checkout from appearing dirty with inverse changes from the old branch tip.
 Push-gate can approve the whole materialized trunk:
 
 ```bash
-pg prepare-trunk --stack <name> --what "..." --why "..." --approach "..."
+stack trunk context write --stack <name> --file /tmp/<name>-prepare-context.yaml
+pg prepare-trunk --stack <name> --from-context
 pg trunk --stack <name>
 pg check-trunk --stack <name>
 stack trunk push --stack <name>
 ```
 
-For multi-item trunks, agents should pass item-level explanations:
+For multi-item trunks, agents should store item-level explanations in the
+durable context:
 
-```bash
-pg prepare-trunk --stack <name> \
-  --what "overall stack outcome" \
-  --why "why these items land together" \
-  --approach "how the trunk was built and verified" \
-  --item-briefs /tmp/<name>-item-briefs.yaml
+```yaml
+brief:
+  what: overall stack outcome
+  why: why these items land together
+  approach: how the trunk was built and verified
+item_briefs:
+  - id: first-item
+    summary: item outcome
+    motivation: item reason
+    approach: item implementation approach
+source:
+  kind: agent
 ```
 
 The trunk approval records the manifest hash, private trunk tip, and each item

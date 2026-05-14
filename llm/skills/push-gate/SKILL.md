@@ -115,21 +115,29 @@ human reviews again.
 For stack trunks, the same split applies at trunk scope:
 
 ```
-1. Agent: pg prepare-trunk --stack S --what "..." --why "..." --approach "..." --item-briefs FILE
-2. Human: pg trunk --stack S
-3. Agent: pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
+1. Agent: stack trunk context write --stack S --file context.yaml
+2. Agent: pg prepare-trunk --stack S --from-context
+3. Human: pg trunk --stack S
+4. Agent: pg push --trunk-stack S --branch B --source-ref REF --assert-flow "..."
 ```
 
 Use `pg -C <repo> prepare-trunk status --stack S --json` when a UI or script
 needs prepare state. It reports `missing`, `ready`, or detectable `stale`
 state plus the repo/worktree target and exact next commands; consumers must not
 parse `pg trunk` stderr or inspect `/tmp/pg-prepare-trunk-*` directly.
+Use `stack -C <repo> trunk context --stack S --json` when a UI or agent needs
+the durable handoff packet, generated review hints, completeness, or stale
+prior materialization context. Context can be partial, but
+`pg prepare-trunk --from-context` blocks until the top-level brief and every
+current stack item have what, why, and approach. Explicit `--what`, `--why`,
+`--approach`, and `--item-briefs` remain available for one-off prepares, but
+durable Stack Review handoff should prefer the context store.
 
 Async stack trunk flow:
 
 ```bash
-pg prepare-trunk --stack S --async --expires 8h --max-pushes 30 --allow-rewrite \
-  --what "..." --why "..." --approach "..." --item-briefs FILE
+stack trunk context write --stack S --file context.yaml
+pg prepare-trunk --stack S --from-context --async --expires 8h --max-pushes 30 --allow-rewrite
 pg trunk --stack S         # human
 stack trunk push --stack S # agent
 ```
