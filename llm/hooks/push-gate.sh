@@ -442,6 +442,9 @@ pg_csv_unquote() {
 pg_dolt_init() {
   local dir author_name author_email
   dir=$(pg_dolt_store_dir)
+  if [[ "${PG_DOLT_INIT_DONE_DIR:-}" == "$dir" && -d "$dir/.dolt" ]]; then
+    return 0
+  fi
   author_name=$(pg_dolt_author_name)
   author_email=$(pg_dolt_author_email)
   mkdir -p "$dir" || return 1
@@ -538,10 +541,24 @@ CREATE TABLE IF NOT EXISTS pending_trunk_assertions (
   created_at VARCHAR(64) NOT NULL,
   PRIMARY KEY (repo_key, stack_name, branch)
 );
+CREATE TABLE IF NOT EXISTS trunk_prepare_contexts (
+  repo_key VARCHAR(512) NOT NULL,
+  stack_name VARCHAR(255) NOT NULL,
+  materialization_id VARCHAR(80) NOT NULL,
+  manifest_hash VARCHAR(80) NOT NULL,
+  trunk_tip VARCHAR(80) NOT NULL,
+  item_shape_json TEXT NOT NULL,
+  context_json TEXT NOT NULL,
+  source_json TEXT,
+  created_at VARCHAR(64) NOT NULL,
+  updated_at VARCHAR(64) NOT NULL,
+  PRIMARY KEY (repo_key, stack_name, materialization_id)
+);
 ' >/dev/null
     dolt sql -q "ALTER TABLE pending_trunk_assertions ADD COLUMN remote VARCHAR(255) NOT NULL DEFAULT 'origin';" >/dev/null 2>&1 || true
     dolt sql -q "ALTER TABLE trunk_leases ADD COLUMN async_json TEXT;" >/dev/null 2>&1 || true
   ) || return 1
+  PG_DOLT_INIT_DONE_DIR="$dir"
 }
 
 pg_repo_key() {
@@ -1050,7 +1067,7 @@ pg_trunk_prepare_status_json() {
     state="missing"
     reason="Agent must prepare a trunk brief before approval draft review."
   fi
-  prepare_command="pg -C $(pg_shell_quote "$worktree_root") prepare-trunk --stack $(pg_shell_quote "$stack_name") --what <what> --why <why> --approach <approach>"
+  prepare_command="pg -C $(pg_shell_quote "$worktree_root") prepare-trunk --stack $(pg_shell_quote "$stack_name") --from-context"
   review_command="pg -C $(pg_shell_quote "$worktree_root") trunk --stack $(pg_shell_quote "$stack_name")"
   draft_command="pg -C $(pg_shell_quote "$worktree_root") trunk-draft --stack $(pg_shell_quote "$stack_name") --format yaml"
   approve_saved_draft_command="pg -C $(pg_shell_quote "$worktree_root") approve-trunk --draft <draft-file> --reviewed-in-vscode"
@@ -1394,6 +1411,237 @@ pg_validate_trunk_item_briefs() {
   ' >/dev/null <<<"{}"
 }
 
+pg_trunk_item_shape_json() {
+  jq -c '[.items[]? | {id, branch}]' <<<"$1"
+}
+
+pg_context_value_text() {
+  local context="$1" path="$2"
+  jq -r --arg path "$path" '
+    def as_text:
+      if type == "array" then map(tostring) | join("; ")
+      elif . == null then ""
+      else tostring
+      end;
+    getpath($path | split(".")) | as_text
+  ' <<<"$context"
+}
+
+pg_normalize_trunk_prepare_context_json() {
+  local raw="${1:-}" item_raw item_briefs
+  [[ -n "$raw" ]] || raw='{}'
+  item_raw=$(jq -c 'if type == "array" then . elif type == "object" and has("item_briefs") then .item_briefs else [] end' <<<"$raw") || return 1
+  item_briefs=$(pg_normalize_item_briefs_json "$item_raw") || return 1
+  jq -c --argjson raw "$raw" --argjson item_briefs "$item_briefs" '
+    ($raw | if type == "object" then . else {} end) as $root
+    | ($root.brief // {}) as $brief
+    | ($root.references // {}) as $references
+    | ($root.source // {}) as $source
+    | {
+        schema_version: 1,
+        brief: {
+          what: ($brief.what // $root.what // null),
+          why: ($brief.why // $root.why // null),
+          approach: ($brief.approach // $root.approach // null),
+          scope: ($brief.scope // $root.scope // null),
+          risks: ($brief.risks // $root.risks // null),
+          verification: ($brief.verification // $brief.testing // $root.verification // $root.testing // null)
+        },
+        item_briefs: $item_briefs,
+        references: {
+          beads: (if ($references.beads | type) == "array" then $references.beads else [] end),
+          sessions: (if ($references.sessions | type) == "array" then $references.sessions else [] end),
+          files: (if ($references.files | type) == "array" then $references.files else [] end),
+          commands: (if ($references.commands | type) == "array" then $references.commands else [] end)
+        },
+        source: (
+          if ($source | type) == "object" and (($source | length) > 0) then $source
+          elif ($source | type) == "string" and ($source | length) > 0 then {kind:$source}
+          else {kind:"unknown"}
+          end
+        )
+      }
+  ' <<<"{}"
+}
+
+pg_trunk_prepare_context_completeness_json() {
+  local materialization="${1:-null}" context="${2:-null}"
+  [[ -n "$materialization" ]] || materialization="null"
+  [[ -n "$context" ]] || context="null"
+  jq -n --argjson materialization "$materialization" --argjson context "$context" '
+    def filled:
+      if type == "array" then length > 0 and all(.[]; type == "string" and length > 0)
+      elif type == "string" then length > 0
+      else false
+      end;
+    def item($id): ($context.item_briefs // [] | map(select(.id == $id)) | first // {});
+    def item_value($item; $name):
+      if $name == "what" then ($item.what // $item.summary // null)
+      elif $name == "why" then ($item.why // $item.motivation // null)
+      elif $name == "approach" then ($item.approach // null)
+      else null
+      end;
+    if $materialization == null then
+      {complete:false, ready:false, missing:["materialization"], missing_fields:["materialization"], unexpected_item_ids:[], expected_item_ids:[], context_item_ids:[]}
+    else
+      ([$materialization.items[]?.id]) as $expected
+      | ([($context.item_briefs // [])[]?.id]) as $actual
+      | (
+          (["what","why","approach"] | map(select((($context.brief[.] // null) | filled) | not) | "brief." + .))
+          +
+          ([
+            $materialization.items[]? as $mat_item
+            | ["what","why","approach"][] as $field
+            | select((item_value(item($mat_item.id); $field) | filled) | not)
+            | "item_briefs[" + $mat_item.id + "]." + $field
+          ])
+        ) as $missing
+      | ($actual - $expected) as $unexpected
+      | ($expected - $actual) as $missing_ids
+      | {
+          complete:(($missing | length) == 0 and ($unexpected | length) == 0),
+          ready:(($missing | length) == 0 and ($unexpected | length) == 0),
+          missing:$missing,
+          missing_fields:$missing,
+          missing_item_ids:$missing_ids,
+          unexpected_item_ids:$unexpected,
+          expected_item_ids:$expected,
+          context_item_ids:$actual
+        }
+    end
+  '
+}
+
+pg_trunk_existing_prepare_context_json() {
+  local stack_name="$1" prepare_path raw
+  prepare_path=$(pg_trunk_prepare_path "$stack_name")
+  [[ -f "$prepare_path" ]] || { printf 'null\n'; return 0; }
+  jq -e . "$prepare_path" >/dev/null 2>&1 || { printf 'null\n'; return 0; }
+  raw=$(jq -c '{
+    brief:{what:(.what // null), why:(.why // null), approach:(.approach // null), scope:(.scope // null), risks:(.risks // null), verification:(.verification // null)},
+    item_briefs:(.item_briefs // []),
+    references:(.context_references // {}),
+    source:(.context_source // {kind:"prepare-trunk"})
+  }' "$prepare_path") || { printf 'null\n'; return 0; }
+  pg_normalize_trunk_prepare_context_json "$raw" || printf 'null\n'
+}
+
+pg_trunk_prepare_context_payload_json() {
+  local stack_name="$1" repo_key repo_root worktree_root common_dir materialization="null" item_shape="[]"
+  local rows contexts current_context stale_contexts completeness prepared_context commands
+  repo_key=$(pg_repo_key) || return 1
+  repo_root=$(pg_main_repo_path 2>/dev/null || true)
+  worktree_root=$(pg_repo_root 2>/dev/null || true)
+  common_dir=$(pg_git_common_dir 2>/dev/null || true)
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || true)
+  [[ -n "$materialization" ]] || materialization="null"
+  [[ "$materialization" == "null" ]] || item_shape=$(pg_trunk_item_shape_json "$materialization")
+  rows=$(pg_dolt_sql_json "
+SELECT materialization_id, manifest_hash, trunk_tip, item_shape_json, context_json, source_json, created_at, updated_at
+FROM trunk_prepare_contexts
+WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name")
+ORDER BY updated_at DESC;
+" 2>/dev/null || echo '{"rows":[]}')
+  contexts=$(jq -c --argjson materialization "$materialization" --argjson current_shape "$item_shape" '
+    def parse_json($fallback): try (fromjson) catch $fallback;
+    [
+      .rows[]?
+      | (.context_json | parse_json({})) as $context
+      | (.source_json // "null" | parse_json(null)) as $source
+      | (.item_shape_json | parse_json([])) as $shape
+      | ($materialization != null and .materialization_id == ($materialization.materialization_id // "") and .manifest_hash == ($materialization.manifest_hash // "") and .trunk_tip == ($materialization.trunk_tip // "") and $shape == $current_shape) as $current
+      | . + {
+          item_shape:$shape,
+          context:$context,
+          source:$source,
+          current:$current,
+          stale_reason:(if $current then null elif $materialization == null then "no current materialization" elif .materialization_id != ($materialization.materialization_id // "") then "materialization differs" elif .manifest_hash != ($materialization.manifest_hash // "") then "manifest hash differs" elif .trunk_tip != ($materialization.trunk_tip // "") then "trunk tip differs" elif $shape != $current_shape then "item ids or branches differ" else "context is not current" end)
+        }
+      | del(.context_json, .source_json, .item_shape_json)
+    ]
+  ' <<<"$rows")
+  current_context=$(jq -c 'map(select(.current)) | first // null' <<<"$contexts")
+  stale_contexts=$(jq -c 'map(select(.current | not))' <<<"$contexts")
+  completeness=$(pg_trunk_prepare_context_completeness_json "$materialization" "$(jq -c '.context // null' <<<"$current_context")")
+  prepared_context=$(pg_trunk_existing_prepare_context_json "$stack_name")
+  commands=$(jq -n --arg stack "$stack_name" --arg worktree "$worktree_root" '{
+    context:("stack -C " + ($worktree | @sh) + " trunk context --stack " + ($stack | @sh) + " --json"),
+    write_context:("stack -C " + ($worktree | @sh) + " trunk context write --stack " + ($stack | @sh) + " --file <context.yaml>"),
+    prepare_from_context:("pg -C " + ($worktree | @sh) + " prepare-trunk --stack " + ($stack | @sh) + " --from-context")
+  }')
+  jq -n \
+    --arg repo "$worktree_root" --arg store_repo "$repo_root" --arg repo_key "$repo_key" --arg common_dir "$common_dir" --arg stack "$stack_name" \
+    --argjson materialization "$materialization" --argjson item_shape "$item_shape" --argjson current_context "$current_context" --argjson stale_contexts "$stale_contexts" \
+    --argjson completeness "$completeness" --argjson prepared_context "$prepared_context" --argjson commands "$commands" \
+    '{schema_version:1, repo:$repo, store_repo:$store_repo, repo_key:$repo_key, common_dir:(if $common_dir == "" then null else $common_dir end), stack:$stack, materialization:$materialization, current_materialization:(if $materialization == null then null else {materialization_id:$materialization.materialization_id, manifest_hash:$materialization.manifest_hash, trunk_tip:$materialization.trunk_tip, item_shape:$item_shape} end), context:($current_context.context // null), current_context:$current_context, stale_contexts:$stale_contexts, completeness:$completeness, prepared_context:$prepared_context, commands:$commands}'
+}
+
+pg_cmd_stack_store_prepare_context() {
+  local stack_name="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown stack-store-prepare-context option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" ]] || pg_fail "stack-store-prepare-context requires --stack NAME"
+  pg_store_upsert_repo || return 1
+  local payload
+  payload=$(pg_trunk_prepare_context_payload_json "$stack_name") || return 1
+  [[ "$format" == "json" ]] && { printf '%s\n' "$payload"; return 0; }
+  jq -r '"Prepare context: " + .stack, "State: " + (if .completeness.complete then "complete" else "incomplete" end)' <<<"$payload"
+}
+
+pg_cmd_stack_store_prepare_context_write() {
+  local stack_name="" file="" format="text"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --file) file="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown stack-store-prepare-context-write option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$stack_name" && -n "$file" ]] || pg_fail "stack-store-prepare-context-write requires --stack NAME and --file FILE"
+  pg_store_upsert_repo || return 1
+  local materialization raw context completeness repo_key now materialization_id manifest_hash trunk_tip item_shape source_json created_at
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name") || { pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."; return 1; }
+  raw=$(pg_json_or_yaml_file "$file") || return 1
+  context=$(pg_normalize_trunk_prepare_context_json "$raw") || return 1
+  completeness=$(pg_trunk_prepare_context_completeness_json "$materialization" "$context")
+  repo_key=$(pg_repo_key) || return 1
+  now=$(pg_now_utc)
+  materialization_id=$(jq -r '.materialization_id' <<<"$materialization")
+  manifest_hash=$(jq -r '.manifest_hash' <<<"$materialization")
+  trunk_tip=$(jq -r '.trunk_tip' <<<"$materialization")
+  item_shape=$(pg_trunk_item_shape_json "$materialization")
+  source_json=$(jq -c '.source // null' <<<"$context")
+  created_at=$(pg_dolt_sql_csv "SELECT created_at FROM trunk_prepare_contexts WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND materialization_id = $(pg_sql_quote "$materialization_id");" | tail -n +2 | head -1)
+  [[ -n "$created_at" ]] || created_at="$now"
+  pg_dolt_sql "
+REPLACE INTO trunk_prepare_contexts (repo_key, stack_name, materialization_id, manifest_hash, trunk_tip, item_shape_json, context_json, source_json, created_at, updated_at)
+VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$item_shape"), $(pg_sql_quote "$context"), $(pg_sql_quote "$source_json"), $(pg_sql_quote "$created_at"), $(pg_sql_quote "$now"));
+" >/dev/null
+  pg_dolt_commit "stack prepare context $stack_name"
+  [[ "$format" == "json" ]] && { pg_trunk_prepare_context_payload_json "$stack_name"; return 0; }
+  echo "Prepare context stored: $stack_name $materialization_id"
+  if [[ "$(jq -r '.complete' <<<"$completeness")" != "true" ]]; then
+    echo "Missing: $(jq -r '.missing | join(", ")' <<<"$completeness")"
+    if [[ "$(jq -r '.unexpected_item_ids | length' <<<"$completeness")" != "0" ]]; then
+      echo "Unexpected item ids: $(jq -r '.unexpected_item_ids | join(", ")' <<<"$completeness")"
+    fi
+  fi
+}
+
+pg_load_current_trunk_prepare_context_json() {
+  local stack_name="$1" payload context
+  payload=$(pg_trunk_prepare_context_payload_json "$stack_name") || return 1
+  context=$(jq -c '.context // null' <<<"$payload")
+  [[ "$context" != "null" ]] || { pg_fail "No prepare context stored for current materialization of stack $stack_name."; return 1; }
+  printf '%s\n' "$context"
+}
+
 pg_trunk_stack_items_json() {
   local stack_name="$1" materialization="$2" item_briefs="${3:-[]}"
   local manifest base_ref base_commit previous_commit details='[]'
@@ -1500,6 +1748,7 @@ pg_cmd_prepare_trunk() {
     return $?
   fi
   local stack_name="" what="" why="" approach="" scope="" risks="" item_briefs_file="" item_briefs_raw="" item_briefs="[]"
+  local context_file="" from_context="false" context_raw="" context_json="null" context_references="null" context_source="null"
   local async_enabled="false" async_expires="" async_max_pushes="" async_allow_rewrite="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1510,6 +1759,8 @@ pg_cmd_prepare_trunk() {
       --scope) scope="$2"; shift 2 ;;
       --risks) risks="$2"; shift 2 ;;
       --item-briefs|--item-brief-file) item_briefs_file="$2"; shift 2 ;;
+      --context-file) context_file="$2"; shift 2 ;;
+      --from-context) from_context="true"; shift ;;
       --low-stakes)
         async_enabled="true"
         [[ -n "$async_expires" ]] || async_expires="1h"
@@ -1524,6 +1775,38 @@ pg_cmd_prepare_trunk() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "pg prepare-trunk requires --stack NAME"
+  [[ -z "$context_file" || "$from_context" != "true" ]] || { pg_fail "pg prepare-trunk accepts only one of --context-file or --from-context."; return 1; }
+  local repo_root materialization path
+  repo_root=$(pg_repo_root) || { pg_fail "not in a git repo"; return 1; }
+  materialization=$(pg_trunk_latest_materialization_json "$stack_name") \
+    || { pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."; return 1; }
+  if [[ -n "$context_file" || "$from_context" == "true" ]]; then
+    if [[ -n "$context_file" ]]; then
+      context_raw=$(pg_json_or_yaml_file "$context_file") || return 1
+      context_json=$(pg_normalize_trunk_prepare_context_json "$context_raw") || return 1
+    else
+      context_json=$(pg_load_current_trunk_prepare_context_json "$stack_name") || return 1
+    fi
+    context_completeness=$(pg_trunk_prepare_context_completeness_json "$materialization" "$context_json")
+    if [[ "$(jq -r '.complete' <<<"$context_completeness")" != "true" ]]; then
+      missing_text=$(jq -r '.missing | join(", ")' <<<"$context_completeness")
+      unexpected_text=$(jq -r '.unexpected_item_ids | join(", ")' <<<"$context_completeness")
+      if [[ -n "$unexpected_text" ]]; then
+        pg_fail "prepare context incomplete for $stack_name. Missing: ${missing_text:-none}. Unexpected item ids: $unexpected_text"
+      else
+        pg_fail "prepare context incomplete for $stack_name. Missing: ${missing_text:-none}"
+      fi
+      return 1
+    fi
+    [[ -n "$what" && "$what" != "<"* ]] || what=$(pg_context_value_text "$context_json" "brief.what")
+    [[ -n "$why" && "$why" != "<"* ]] || why=$(pg_context_value_text "$context_json" "brief.why")
+    [[ -n "$approach" && "$approach" != "<"* ]] || approach=$(pg_context_value_text "$context_json" "brief.approach")
+    [[ -n "$scope" && "$scope" != "<"* ]] || scope=$(pg_context_value_text "$context_json" "brief.scope")
+    [[ -n "$risks" && "$risks" != "<"* ]] || risks=$(pg_context_value_text "$context_json" "brief.risks")
+    [[ -n "$item_briefs_file" ]] || item_briefs=$(jq -c '.item_briefs // []' <<<"$context_json")
+    context_references=$(jq -c '.references // null' <<<"$context_json")
+    context_source=$(jq -c '.source // null' <<<"$context_json")
+  fi
   local missing=()
   [[ -z "$what" || "$what" == "<"* ]] && missing+=("--what")
   [[ -z "$why" || "$why" == "<"* ]] && missing+=("--why")
@@ -1532,10 +1815,6 @@ pg_cmd_prepare_trunk() {
     pg_fail "pg prepare-trunk requires --what, --why, and --approach."
     return 1
   fi
-  local repo_root materialization path
-  repo_root=$(pg_repo_root) || { pg_fail "not in a git repo"; return 1; }
-  materialization=$(pg_trunk_latest_materialization_json "$stack_name") \
-    || { pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."; return 1; }
   if [[ -n "$item_briefs_file" ]]; then
     item_briefs_raw=$(pg_json_or_yaml_file "$item_briefs_file") || return 1
     item_briefs=$(pg_normalize_item_briefs_json "$item_briefs_raw") || return 1
@@ -1557,6 +1836,9 @@ pg_cmd_prepare_trunk() {
     --argjson materialization "$materialization" \
     --argjson item_briefs "$item_briefs" \
     --argjson async_iteration "$async_json" \
+    --argjson context "$context_json" \
+    --argjson context_references "$context_references" \
+    --argjson context_source "$context_source" \
     '{
       repo_root: $repo_root,
       stack: $stack,
@@ -1568,7 +1850,10 @@ pg_cmd_prepare_trunk() {
       item_briefs: $item_briefs,
       prepared_at: $at,
       materialization: $materialization,
-      async_iteration: $async_iteration
+      async_iteration: $async_iteration,
+      prepare_context: (if $context == null then null else $context end),
+      context_references: (if $context_references == null then null else $context_references end),
+      context_source: (if $context_source == null then null else $context_source end)
     }' >"$path"
   echo "Prepared trunk brief written: $path"
   echo "Now ask the user to run:  pg -C $repo_root trunk --stack $stack_name"
@@ -4820,6 +5105,12 @@ pg_main() {
       ;;
     stack-store-branch-materialization)
       pg_cmd_stack_store_branch_materialization "$@"
+      ;;
+    stack-store-prepare-context)
+      pg_cmd_stack_store_prepare_context "$@"
+      ;;
+    stack-store-prepare-context-write)
+      pg_cmd_stack_store_prepare_context_write "$@"
       ;;
     guard-check)
       local command_text=""

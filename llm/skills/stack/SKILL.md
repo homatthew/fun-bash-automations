@@ -100,11 +100,13 @@ stack trunk init --name NAME --base REF --trunk BRANCH
 stack trunk add --stack NAME --id ID --branch BRANCH [--pr N] [--after ID] [--base REF]
 stack trunk move --stack NAME --id ID (--after ID|--before ID|--first|--last) [--dry-run]
 stack trunk remove --stack NAME --id ID [--dry-run]
-stack trunk list [--json] [--base REF] [--prefix PREFIX]
+stack trunk list [--json] [--fast] [--base REF] [--prefix PREFIX]
 stack trunk status --stack NAME [--json] [--base REF] [--prefix PREFIX]
 stack trunk materialize --stack NAME [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack trunk status --manifest PATH [--json] [--base REF] [--prefix PREFIX]                 # compatibility/import
 stack trunk materialize --manifest PATH [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX] # compatibility/import
+stack trunk context --stack NAME [--json]
+stack trunk context write --stack NAME --file context.yaml
 stack trunk review --stack NAME [--json]
 stack trunk push-plan --stack NAME [--json]
 stack trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
@@ -163,8 +165,9 @@ create PRs separately when the inserted branch becomes the new review base.
 `stack trunk init` and `stack trunk add` write the manifest to the Dolt-backed
 push-gate store. `stack trunk list --json` is the materialized-stack dashboard
 contract: it lists only current-repo Dolt-backed stacks, ordered manifest items,
-latest materialization, trunk approval, PR metadata, and local/remote tip state;
-it does not include inferred loose branches from `stack status`. `stack trunk materialize --stack <name>` reads that manifest,
+latest materialization, trunk approval, PR metadata, and local/remote tip state.
+Use `--fast` for UI refreshes that can omit live GitHub PR title/base
+enrichment. It does not include inferred loose branches from `stack status`. `stack trunk materialize --stack <name>` reads that manifest,
 builds the stack's private trunk in a scratch clone, replays item branches in
 manifest order, and then atomically moves the trunk ref plus each item branch
 pointer to the corresponding commit on the trunk. This is the declarative form
@@ -183,6 +186,13 @@ commits and branch pointers. Do not create a `-v2` stack just to reorder items.
 `stack trunk review --stack <name> --json` is the Stack Review diff contract:
 it reports full-stack, item-only, and cumulative-through-item review sections
 with base/head refs, contained commits, changed files, and shortstats.
+`stack trunk context --stack <name> --json` is the durable prepare-context
+contract: it reports the current materialization identity, stored context for
+that exact materialization, completeness/missing required fields, stale prior
+contexts, generated review hints, and repo-pinned write/prepare commands.
+Agents should finish stack work by writing compact handoff context with
+`stack trunk context write --stack <name> --file context.yaml`; the human
+approval lease is still created only by `pg trunk`.
 `stack trunk push-plan --stack <name> --json` is the final readiness contract:
 it reports materialization, prepare/approval checklist state, ordered push
 units, remote relationship, approval coverage, and exact repo-pinned commands.
