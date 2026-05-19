@@ -360,24 +360,30 @@ pg_require_dolt() {
   }
 }
 
+pg_dolt_ready_for_sql() {
+  pg_require_dolt || return 1
+  if [[ "${PG_DOLT_READONLY:-0}" == "1" ]]; then
+    [[ -d "$(pg_dolt_store_dir)/.dolt" ]] || { pg_fail "Dolt stack store is not initialized: $(pg_dolt_store_dir)"; return 1; }
+  else
+    pg_dolt_init || return 1
+  fi
+}
+
 pg_dolt_sql() {
   local query="$1"
-  pg_require_dolt || return 1
-  pg_dolt_init || return 1
+  pg_dolt_ready_for_sql || return 1
   (cd "$(pg_dolt_store_dir)" && dolt sql -q "$query")
 }
 
 pg_dolt_sql_csv() {
   local query="$1"
-  pg_require_dolt || return 1
-  pg_dolt_init || return 1
+  pg_dolt_ready_for_sql || return 1
   (cd "$(pg_dolt_store_dir)" && dolt sql -r csv -q "$query")
 }
 
 pg_dolt_sql_json() {
   local query="$1"
-  pg_require_dolt || return 1
-  pg_dolt_init || return 1
+  pg_dolt_ready_for_sql || return 1
   (cd "$(pg_dolt_store_dir)" && dolt sql -r json -q "$query")
 }
 
@@ -455,6 +461,7 @@ pg_dolt_init() {
     cd "$dir"
     dolt config --local --set user.name "$author_name" >/dev/null 2>&1 || true
     dolt config --local --set user.email "$author_email" >/dev/null 2>&1 || true
+    dolt config --local --set metrics.disabled true >/dev/null 2>&1 || true
     dolt sql -q '
 CREATE TABLE IF NOT EXISTS repos (
   repo_key VARCHAR(512) PRIMARY KEY,
@@ -850,7 +857,7 @@ pg_cmd_stack_store_manifest() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "stack-store-manifest requires --stack NAME"
-  pg_store_upsert_repo || return 1
+  PG_DOLT_READONLY=1
   local manifest
   manifest=$(pg_stack_manifest_json "$stack_name")
   [[ -n "$manifest" ]] || pg_fail "stack not found in Dolt store: $stack_name"
@@ -869,7 +876,7 @@ pg_cmd_stack_store_list() {
       *) pg_fail "Unknown stack-store-list option: $1"; return 1 ;;
     esac
   done
-  pg_store_upsert_repo || return 1
+  PG_DOLT_READONLY=1
   local repo_key repo_root worktree_root stack_names='[]' stack_name manifest materialization approval prepare stacks='[]'
   repo_key=$(pg_repo_key) || return 1
   repo_root=$(pg_main_repo_path) || return 1
@@ -954,7 +961,7 @@ pg_cmd_stack_store_branch_materialization() {
     esac
   done
   [[ -n "$branch" ]] || pg_fail "stack-store-branch-materialization requires --branch"
-  pg_store_upsert_repo || return 1
+  PG_DOLT_READONLY=1
   local repo_key row stack_name trunk_branch materialization_id manifest_hash trunk_tip item_id order_index commit_sha pr_number created_at
   repo_key=$(pg_repo_key) || return 1
   row=$(pg_dolt_sql_csv "
@@ -1113,6 +1120,7 @@ pg_cmd_prepare_trunk_status() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "pg prepare-trunk status requires --stack NAME"
+  PG_DOLT_READONLY=1
   local status_json
   status_json=$(pg_trunk_prepare_status_json "$stack_name")
   if [[ "$format" == "json" ]]; then
@@ -1586,7 +1594,7 @@ pg_cmd_stack_store_prepare_context() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "stack-store-prepare-context requires --stack NAME"
-  pg_store_upsert_repo || return 1
+  PG_DOLT_READONLY=1
   local payload
   payload=$(pg_trunk_prepare_context_payload_json "$stack_name") || return 1
   [[ "$format" == "json" ]] && { printf '%s\n' "$payload"; return 0; }
@@ -2277,6 +2285,7 @@ pg_cmd_check_trunk() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "pg check-trunk requires --stack NAME"
+  PG_DOLT_READONLY=1
   pg_trunk_check_json "$stack_name"
 }
 
