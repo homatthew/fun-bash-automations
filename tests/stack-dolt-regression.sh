@@ -9,6 +9,7 @@ if ! command -v dolt >/dev/null 2>&1; then
   echo "1..0 # SKIP dolt not installed"
   exit 0
 fi
+REAL_DOLT=$(command -v dolt)
 
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/stack-dolt-test.XXXXXX")
 trap 'rm -rf "$TEST_TMP"' EXIT
@@ -160,6 +161,61 @@ mkdir -p "$REPO"
     || fail "expected stack -C to target repo from outside worktree: $targeted_list"
 
   json_stderr="$TEST_TMP/json-stderr.txt"
+  readonly_bin="$TEST_TMP/readonly-dolt-bin"
+  mkdir -p "$readonly_bin"
+  cat >"$readonly_bin/dolt" <<'SH'
+#!/bin/bash
+set -euo pipefail
+real="${REAL_DOLT_FOR_READONLY_TEST:?}"
+args=("$@")
+case "${1:-}" in
+  init|config|add|commit)
+    echo "readonly Dolt wrapper blocked: dolt $1" >&2
+    exit 97
+    ;;
+  sql)
+    query=""
+    shift
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -q)
+          query="${2:-}"
+          break
+          ;;
+      esac
+      shift
+    done
+    if grep -Eiq '(^|[[:space:];])(REPLACE|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)[[:space:]]' <<<"$query"; then
+      echo "readonly Dolt wrapper blocked write SQL: $query" >&2
+      exit 98
+    fi
+    ;;
+esac
+exec "$real" "${args[@]}"
+SH
+  chmod +x "$readonly_bin/dolt"
+  readonly_path="$readonly_bin:$PATH"
+
+  readonly_list=$(REAL_DOLT_FOR_READONLY_TEST="$REAL_DOLT" PATH="$readonly_path" bash "$STACK" trunk list --json --fast 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected readonly trunk list stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.stacks[0].name' <<<"$readonly_list")" == "demo" ]] \
+    || fail "expected readonly trunk list to work without Dolt writes: $readonly_list"
+
+  readonly_context=$(REAL_DOLT_FOR_READONLY_TEST="$REAL_DOLT" PATH="$readonly_path" bash "$STACK" trunk context --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected readonly stack context stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.stack' <<<"$readonly_context")" == "demo" ]] \
+    || fail "expected readonly stack context to work without Dolt writes: $readonly_context"
+
+  readonly_prepare_status=$(REAL_DOLT_FOR_READONLY_TEST="$REAL_DOLT" PATH="$readonly_path" bash "$PG" prepare-trunk status --stack demo --json 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected readonly prepare-trunk status stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.state' <<<"$readonly_prepare_status")" == "missing" ]] \
+    || fail "expected readonly prepare-trunk status to work without Dolt writes: $readonly_prepare_status"
+
+  readonly_check=$(REAL_DOLT_FOR_READONLY_TEST="$REAL_DOLT" PATH="$readonly_path" bash "$PG" check-trunk --stack demo 2>"$json_stderr")
+  [[ ! -s "$json_stderr" ]] || fail "expected readonly check-trunk stderr to be clean: $(cat "$json_stderr")"
+  [[ "$(jq -r '.allowed' <<<"$readonly_check")" == "false" ]] \
+    || fail "expected readonly check-trunk to report missing approval: $readonly_check"
+
   prepare_status_missing=$(bash "$PG" prepare-trunk status --stack demo --json 2>"$json_stderr")
   [[ ! -s "$json_stderr" ]] || fail "expected prepare-trunk status JSON stderr to be clean: $(cat "$json_stderr")"
   [[ "$(jq -r '.state' <<<"$prepare_status_missing")" == "missing" ]] \
