@@ -1531,6 +1531,34 @@ git -C "$REPO" merge-base --is-ancestor mho/dolt-insert mho/feature-api \
 expect_contains "$(cat "$STACK_TEST_STACK_MATERIALIZATIONS")" '"stack":"dolt-demo"'
 expect_contains "$(cat "$STACK_TEST_STACK_MATERIALIZATIONS")" '"trunk_tip":'
 
+(
+  cd "$REPO"
+  git checkout main >/dev/null 2>&1
+  printf 'base moved\n' >base-moved.txt
+  git add base-moved.txt
+  git commit -m "advance base after stack materialization" >/dev/null
+  git update-ref refs/remotes/origin/main HEAD
+)
+store_stale_status=$(run_stack trunk status --stack dolt-demo 2>&1)
+expect_contains "$store_stale_status" "Stack base moved since the private trunk was materialized."
+expect_contains "$store_stale_status" "Materialize changes before review/approval: stack trunk materialize --stack dolt-demo"
+store_stale_status_json=$(run_stack trunk status --stack dolt-demo --json)
+[[ "$(jq -r '.alignment_state' <<<"$store_stale_status_json")" == "base_moved" ]] \
+  || fail "expected stale base alignment state: $store_stale_status_json"
+store_stale_review=$(run_stack trunk review --stack dolt-demo --json)
+[[ "$(jq -r '.state' <<<"$store_stale_review")" == "needs_materialization" ]] \
+  || fail "expected review to require materialization after base moves: $store_stale_review"
+store_stale_push_plan=$(run_stack trunk push-plan --stack dolt-demo --json)
+[[ "$(jq -r '.state' <<<"$store_stale_push_plan")" == "needs_materialization" ]] \
+  || fail "expected push-plan to require materialization after base moves: $store_stale_push_plan"
+[[ "$(jq -r '.checklist[] | select(.id == "materialized") | .ok' <<<"$store_stale_push_plan")" == "false" ]] \
+  || fail "expected materialized checklist to fail after base moves: $store_stale_push_plan"
+store_live_after_base_move=$(run_stack trunk materialize --stack dolt-demo 2>&1)
+expect_contains "$store_live_after_base_move" "Materialized private trunk: mho/dolt-demo.trunk"
+store_status_after_base_move=$(run_stack trunk status --stack dolt-demo --json)
+[[ "$(jq -r '.alignment_state' <<<"$store_status_after_base_move")" == "up_to_date" ]] \
+  || fail "expected rematerialize to clear stale base state: $store_status_after_base_move"
+
 STACK_TEST_PR_JSON=$(jq -c -n '[
   {"number":43,"headRefName":"mho/feature-api","baseRefName":"mho/feature-base","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/43","title":"api"},
   {"number":44,"headRefName":"mho/feature-ui","baseRefName":"mho/feature-api","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/44","title":"ui"}

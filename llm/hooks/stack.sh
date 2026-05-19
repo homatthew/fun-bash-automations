@@ -1874,15 +1874,29 @@ stack_trunk_materialization_json() {
 }
 
 stack_trunk_alignment_state() {
-  local manifest_json="$1" trunk item_head prev_head="" id branch pr item_base trunk_head
+  local manifest_json="$1" item_bases="${2:-}"
+  local trunk item_head prev_head="" id branch pr item_base trunk_head
   trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
   trunk_head=$(git rev-parse --verify "$trunk" 2>/dev/null || echo "")
   [[ -n "$trunk_head" ]] || { printf 'not_materialized\n'; return 0; }
+
+  if [[ -z "$item_bases" ]]; then
+    local manifest_base base prefix parent_map
+    manifest_base=$(stack_trunk_manifest_field "$manifest_json" "base")
+    base=$(stack_upstream_ref "$manifest_base")
+    prefix=$(stack_prefix "")
+    parent_map=$(stack_build_parent_map "$prefix" "$base")
+    item_bases=$(stack_trunk_resolve_item_bases "$manifest_json" "$parent_map" "$base")
+  fi
 
   while IFS=$'\t' read -r id branch pr item_base; do
     [[ -z "$branch" ]] && continue
     item_head=$(git rev-parse --verify "$branch" 2>/dev/null || echo "")
     [[ -n "$item_head" ]] || { printf 'missing_pointer\n'; return 0; }
+    if [[ -n "$item_base" && "$item_base" != "-" ]] && ! git merge-base --is-ancestor "$item_base" "$item_head" 2>/dev/null; then
+      printf 'base_moved\n'
+      return 0
+    fi
     if [[ -n "$prev_head" ]] && ! git merge-base --is-ancestor "$prev_head" "$item_head" 2>/dev/null; then
       printf 'needs_materialize\n'
       return 0
@@ -2768,7 +2782,7 @@ stack_cmd_trunk_status() {
   parent_map=$(stack_build_parent_map "$prefix" "$base")
   item_bases=$(stack_trunk_resolve_item_bases "$manifest_json" "$parent_map" "$base")
   trunk=$(stack_trunk_manifest_field "$manifest_json" "trunk")
-  alignment_state=$(stack_trunk_alignment_state "$manifest_json")
+  alignment_state=$(stack_trunk_alignment_state "$manifest_json" "$item_bases")
 
   if [[ "$format" == "json" ]]; then
     local items='[]' id branch pr patch_base head trunk_head
@@ -2807,6 +2821,11 @@ stack_cmd_trunk_status() {
       ;;
     missing_pointer)
       stack_print_next_step "One or more stack item branches are missing; fix refs before materializing."
+      ;;
+    base_moved)
+      stack_print_next_step \
+        "Stack base moved since the private trunk was materialized." \
+        "Materialize changes before review/approval: $(stack_trunk_materialize_command "$name" "$manifest_override")"
       ;;
     *)
       stack_print_next_step "Materialize changes: $(stack_trunk_materialize_command "$name" "$manifest_override")"
@@ -2932,6 +2951,9 @@ stack_cmd_trunk_review() {
   fi
   commands=$(stack_trunk_workflow_commands_json "$stack_name")
 
+  local alignment_state
+  alignment_state=$(stack_trunk_alignment_state "$manifest")
+
   if [[ "$materialization" == "null" ]]; then
     state="needs_materialization"
     jq -n \
@@ -2946,6 +2968,32 @@ stack_cmd_trunk_review() {
         store_repo:$store_repo,
         stack:$manifest.name,
         state:$state,
+        manifest:$manifest,
+        materialization:null,
+        modes:["full_stack","item","cumulative"],
+        full_stack:null,
+        items:[],
+        commands:$commands
+      }'
+    return 0
+  elif [[ "$alignment_state" != "up_to_date" ]]; then
+    state="needs_materialization"
+    jq -n \
+      --argjson manifest "$manifest" \
+      --arg repo "$repo_root" \
+      --arg store_repo "$store_repo" \
+      --arg state "$state" \
+      --arg alignment_state "$alignment_state" \
+      --arg reason "Private trunk must be materialized against the current stack base before review." \
+      --argjson commands "$commands" \
+      '{
+        schema_version:1,
+        repo:$repo,
+        store_repo:$store_repo,
+        stack:$manifest.name,
+        state:$state,
+        reason:$reason,
+        alignment_state:$alignment_state,
         manifest:$manifest,
         materialization:null,
         modes:["full_stack","item","cumulative"],
@@ -3063,7 +3111,7 @@ stack_cmd_trunk_push_plan() {
   stack_repo_root >/dev/null
 
   local repo_root store_repo common_dir entry manifest materialization prepare approval commands
-  local approval_state approval_allowed state checklist units='[]'
+  local approval_state approval_allowed state checklist units='[]' alignment_state
   repo_root=$(stack_repo_root)
   common_dir=$(stack_common_dir)
   store_repo=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd || printf '%s\n' "$repo_root")
@@ -3075,8 +3123,11 @@ stack_cmd_trunk_push_plan() {
   approval_state=$(jq -r '.state // "unknown"' <<<"$approval")
   [[ "$approval_state" == "approved" ]] && approval_allowed="true" || approval_allowed="false"
   commands=$(stack_trunk_workflow_commands_json "$stack_name")
+  alignment_state=$(stack_trunk_alignment_state "$manifest")
 
   if [[ "$materialization" == "null" ]]; then
+    state="needs_materialization"
+  elif [[ "$alignment_state" != "up_to_date" ]]; then
     state="needs_materialization"
   elif [[ "$approval_allowed" == "true" ]]; then
     state="ready_to_push"
@@ -3085,7 +3136,7 @@ stack_cmd_trunk_push_plan() {
   fi
 
   checklist=$(jq -n \
-    --argjson materialized "$([[ "$materialization" != "null" ]] && echo true || echo false)" \
+    --argjson materialized "$([[ "$materialization" != "null" && "$alignment_state" == "up_to_date" ]] && echo true || echo false)" \
     --arg prepare_state "$(jq -r '.state // "unknown"' <<<"$prepare")" \
     --argjson approved "$approval_allowed" \
     '[
@@ -3106,7 +3157,9 @@ stack_cmd_trunk_push_plan() {
       remote=$(jq -r '.remote_ref // ""' <<<"$remote_state_json")
       assert_flow=$(printf 'push stack trunk %s\nitem %s\nbranch %s\nsource %s\napproved commit %s\n' "$stack_name" "$id" "$branch" "$branch" "$commit_sha")
       pg_command="$(stack_pg_command_prefix) push --trunk-stack $(stack_shell_quote "$stack_name") --branch $(stack_shell_quote "$branch") --source-ref $(stack_shell_quote "$branch") --force-with-lease --assert-flow $(stack_shell_quote "$assert_flow")"
-      if [[ "$approval_allowed" != "true" ]]; then
+      if [[ "$alignment_state" != "up_to_date" ]]; then
+        action="needs_materialization"
+      elif [[ "$approval_allowed" != "true" ]]; then
         action="needs_approval"
       elif [[ "$(jq -r '.remote_state' <<<"$remote_state_json")" == "synced" ]]; then
         action="already_pushed"
