@@ -306,6 +306,35 @@ metatron curl -a connect -X POST "$JIRA/issue" -H "Content-Type: application/jso
   -d '{"fields": {"project": {"key": "PROJ"}, "summary": "Title", "issuetype": {"name": "Task"}, "description": <ADF>}}'
 ```
 
+### ODS On-Call Issues
+
+When creating an ODS ticket for Matthew's on-call work, mirror the established
+ODS on-call defaults unless the user asks otherwise:
+
+- `issuetype`: `Issue`
+- `priority`: `P2`
+- `labels`: `2026-H1`, `oncall`, `KeyValue`, `unplanned-work`
+- `components`: `KeyValue`, `Cassandra`, `Reduce Operational Toil` when the work touches KV/Cassandra cleanup or toil reduction
+- `Pod` (`customfield_11457`): `KeyValue` (`id=36554`)
+- `Request Category` (`customfield_13301`): `oncall` (`id=37647`)
+- `Scheduled Work` (`customfield_12435`): `Unplanned` (`id=35263`)
+
+If the issue was created without these fields, update it after creation:
+
+```bash
+metatron curl -a connect -X PUT "$JIRA/issue/ODS-123" \
+  -H "Content-Type: application/json" \
+  -d '{"fields": {
+    "issuetype": {"name": "Issue"},
+    "priority": {"name": "P2"},
+    "labels": ["2026-H1", "oncall", "KeyValue", "unplanned-work"],
+    "components": [{"name": "KeyValue"}, {"name": "Cassandra"}, {"name": "Reduce Operational Toil"}],
+    "customfield_11457": {"id": "36554"},
+    "customfield_13301": [{"id": "37647"}],
+    "customfield_12435": {"id": "35263"}
+  }}'
+```
+
 ### Link to Epic
 
 Use the `parent` field (not `customfield_10008`, which is often a date field):
