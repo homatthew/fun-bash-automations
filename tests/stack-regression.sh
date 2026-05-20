@@ -1702,7 +1702,7 @@ unset STACK_TEST_PG_DOLT_MISSING
 set -e
 [[ "$missing_dolt_rc" != "0" ]] || fail "expected missing Dolt stack status to fail"
 expect_contains "$missing_dolt" "Dolt is required for stack trunk store commands."
-expect_contains "$missing_dolt" "Install: brew install dolt"
+expect_contains "$missing_dolt" "Install: rerun dotfiles installers, or run: brew install dolt"
 expect_contains "$missing_dolt" "Verify: dolt version"
 expect_contains "$missing_dolt" "PG_STORE_DIR"
 REPO="$OLD_REPO"
