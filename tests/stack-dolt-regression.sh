@@ -15,6 +15,7 @@ TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/stack-dolt-test.XXXXXX")
 trap 'rm -rf "$TEST_TMP"' EXIT
 
 export PG_STORE_DIR="$TEST_TMP/dolt-store"
+export PG_EVENTS_DIR="$TEST_TMP/events"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -24,6 +25,29 @@ fail() {
 expect_contains() {
   local haystack="$1" needle="$2"
   [[ "$haystack" == *"$needle"* ]] || fail "expected [$needle] in: $haystack"
+}
+
+event_count() {
+  [[ -d "$PG_EVENTS_DIR" ]] || { printf '0\n'; return 0; }
+  find "$PG_EVENTS_DIR" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' '
+}
+
+last_event() {
+  find "$PG_EVENTS_DIR" -type f -name '*.json' 2>/dev/null | sort | tail -1 | xargs cat
+}
+
+expect_event() {
+  local before="$1" event_type="$2" changed_surface="$3"
+  local after event_json
+  after=$(event_count)
+  [[ "$after" == "$((before + 1))" ]] || fail "expected one new $event_type event, count $before -> $after"
+  event_json=$(last_event)
+  [[ "$(jq -r '.event_type' <<<"$event_json")" == "$event_type" ]] \
+    || fail "expected last event type $event_type: $event_json"
+  [[ "$(jq -r '.changed_surface' <<<"$event_json")" == "$changed_surface" ]] \
+    || fail "expected last event surface $changed_surface: $event_json"
+  [[ "$(jq -r '.cache_key.stack_name' <<<"$event_json")" == "demo" ]] \
+    || fail "expected last event cache key stack demo: $event_json"
 }
 
 sql_quote() {
@@ -70,32 +94,46 @@ mkdir -p "$REPO"
 
   git checkout main >/dev/null 2>&1
 
+  before_events=$(event_count)
   init_out=$(bash "$STACK" trunk init --name demo --base origin/main --trunk mho/demo.trunk 2>&1)
   expect_contains "$init_out" "Stack stored: demo"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
 
+  before_events=$(event_count)
   add_base_out=$(bash "$STACK" trunk add --stack demo --id base --branch mho/feature-base 2>&1)
   expect_contains "$add_base_out" "Stack item stored: demo/base"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
 
+  before_events=$(event_count)
   add_api_out=$(bash "$STACK" trunk add --stack demo --id api --branch mho/feature-api --after base 2>&1)
   expect_contains "$add_api_out" "Stack item stored: demo/api"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
 
+  before_events=$(event_count)
   add_remove_out=$(bash "$STACK" trunk add --stack demo --id remove-me --branch mho/remove-me --after api 2>&1)
   expect_contains "$add_remove_out" "Stack item stored: demo/remove-me"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
 
+  before_events=$(event_count)
   move_first_out=$(bash "$STACK" trunk move --stack demo --id api --first 2>&1)
   expect_contains "$move_first_out" "Stack item moved: demo/api"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
   moved_manifest=$(bash "$STACK" trunk status --stack demo --json)
   [[ "$(jq -r '.manifest.items[0].id' <<<"$moved_manifest")" == "api" ]] \
     || fail "expected api to move first in real Dolt manifest: $moved_manifest"
 
+  before_events=$(event_count)
   move_restore_out=$(bash "$STACK" trunk move --stack demo --id api --after base 2>&1)
   expect_contains "$move_restore_out" "Stack item moved: demo/api"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
   restored_manifest=$(bash "$STACK" trunk status --stack demo --json)
   [[ "$(jq -r '.manifest.items[1].id' <<<"$restored_manifest")" == "api" ]] \
     || fail "expected api restored after base in real Dolt manifest: $restored_manifest"
 
+  before_events=$(event_count)
   remove_out=$(bash "$STACK" trunk remove --stack demo --id remove-me 2>&1)
   expect_contains "$remove_out" "Stack item removed: demo/remove-me"
+  expect_event "$before_events" "stack_manifest_changed" "manifest"
   removed_manifest=$(bash "$STACK" trunk status --stack demo --json)
   [[ "$(jq -r '[.manifest.items[].id] | index("remove-me") == null' <<<"$removed_manifest")" == "true" ]] \
     || fail "expected remove-me removed in real Dolt manifest: $removed_manifest"
@@ -104,8 +142,10 @@ mkdir -p "$REPO"
   expect_contains "$status_out" "Source: Dolt stack demo"
   expect_contains "$status_out" "mho/demo.trunk"
 
+  before_events=$(event_count)
   materialize_out=$(bash "$STACK" trunk materialize --stack demo 2>&1)
   expect_contains "$materialize_out" "Materialized private trunk: mho/demo.trunk"
+  expect_event "$before_events" "materialized" "materialization"
 
   git checkout -b mho/loose --no-track main >/dev/null 2>&1
   printf 'loose\n' >loose.txt
@@ -161,6 +201,7 @@ mkdir -p "$REPO"
     || fail "expected stack -C to target repo from outside worktree: $targeted_list"
 
   json_stderr="$TEST_TMP/json-stderr.txt"
+  readonly_events_before=$(event_count)
   readonly_bin="$TEST_TMP/readonly-dolt-bin"
   mkdir -p "$readonly_bin"
   cat >"$readonly_bin/dolt" <<'SH'
@@ -215,6 +256,8 @@ SH
   [[ ! -s "$json_stderr" ]] || fail "expected readonly check-trunk stderr to be clean: $(cat "$json_stderr")"
   [[ "$(jq -r '.allowed' <<<"$readonly_check")" == "false" ]] \
     || fail "expected readonly check-trunk to report missing approval: $readonly_check"
+  [[ "$(event_count)" == "$readonly_events_before" ]] \
+    || fail "expected read-only stack and pg commands to emit no events"
 
   prepare_status_missing=$(bash "$PG" prepare-trunk status --stack demo --json 2>"$json_stderr")
   [[ ! -s "$json_stderr" ]] || fail "expected prepare-trunk status JSON stderr to be clean: $(cat "$json_stderr")"
@@ -307,21 +350,27 @@ SH
     references:{beads:["dump-ztf"], sessions:["test-session"], files:["base.txt","api.txt"], commands:["tests/stack-dolt-regression.sh"]},
     source:{kind:"agent", tool:"stack-dolt-regression"}
   }' >"$complete_context"
+  before_events=$(event_count)
   complete_write=$(bash "$STACK" trunk context write --stack demo --file "$complete_context" 2>&1)
   expect_contains "$complete_write" "Prepare context stored: demo"
+  expect_event "$before_events" "prepare_context_written" "prepare_context"
   complete_context_status=$(bash "$STACK" trunk context --stack demo --json)
   [[ "$(jq -r '.completeness.complete' <<<"$complete_context_status")" == "true" ]] \
     || fail "expected complete context: $complete_context_status"
   [[ "$(jq -r '.current_context.source.kind' <<<"$complete_context_status")" == "agent" ]] \
     || fail "expected context source to round-trip: $complete_context_status"
+  before_events=$(event_count)
   context_prepare_out=$(bash "$PG" prepare-trunk --stack demo --from-context 2>&1)
   expect_contains "$context_prepare_out" "Prepared trunk brief written"
+  expect_event "$before_events" "prepare_trunk_written" "prepare_trunk"
   context_review_payload=$(bash "$STACK" trunk review --stack demo --json)
   expect_contains "$(jq -r '.items[] | select(.id == "api") | .item_brief.why[0]' <<<"$context_review_payload")" "Verify child item context handoff."
 
   fake_materialization=$(jq '.materialization_id = (.materialization_id + "-new")' <<<"$(jq -c '.materialization' <<<"$complete_context_status")")
+  before_events=$(event_count)
   fake_materialize_out=$(bash "$PG" stack-store-record-materialization --stack demo --json "$fake_materialization" 2>&1)
   expect_contains "$fake_materialize_out" "Materialization stored: demo"
+  expect_event "$before_events" "materialized" "materialization"
   stale_context_status=$(bash "$STACK" trunk context --stack demo --json)
   [[ "$(jq -r '.context == null' <<<"$stale_context_status")" == "true" ]] \
     || fail "expected current context to be empty after rematerialization: $stale_context_status"
@@ -366,6 +415,7 @@ SH
     }
   ]' >"$item_briefs"
 
+  before_events=$(event_count)
   prepare_out=$(bash "$PG" prepare-trunk --stack demo \
     --async \
     --expires 8h \
@@ -376,6 +426,7 @@ SH
     --approach "review each materialized item before pushing" \
     --item-briefs "$item_briefs" 2>&1)
   expect_contains "$prepare_out" "Prepared trunk brief written"
+  expect_event "$before_events" "prepare_trunk_written" "prepare_trunk"
   prepared_trunk_list=$(bash "$STACK" trunk list --json)
   [[ "$(jq -r '.stacks[0].approval.state' <<<"$prepared_trunk_list")" == "needs_approval" ]] \
     || fail "expected prepared trunk to be ready for approval: $prepared_trunk_list"
@@ -523,8 +574,10 @@ SH
   check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   expect_contains "$check_out" "No active trunk lease for stack demo"
 
+  before_events=$(event_count)
   vscode_approve_out=$(bash "$PG" approve-trunk --draft "$yaml_draft_file" --reviewed-in-vscode 2>&1)
   expect_contains "$vscode_approve_out" "Trunk lease approved: demo"
+  expect_event "$before_events" "trunk_approved" "approval"
   vscode_check_out=$(bash "$PG" check-trunk --stack demo 2>&1)
   [[ "$(jq -r '.allowed' <<<"$vscode_check_out")" == "true" ]] \
     || fail "expected VS Code-reviewed YAML approval to allow trunk: $vscode_check_out"
