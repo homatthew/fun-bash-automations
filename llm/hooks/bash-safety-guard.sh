@@ -29,6 +29,160 @@ has_wrong_netflix_gh_host() {
   echo "$COMMAND" | grep -qE "(^|[;&|[:space:]])(export[[:space:]]+)?GH_HOST=['\"]?github\\.netflix\\.net['\"]?([[:space:];&|]|$)"
 }
 
+ssh_lease_file() {
+  printf '%s\n' "${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
+}
+
+extract_ssh_target() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+value_options = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
+    "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def normalize_host(token):
+    if "@" in token:
+        token = token.rsplit("@", 1)[1]
+    if token.startswith("[") and "]" in token:
+        token = token[1:token.index("]")]
+    return token
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "ssh":
+        continue
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "--":
+            idx += 1
+            if idx < len(segment):
+                print(normalize_host(segment[idx]))
+            sys.exit(0)
+        if token in value_options:
+            idx += 2
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        print(normalize_host(token))
+        sys.exit(0)
+sys.exit(0)
+PY
+}
+
+ssh_uses_unsafe_host_key_options() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+unsafe = []
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def check_option(value):
+    if "=" not in value:
+        return
+    key, raw = value.split("=", 1)
+    key = key.strip().lower()
+    val = raw.strip().lower()
+    if key == "stricthostkeychecking" and val == "no":
+        unsafe.append("StrictHostKeyChecking=no")
+    elif key in {"userknownhostsfile", "globalknownhostsfile"} and val == "/dev/null":
+        unsafe.append(f"{key}=/dev/null")
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] not in {"ssh", "scp", "rsync"}:
+        continue
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-o" and idx + 1 < len(segment):
+            check_option(segment[idx + 1])
+            idx += 2
+            continue
+        if token.startswith("-o") and len(token) > 2:
+            check_option(token[2:])
+        idx += 1
+
+if unsafe:
+    print(", ".join(dict.fromkeys(unsafe)))
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+has_valid_ssh_lease() {
+  local target="$1" lease_file now host expiry
+  lease_file=$(ssh_lease_file)
+  [ -f "$lease_file" ] && [ -n "$target" ] || return 1
+  now=$(date +%s)
+  while IFS=' ' read -r host expiry; do
+    if [ "$host" = "$target" ] && [ "$expiry" -gt "$now" ] 2>/dev/null; then
+      return 0
+    fi
+  done < "$lease_file"
+  return 1
+}
+
 gist_upload_filenames() {
   python3 - "$COMMAND" <<'PY'
 import json
@@ -400,19 +554,20 @@ check_remote_exec() {
     deny "Blocked: pipe-to-shell (curl|sh) is not allowed."
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)eval\s' &&
     deny "Blocked: eval is not allowed."
+  local unsafe_ssh_options
+  unsafe_ssh_options=$(ssh_uses_unsafe_host_key_options 2>/dev/null || true)
+  if [ -n "$unsafe_ssh_options" ]; then
+    deny "Blocked: unsafe SSH host-key option ($unsafe_ssh_options). Use StrictHostKeyChecking=accept-new instead."
+  fi
   # Check SSH lease file for approved hosts (12-hour leases via ssh-gate)
   if echo "$COMMAND" | grep -qE '(^|[;&|]\s*)ssh\s'; then
     local SSH_TARGET
-    SSH_TARGET=$(echo "$COMMAND" | grep -oE 'ssh[[:space:]]+("[^"]*"|[^[:space:];&|]+)' | head -1 | sed 's/^ssh[[:space:]]*//' | tr -d '"')
-    local LEASE_FILE="/tmp/.claude-ssh-leases"
-    if [ -f "$LEASE_FILE" ] && [ -n "$SSH_TARGET" ]; then
-      local NOW
-      NOW=$(date +%s)
-      while IFS=' ' read -r host expiry; do
-        if [ "$host" = "$SSH_TARGET" ] && [ "$expiry" -gt "$NOW" ] 2>/dev/null; then
-          return  # Valid lease found
-        fi
-      done < "$LEASE_FILE"
+    SSH_TARGET=$(extract_ssh_target)
+    if has_valid_ssh_lease "$SSH_TARGET"; then
+      return
+    fi
+    if [ -n "$SSH_TARGET" ]; then
+      deny "Blocked: ssh to '$SSH_TARGET' requires a lease. Ask the user to run: ssh-gate $SSH_TARGET"
     fi
     deny "Blocked: ssh requires a lease. Ask the user to run: ssh-gate <host>"
   fi
@@ -423,15 +578,8 @@ check_remote_exec() {
     # Remote host detected — extract and check lease
     local REMOTE_HOST
     REMOTE_HOST=$(echo "$COMMAND" | grep -oE '([a-zA-Z0-9._-]+@)?[a-zA-Z0-9._-]+:' | head -1 | sed 's/.*@//' | sed 's/://')
-    local LEASE_FILE="/tmp/.claude-ssh-leases"
-    if [ -f "$LEASE_FILE" ] && [ -n "$REMOTE_HOST" ]; then
-      local NOW
-      NOW=$(date +%s)
-      while IFS=' ' read -r host expiry; do
-        if [ "$host" = "$REMOTE_HOST" ] && [ "$expiry" -gt "$NOW" ] 2>/dev/null; then
-          return  # Valid lease found
-        fi
-      done < "$LEASE_FILE"
+    if has_valid_ssh_lease "$REMOTE_HOST"; then
+      return
     fi
     deny "Blocked: scp/rsync to remote host '$REMOTE_HOST' requires an SSH lease. Ask the user to run: ssh-gate $REMOTE_HOST"
   fi

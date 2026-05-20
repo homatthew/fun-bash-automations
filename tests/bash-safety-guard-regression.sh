@@ -5,6 +5,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GUARD="$ROOT/llm/hooks/bash-safety-guard.sh"
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/bash-safety-guard-test.XXXXXX")
 trap 'rm -rf "$TEST_TMP"' EXIT
+export SSH_LEASE_FILE="$TEST_TMP/ssh-leases"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -30,7 +31,7 @@ write_payload() {
   jq -n --argjson files "$files_json" '{files:$files}' >"$path"
 }
 
-echo "1..22"
+echo "1..28"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -124,3 +125,30 @@ echo "ok 21 - chained global git config mutation is blocked"
 config_chained_after_allow_block=$(run_guard "git config --local rerere.enabled true; git config --global rerere.enabled true")
 expect_contains "$config_chained_after_allow_block" "git config mutations are not allowed"
 echo "ok 22 - chained git config mutation after allowed rerere is blocked"
+
+ssh_option_block=$(run_guard "ssh -o LogLevel=ERROR nfcassandra-node.example uptime")
+expect_contains "$ssh_option_block" "ssh to 'nfcassandra-node.example' requires a lease"
+echo "ok 23 - ssh option parsing reports the target host"
+
+ssh_strict_no_block=$(run_guard "ssh -o StrictHostKeyChecking=no nfcassandra-node.example uptime")
+expect_contains "$ssh_strict_no_block" "unsafe SSH host-key option"
+echo "ok 24 - ssh StrictHostKeyChecking=no is blocked"
+
+future_expiry=$(( $(date +%s) + 3600 ))
+printf 'nfcassandra-node.example %s\n' "$future_expiry" >"$SSH_LEASE_FILE"
+
+ssh_option_allow=$(run_guard "ssh -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR nfcassandra-node.example uptime")
+[[ -z "$ssh_option_allow" ]] || fail "expected ssh with safe options and leased host to be allowed, got: $ssh_option_allow"
+echo "ok 25 - ssh lease matches host after safe options"
+
+ssh_known_hosts_null_block=$(run_guard "ssh -o UserKnownHostsFile=/dev/null nfcassandra-node.example uptime")
+expect_contains "$ssh_known_hosts_null_block" "unsafe SSH host-key option"
+echo "ok 26 - ssh UserKnownHostsFile=/dev/null is blocked"
+
+ssh_user_host_allow=$(run_guard "ssh -p 22 cassandra@nfcassandra-node.example 'ls /ebs/cassandra/data'")
+[[ -z "$ssh_user_host_allow" ]] || fail "expected ssh user@host to match host lease, got: $ssh_user_host_allow"
+echo "ok 27 - ssh user@host normalizes to host lease"
+
+scp_env_lease_allow=$(run_guard "scp cassandra@nfcassandra-node.example:/tmp/schema.cql $TEST_TMP/schema.cql")
+[[ -z "$scp_env_lease_allow" ]] || fail "expected scp to use configured lease file, got: $scp_env_lease_allow"
+echo "ok 28 - scp uses shared ssh lease helper"
