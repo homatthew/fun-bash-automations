@@ -1,0 +1,23 @@
+#!/bin/bash
+# Fast Claude Code shim for T3 Code.
+# Bypasses the Netflix wrapper (which fetches profiles, plugins, etc.)
+# to avoid T3 Code's provider health-check timeout.
+#
+# Resolves the latest installed Claude Code binary dynamically so it
+# survives version upgrades without manual path edits.
+
+VERSIONS_DIR="$HOME/.local/share/claude/versions"
+
+if [[ ! -d "$VERSIONS_DIR" ]]; then
+  exec /opt/nflx/bin/claude "$@"
+fi
+
+LATEST=$(ls -v "$VERSIONS_DIR" 2>/dev/null \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+  | tail -1)
+
+if [[ -z "$LATEST" ]]; then
+  exec /opt/nflx/bin/claude "$@"
+fi
+
+exec "$VERSIONS_DIR/$LATEST" "$@"
