@@ -1036,6 +1036,75 @@ pg_trunk_draft_path() {
     "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$stack_name")"
 }
 
+pg_cmd_stack_event_contract() {
+  local event_type="" stack_name="" repo_key="" repo_root=""
+  local materialization_id="" manifest_hash="" trunk_tip=""
+  local sequence="" created_at="" changed_surface=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --type) event_type="$2"; shift 2 ;;
+      --stack|--name) stack_name="$2"; shift 2 ;;
+      --repo-key) repo_key="$2"; shift 2 ;;
+      --repo-root) repo_root="$2"; shift 2 ;;
+      --materialization-id) materialization_id="$2"; shift 2 ;;
+      --manifest-hash) manifest_hash="$2"; shift 2 ;;
+      --trunk-tip) trunk_tip="$2"; shift 2 ;;
+      --sequence) sequence="$2"; shift 2 ;;
+      --created-at) created_at="$2"; shift 2 ;;
+      --changed-surface) changed_surface="$2"; shift 2 ;;
+      *) pg_fail "Unknown stack-event-contract option: $1"; return 1 ;;
+    esac
+  done
+  case "|stack_manifest_changed|materialized|prepare_context_written|prepare_trunk_written|trunk_approved|lease_changed|push_plan_changed|" in
+    *"|$event_type|"*) ;;
+    *) pg_fail "stack-event-contract requires a known --type"; return 1 ;;
+  esac
+  [[ -n "$stack_name" ]] || pg_fail "stack-event-contract requires --stack NAME"
+  repo_key="${repo_key:-$(pg_repo_key)}" || return 1
+  repo_root="${repo_root:-$(pg_repo_root)}" || return 1
+  sequence="${sequence:-1}"
+  created_at="${created_at:-$(pg_now_utc)}"
+  [[ "$sequence" =~ ^[0-9]+$ ]] || pg_fail "stack-event-contract --sequence must be an integer"
+  [[ -n "$materialization_id" && -n "$manifest_hash" && -n "$trunk_tip" ]] \
+    || pg_fail "stack-event-contract requires --materialization-id, --manifest-hash, and --trunk-tip"
+  [[ -n "$changed_surface" ]] || pg_fail "stack-event-contract requires --changed-surface"
+  jq -n \
+    --arg event_type "$event_type" \
+    --arg stack_name "$stack_name" \
+    --arg repo_key "$repo_key" \
+    --arg repo_root "$repo_root" \
+    --arg materialization_id "$materialization_id" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg trunk_tip "$trunk_tip" \
+    --arg sequence "$sequence" \
+    --arg created_at "$created_at" \
+    --arg changed_surface "$changed_surface" \
+    '{
+      schema_version: 1,
+      event_type: $event_type,
+      repo_key: $repo_key,
+      repo_root: $repo_root,
+      stack_name: $stack_name,
+      materialization_id: $materialization_id,
+      manifest_hash: $manifest_hash,
+      trunk_tip: $trunk_tip,
+      sequence: ($sequence | tonumber),
+      created_at: $created_at,
+      changed_surface: $changed_surface,
+      cache_key: {
+        repo_key: $repo_key,
+        stack_name: $stack_name
+      },
+      materialization_key: {
+        repo_key: $repo_key,
+        stack_name: $stack_name,
+        materialization_id: $materialization_id,
+        manifest_hash: $manifest_hash,
+        trunk_tip: $trunk_tip
+      }
+    }'
+}
+
 pg_trunk_prepare_status_json() {
   local stack_name="$1" worktree_root store_repo common_dir prepare_path state reason prepared_at=""
   local prepare_command review_command draft_command approve_saved_draft_command
@@ -1939,6 +2008,138 @@ pg_render_trunk_summary() {
   ' "$draft"
 }
 
+pg_write_yaml_draft() {
+  local draft="$1" yaml_file="$2" kind="${3:-branch}" context_block="${4:-}"
+  {
+    if [[ "$kind" == "trunk" ]]; then
+      echo "# pg trunk approval draft - edit description and stack_items[].description."
+      echo "# Machine fields stay below the human review text."
+    else
+      echo "# pg approval draft - edit description first."
+      echo "# Then adjust user_intent, agent_assertion_template, or approved_scope if needed."
+      echo "# Save + quit to continue, :cq or empty file to abort."
+    fi
+    echo "#"
+    [[ -n "$context_block" ]] && printf '%s\n' "$context_block"
+    python3 - "$draft" <<'PY'
+import json
+import re
+import sys
+import textwrap
+
+WIDTH = 88
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+
+def wrap_line(line):
+    if len(line) <= WIDTH:
+        return line
+    prefix = re.match(r"\s*", line).group(0)
+    text = line[len(prefix):]
+    if not text:
+        return line
+    width = max(24, WIDTH - len(prefix))
+    parts = textwrap.wrap(
+        text,
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return "\n".join(prefix + part for part in (parts or [text]))
+
+def wrap_text(value):
+    if not isinstance(value, str):
+        return value
+    return "\n".join(wrap_line(line) for line in value.splitlines())
+
+def wrap_desc(desc):
+    if not isinstance(desc, dict):
+        return
+    for key in ("summary", "motivation", "approach", "scope", "risks", "testing"):
+        value = desc.get(key)
+        if isinstance(value, str):
+            desc[key] = wrap_text(value)
+        elif isinstance(value, list):
+            desc[key] = [wrap_text(item) if isinstance(item, str) else item for item in value]
+
+wrap_desc(data.get("description"))
+for key in ("user_intent", "agent_assertion_template"):
+    if isinstance(data.get(key), str):
+        data[key] = wrap_text(data[key])
+for item in data.get("stack_items") or []:
+    wrap_desc(item.get("description") if isinstance(item, dict) else None)
+
+def quote_key(key):
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(key)):
+        return str(key)
+    return json.dumps(str(key))
+
+def scalar(value):
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if value == "":
+        return '""'
+    return json.dumps(str(value), ensure_ascii=False)
+
+def emit_multiline(prefix, text, indent):
+    print(f"{prefix}|-")
+    lines = text.splitlines() or [""]
+    pad = " " * (indent + 2)
+    for line in lines:
+        print(pad + line)
+
+def emit_value(value, indent=0, key_prefix=None):
+    pad = " " * indent
+    if isinstance(value, dict):
+        if key_prefix is not None:
+            print(key_prefix)
+        if not value:
+            if key_prefix is None:
+                print("{}")
+            else:
+                print(" " * (indent + 2) + "{}")
+            return
+        child_indent = indent if key_prefix is None else indent + 2
+        for key, child in value.items():
+            emit_value(child, child_indent, " " * child_indent + quote_key(key) + ": ")
+    elif isinstance(value, list):
+        if not value:
+            print((key_prefix or pad) + "[]")
+            return
+        if key_prefix is not None:
+            print(key_prefix)
+            child_indent = indent + 2
+        else:
+            child_indent = indent
+        for item in value:
+            item_pad = " " * child_indent
+            if isinstance(item, dict):
+                print(item_pad + "-")
+                emit_value(item, child_indent + 2)
+            elif isinstance(item, list):
+                print(item_pad + "-")
+                emit_value(item, child_indent + 2)
+            elif isinstance(item, str) and "\n" in item:
+                emit_multiline(item_pad + "- ", item, child_indent)
+            else:
+                print(item_pad + "- " + scalar(item))
+    elif isinstance(value, str) and "\n" in value:
+        emit_multiline(key_prefix or pad, value, indent)
+    else:
+        print((key_prefix or pad) + scalar(value))
+
+emit_value(data)
+PY
+  } >"$yaml_file"
+}
+
 pg_cmd_trunk() {
   local stack_name=""
   local assume_yes="false"
@@ -1950,9 +2151,17 @@ pg_cmd_trunk() {
     esac
   done
   [[ -n "$stack_name" ]] || pg_fail "pg trunk requires --stack NAME"
-  local prepare_path draft_file script_file materialization stack_items what why approach scope risks async_json trunk_ref manifest_json
+  local prepare_path draft_file yaml_file script_file materialization stack_items what why approach scope risks async_json trunk_ref manifest_json
+  local prepare_status prepare_state prepare_reason prepare_command
   prepare_path=$(pg_trunk_prepare_path "$stack_name")
-  [[ -f "$prepare_path" ]] || pg_fail "No prepared trunk brief for $stack_name. Run pg prepare-trunk first."
+  prepare_status=$(pg_trunk_prepare_status_json "$stack_name") || return 1
+  prepare_state=$(jq -r '.state // "missing"' <<<"$prepare_status")
+  if [[ "$prepare_state" != "ready" ]]; then
+    prepare_reason=$(jq -r '.reason // "Prepared trunk brief is not ready."' <<<"$prepare_status")
+    prepare_command=$(jq -r '.commands.prepare // ""' <<<"$prepare_status")
+    pg_fail "Approval draft blocked: $prepare_reason Run: $prepare_command"
+    return 1
+  fi
   materialization=$(pg_trunk_latest_materialization_json "$stack_name") || {
     pg_fail "No materialization recorded for stack $stack_name. Run stack trunk materialize first."
     return 1
@@ -1969,6 +2178,7 @@ pg_cmd_trunk() {
   manifest_json=$(pg_stack_manifest_json "$stack_name" 2>/dev/null || echo '{}')
   trunk_ref=$(jq -r '.trunk // ""' <<<"$manifest_json")
   draft_file=$(pg_trunk_draft_path "$stack_name")
+  yaml_file="${draft_file%.json}.yaml"
   script_file="${draft_file%.json}.sh"
   jq -n \
     --arg repo_key "$(pg_repo_key)" \
@@ -2030,21 +2240,21 @@ pg_cmd_trunk() {
       created_at: $created_at,
       status: "active"
     }' >"$draft_file"
+  pg_write_yaml_draft "$draft_file" "$yaml_file" "trunk"
   cat >"$script_file" <<EOF
 #!/bin/bash
 set -euo pipefail
 DRAFT_FILE="$draft_file"
+YAML_FILE="$yaml_file"
 HELPER="$(pg_helper_path)"
 ASSUME_YES="$assume_yes"
 editor="\${EDITOR:-vi}"
 if command -v yq >/dev/null 2>&1; then
-  {
-    echo "# pg trunk approval draft — edit description and stack_items[].description."
-    echo "# Machine fields stay below the human review text."
-    yq -P eval '.' "\$DRAFT_FILE" --output-format=yaml
-  } > "\$DRAFT_FILE.yaml"
-  "\$editor" "\$DRAFT_FILE.yaml"
-  yq eval '.' "\$DRAFT_FILE.yaml" --output-format=json > "\$DRAFT_FILE.new"
+  if [ ! -f "\$YAML_FILE" ]; then
+    "\$HELPER" yaml-draft --draft "\$DRAFT_FILE" --out "\$YAML_FILE" --kind trunk
+  fi
+  "\$editor" "\$YAML_FILE"
+  yq eval '.' "\$YAML_FILE" --output-format=json > "\$DRAFT_FILE.new"
   jq empty "\$DRAFT_FILE.new"
   mv "\$DRAFT_FILE.new" "\$DRAFT_FILE"
 else
@@ -2067,19 +2277,21 @@ fi
 EOF
   chmod +x "$script_file"
   echo "Trunk approval script: $script_file"
-  echo "Draft file: $draft_file"
+  echo "Draft file: $yaml_file"
+  echo "JSON draft file: $draft_file"
   if [[ "${PG_AUTO_RUN_APPROVAL:-1}" == "1" ]] && [[ -t 0 || -t 1 ]]; then
     bash "$script_file"
   fi
 }
 
 pg_cmd_trunk_draft() {
-  local stack_name="" format="yaml" out_file=""
+  local stack_name="" format="yaml" out_file="" json_output="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stack|--name) stack_name="$2"; shift 2 ;;
       --format) format="$2"; shift 2 ;;
       --out) out_file="$2"; shift 2 ;;
+      --json) json_output="true"; shift ;;
       *) pg_fail "Unknown trunk-draft option: $1"; return 1 ;;
     esac
   done
@@ -2091,20 +2303,14 @@ pg_cmd_trunk_draft() {
 
   local trunk_out draft_file script_file target_file
   trunk_out=$(PG_AUTO_RUN_APPROVAL=0 pg_cmd_trunk --stack "$stack_name") || return 1
-  draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^Draft file:/ {print $2; exit}')
+  draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^JSON draft file:/ {print $2; exit}')
+  [[ -n "$draft_file" ]] || draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^Draft file:/ {print $2; exit}')
   script_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/^Trunk approval script:/ {print $2; exit}')
   [[ -f "$draft_file" ]] || { pg_fail "Unable to create trunk draft for $stack_name"; return 1; }
 
   if [[ "$format" == "yaml" ]]; then
-    command -v yq >/dev/null 2>&1 \
-      || { pg_fail "YAML trunk drafts require yq. Use --format json or install yq."; return 1; }
     target_file="${out_file:-$draft_file.yaml}"
-    {
-      echo "# pg trunk approval draft — edit description and stack_items[].description."
-      echo "# Save this file, then approve it from VS Code with Gitless: Approve Saved Draft."
-      echo "# Machine fields stay below the human review text."
-      yq -P eval '.' "$draft_file" --output-format=yaml
-    } >"$target_file"
+    pg_write_yaml_draft "$draft_file" "$target_file" "trunk"
   else
     target_file="${out_file:-$draft_file}"
     if [[ -n "$out_file" && "$out_file" != "$draft_file" ]]; then
@@ -2112,19 +2318,27 @@ pg_cmd_trunk_draft() {
     fi
   fi
 
-  jq -n \
-    --arg stack "$stack_name" \
-    --arg format "$format" \
-    --arg draft_file "$target_file" \
-    --arg json_draft_file "$draft_file" \
-    --arg script_file "$script_file" \
-    '{
-      stack: $stack,
-      format: $format,
-      draft_file: $draft_file,
-      json_draft_file: $json_draft_file,
-      script_file: (if $script_file == "" then null else $script_file end)
-    }'
+  if [[ "$json_output" == "true" ]]; then
+    jq -n \
+      --arg stack "$stack_name" \
+      --arg format "$format" \
+      --arg draft_file "$target_file" \
+      --arg json_draft_file "$draft_file" \
+      --arg script_file "$script_file" \
+      '{
+        stack: $stack,
+        format: $format,
+        draft_file: $draft_file,
+        json_draft_file: $json_draft_file,
+        script_file: (if $script_file == "" then null else $script_file end)
+      }'
+  else
+    printf 'stack: %s\n' "$stack_name"
+    printf 'format: %s\n' "$format"
+    printf 'draft_file: %s\n' "$target_file"
+    printf 'json_draft_file: %s\n' "$draft_file"
+    [[ -n "$script_file" ]] && printf 'script_file: %s\n' "$script_file"
+  fi
 }
 
 pg_cmd_preview_trunk() {
@@ -2137,6 +2351,25 @@ pg_cmd_preview_trunk() {
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
   pg_render_trunk_summary "$draft"
+}
+
+pg_cmd_yaml_draft() {
+  local draft="" out="" kind="branch"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) draft="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      *) pg_fail "Unknown yaml-draft option: $1"; return 1 ;;
+    esac
+  done
+  [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  [[ -n "$out" ]] || out="${draft%.json}.yaml"
+  case "$kind" in
+    branch|trunk) ;;
+    *) pg_fail "yaml-draft --kind must be branch or trunk"; return 1 ;;
+  esac
+  pg_write_yaml_draft "$draft" "$out" "$kind"
 }
 
 pg_cmd_approve_trunk() {
@@ -3913,7 +4146,7 @@ pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
   local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
   local assume_yes="false"
-  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file script_file script_path scope_json
+  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file yaml_file script_file script_path scope_json
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -y|--yes)
@@ -4118,6 +4351,7 @@ EOF
   fi
 
   draft_file="/tmp/pg-approve-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch_name").json"
+  yaml_file="${draft_file%.json}.yaml"
   script_file="/tmp/pg-approve-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch_name").sh"
   script_path=$(pg_helper_path)
 
@@ -4223,7 +4457,8 @@ ${file_stats:-#   (none)}
 #"
   fi
 
-  local yaml_file="${draft_file%.json}.yaml"
+  pg_write_yaml_draft "$draft_file" "$yaml_file" "branch" "$context_block"
+
   cat >"$script_file" <<EOF
 #!/bin/bash
 set -euo pipefail
@@ -4247,15 +4482,11 @@ CTXEOF
 if true; then
   editor="\${EDITOR:-vi}"
   if command -v yq >/dev/null 2>&1; then
-    # JSON → YAML with a helpful header + change-context comment.
-    {
-      echo "# pg approval draft — edit description first."
-      echo "# Then adjust user_intent, agent_assertion_template, or approved_scope if needed."
-      echo "# Save + quit to continue, :cq or empty file to abort."
-      echo "#"
-      [ -n "\$CONTEXT_BLOCK" ] && printf '%s\n' "\$CONTEXT_BLOCK"
-      yq -P eval '(.user_intent, .agent_assertion_template) style="literal"' "\$DRAFT_FILE" --output-format=yaml
-    } > "\$YAML_FILE"
+    # The initial YAML draft is written by pg draft-approve so callers can
+    # inspect/edit the human artifact directly. Regenerate only if missing.
+    if [ ! -f "\$YAML_FILE" ]; then
+      "\$HELPER" yaml-draft --draft "\$DRAFT_FILE" --out "\$YAML_FILE" --kind branch
+    fi
 
     cp "\$YAML_FILE" "\$YAML_FILE.bak"
     echo "Opening \$editor on \$YAML_FILE (YAML view of draft)."
@@ -4325,7 +4556,8 @@ EOF
   chmod +x "$script_file"
 
   echo "Approval script: $script_file"
-  echo "Draft file: $draft_file"
+  echo "Draft file: $yaml_file"
+  echo "JSON draft file: $draft_file"
 
   # Auto-run the approval script unless explicitly suppressed. This gives the
   # user a single `pg` command that opens vim on the draft (intent + assert +
@@ -5003,7 +5235,7 @@ pg_main() {
   done
 
   # Bare `pg` → draft-approve with auto-run of the approval script. That
-  # opens vim on the draft JSON (intent + assert + scope), preview, y/N,
+  # opens vim on the draft YAML (intent + assert + scope), preview, y/N,
   # approve. One vim session, no copy-paste.
   local command="${1:-draft-approve}"
   if [[ $# -gt 0 ]]; then
@@ -5054,6 +5286,9 @@ pg_main() {
       ;;
     preview-trunk)
       pg_cmd_preview_trunk "$@"
+      ;;
+    yaml-draft)
+      pg_cmd_yaml_draft "$@"
       ;;
     push)
       pg_cmd_push "$@"
@@ -5114,6 +5349,9 @@ pg_main() {
       ;;
     stack-store-branch-materialization)
       pg_cmd_stack_store_branch_materialization "$@"
+      ;;
+    stack-event-contract)
+      pg_cmd_stack_event_contract "$@"
       ;;
     stack-store-prepare-context)
       pg_cmd_stack_store_prepare_context "$@"
@@ -5179,7 +5417,7 @@ Stack trunks:
                          Human review/approval for the whole stack trunk.
                          --yes still opens the editor; it only skips the final y/N prompt.
                          Draft uses stack items with pointer commits, contained commits, and file groups.
-  pg trunk-draft --stack S [--format yaml|json] [--out FILE]
+  pg trunk-draft --stack S [--format yaml|json] [--out FILE] [--json]
                          Create the same review draft without opening an editor.
                          Used by VS Code so the user can review/edit the YAML
                          natively before submitting approval.
@@ -5198,6 +5436,9 @@ Internal plumbing (called by pg/stack themselves; not primary user workflow):
                          Writes a trunk lease from a saved VS Code-reviewed draft.
   pg stack-store-*      Dolt-backed stack manifest/materialization storage,
                          including init/add/move/remove/materialization.
+  pg stack-event-contract
+                         Emits the v1 Stack Review cache invalidation event
+                         shape used by stack/pg writers and UI consumers.
   pg preview-draft      Renders the summary the approval script shows.
   pg guard-check        Called by bash-safety-guard on every git push.
 

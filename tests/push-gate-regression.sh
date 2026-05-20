@@ -240,9 +240,14 @@ run_helper "$REPO" prepare \
   --approach "use prepared semantic brief before approval" >/dev/null
 draft_output=$(run_helper "$REPO" draft-approve)
 draft_script=$(extract_path "$draft_output" "^Approval script:")
-draft_file=$(extract_path "$draft_output" "^Draft file:")
+draft_yaml_file=$(extract_path "$draft_output" "^Draft file:")
+draft_file=$(extract_path "$draft_output" "^JSON draft file:")
 expect_file "$draft_script"
+expect_file "$draft_yaml_file"
 expect_file "$draft_file"
+[[ "$(yq eval '.description.summary' "$draft_yaml_file")" == "feature start" ]] \
+  || fail "expected YAML approval draft to parse"
+expect_contains "$(cat "$draft_yaml_file")" "user_intent: |-"
 [[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,description,user_intent,agent_assertion_template" ]] \
   || fail "expected human-readable fields at top of lease draft: $(jq -r 'keys_unsorted[0:6] | join(",")' "$draft_file")"
 [[ "$(jq -r '.description.summary' "$draft_file")" == "feature start" ]] \
@@ -259,9 +264,8 @@ echo "ok 2 - draft script renders readable approval summary"
 
 common_dir=$(current_common_dir "$REPO")
 lease_path="$common_dir/push-gate/leases/refs/heads/mho/existing-pr.json"
-jq '.description.summary = "feature start from edited description" | .brief.what = "stale brief field"' \
-  "$draft_file" >"$draft_file.tmp"
-mv "$draft_file.tmp" "$draft_file"
+yq eval '.description.summary = "feature start from edited description" | .brief.what = "stale brief field"' \
+  -i "$draft_yaml_file"
 approval_block=$(printf 'y\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$approval_block" "pg approve requires an interactive terminal"
 [[ "$(jq -r '.brief.what' "$draft_file")" == "feature start from edited description" ]] \
@@ -396,7 +400,7 @@ run_helper "$BOOTSTRAP_REPO" prepare \
   --approach "use prepared semantic brief before approval" >/dev/null
 bootstrap_output=$(run_helper "$BOOTSTRAP_REPO" draft-approve)
 bootstrap_script=$(extract_path "$bootstrap_output" "^Approval script:")
-bootstrap_draft=$(extract_path "$bootstrap_output" "^Draft file:")
+bootstrap_draft=$(extract_path "$bootstrap_output" "^JSON draft file:")
 bootstrap_common_dir=$(current_common_dir "$BOOTSTRAP_REPO")
 bootstrap_lease="$bootstrap_common_dir/push-gate/leases/refs/heads/mho/bootstrap.json"
 bootstrap_block=$(printf 'y\n' | EDITOR=true bash "$bootstrap_script" 2>&1 || true)
@@ -442,7 +446,7 @@ upstream_draft=$(run_helper "$REPO" draft-approve \
   --intent $'allow upstream branch push\nsame branch\nsame pr' \
   --assert-flow $'update pr #123\nbranch mho/existing-pr\nremote upstream\nno rewrite')
 upstream_script=$(extract_path "$upstream_draft" "^Approval script:")
-upstream_draft_file=$(extract_path "$upstream_draft" "^Draft file:")
+upstream_draft_file=$(extract_path "$upstream_draft" "^JSON draft file:")
 upstream_block=$(printf 'y\n' | EDITOR=true bash "$upstream_script" 2>&1 || true)
 expect_contains "$upstream_block" "Approval blocked"
 jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$upstream_draft_file" >"$lease_path"
@@ -501,7 +505,7 @@ export PG_TEST_REPO_VIEW_MAP='{"example.test/Netflix-Skunkworks/topology-write":
 topo_output=$(run_helper "$TOPO_REPO" draft-approve \
   --intent $'allow topology write\nsame branch' \
   --assert-flow $'new pr flow\nbranch mho/topology-write\nno rewrite')
-topo_draft=$(extract_path "$topo_output" "^Draft file:")
+topo_draft=$(extract_path "$topo_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_draft")" == "upstream" ]] || fail "expected writable-upstream default remote to be upstream"
 [[ "$(jq -r '.pr_repo' "$topo_draft")" == "example.test/Netflix-Skunkworks/topology-write" ]] || fail "expected pr_repo to default to upstream topology"
 echo "ok 21 - topology picks upstream PR repo and upstream push remote when writable"
@@ -520,7 +524,7 @@ export PG_TEST_REPO_VIEW_MAP='{"example.test/Netflix-Skunkworks/topology-read":{
 topo_read_output=$(run_helper "$TOPO_READ_REPO" draft-approve \
   --intent $'allow topology read\nsame branch' \
   --assert-flow $'new pr flow\nbranch mho/topology-read\nno rewrite')
-topo_read_draft=$(extract_path "$topo_read_output" "^Draft file:")
+topo_read_draft=$(extract_path "$topo_read_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_read_draft")" == "origin" ]] || fail "expected non-writable upstream to fall back to origin push remote"
 [[ "$(jq -r '.pr_repo' "$topo_read_draft")" == "example.test/Netflix-Skunkworks/topology-read" ]] || fail "expected pr_repo to stay on upstream even when push remote falls back"
 echo "ok 22 - topology falls back to origin push remote when upstream is not writable"
@@ -540,7 +544,7 @@ export PG_TEST_REPO_VIEW_MAP='{"example.test/Netflix-Skunkworks/topology-track":
 topo_track_output=$(run_helper "$TOPO_TRACK_REPO" draft-approve \
   --intent $'allow topology track\nsame branch' \
   --assert-flow $'update pr line\nbranch mho/topology-track\nno rewrite')
-topo_track_draft=$(extract_path "$topo_track_output" "^Draft file:")
+topo_track_draft=$(extract_path "$topo_track_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_track_draft")" == "origin" ]] || fail "expected tracked branch to keep origin remote"
 echo "ok 23 - tracked branch keeps existing remote instead of auto-flipping to upstream"
 
@@ -570,7 +574,7 @@ export PG_TEST_PR_JSON='[{"number":181,"url":"https://example.test/pr/181","base
 pr_base_output=$(run_helper "$PR_BASE_REPO" draft-approve \
   --intent $'update pr #181\nsame branch\nno unrelated changes' \
   --assert-flow $'update pr #181\nbranch mho/pr-base\nno rewrite')
-pr_base_draft=$(extract_path "$pr_base_output" "^Draft file:")
+pr_base_draft=$(extract_path "$pr_base_output" "^JSON draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$pr_base_draft")" == "refs/remotes/origin/main" ]] \
   || fail "expected PR approval scope to use PR base origin/main, got $(jq -r '.approved_scope.base_ref' "$pr_base_draft")"
 echo "ok 24 - existing PR approval scope uses GitHub PR base instead of tracking branch"
@@ -592,7 +596,7 @@ topo_bind_output=$(run_helper "$TOPO_BIND_REPO" draft-approve \
   --intent $'allow topology bind\nsame branch' \
   --assert-flow $'new pr flow\nbranch mho/topology-bind\nno rewrite')
 topo_bind_script=$(extract_path "$topo_bind_output" "^Approval script:")
-topo_bind_draft=$(extract_path "$topo_bind_output" "^Draft file:")
+topo_bind_draft=$(extract_path "$topo_bind_output" "^JSON draft file:")
 topo_bind_common=$(current_common_dir "$TOPO_BIND_REPO")
 topo_bind_lease="$topo_bind_common/push-gate/leases/refs/heads/mho/topology-bind.json"
 topo_bind_block=$(printf 'y\n' | EDITOR=true bash "$topo_bind_script" 2>&1 || true)
@@ -627,7 +631,7 @@ low_prepare_path=$(extract_path "$low_prepare_output" "^Prepared brief written:"
 [[ "$(jq -r '.async_iteration.max_pushes' "$low_prepare_path")" == "5" ]] \
   || fail "expected low-stakes prepare to default max_pushes to 5"
 low_draft_output=$(run_helper "$LOW_REPO" draft-approve)
-low_draft_file=$(extract_path "$low_draft_output" "^Draft file:")
+low_draft_file=$(extract_path "$low_draft_output" "^JSON draft file:")
 [[ "$(jq -r '.async_iteration.enabled' "$low_draft_file")" == "true" ]] \
   || fail "expected low-stakes draft to carry async"
 [[ "$(jq -r '.async_iteration.scope.branch_name' "$low_draft_file")" == "mho/low-stakes" ]] \
