@@ -14,10 +14,10 @@ topology warning, operationally it means: GitHub PR base wins; local ancestry is
 stale/diagnostic.
 
 After a Dolt-backed private trunk is materialized, the final branch in a stack
-may have the private trunk as its nearest local parent. `stack status`
-recognizes that recorded materialization and prints it as an expected topology
-note instead of stale local ancestry; GitHub PR bases still win for PR-scoped
-commands.
+may have the private trunk as its nearest local parent. PR-scoped
+`stack status --pr <N> --children` recognizes that recorded materialization and
+prints it as an expected topology note instead of stale local ancestry; GitHub
+PR bases still win for PR-scoped commands.
 
 Prefer PR-scoped commands when a PR number is known:
 
@@ -27,8 +27,9 @@ stack checkout --pr <N>
 stack push --pr <N> --children
 ```
 
-Broad `stack push` remains supported, but it can include unrelated same-prefix
-local stacks. Use it only when that broad scope is intentional.
+Plain `stack push` no longer acts on broad local ancestry. Use
+`stack trunk push --stack <name>` for declared stacks, or
+`stack push --pr <N> --children` for PR-scoped stacks.
 
 For codified stacks, the stack can own a private trunk. This trunk is a normal
 local branch for one stack, not `main`. The manifest declares item order, the
@@ -129,17 +130,21 @@ approve the reviewed tip exactly. If `stack sync`, `stack insert`,
 `stack trunk materialize`, or `stack squash` rewrites a branch and its
 descendants, every moved branch with a normal lease is stale and needs human
 review again. Async leases are opt-in: `pg prepare --async` or
-`stack push --async` lets one review cover repeated pushes only while expiry,
-push budget, branch/remote scope, semantic scope, and optional rewrite approval
-still pass. There is no agent bypass. `stack push` prepares one branch, stops,
-prints `pg -C <repo>`, and waits for the human before continuing on the next
-invocation.
+PR-scoped `stack push --async` lets one review cover repeated pushes only while
+expiry, push budget, branch/remote scope, semantic scope, and optional rewrite
+approval still pass. There is no agent bypass. `stack push --pr <N> --children`
+prepares one branch, stops, prints `pg -C <repo>`, and waits for the human
+before continuing on the next invocation.
 
 ## Command Behavior
 
-`stack status` shows git topology, GitHub PR state, CI, and pg lease state. The
-human table ends with a safe next command. `stack status --json` stays pure JSON
-for scripts.
+`stack trunk list` is the default dashboard for declared materialized stacks.
+`stack status --pr <N> --children` shows a PR-scoped view from GitHub PR bases.
+Broad local-ancestry inference is diagnostic only and requires
+`stack status --implicit`; stale scratch and backup branches otherwise make the
+output misleading. The human table ends with a safe next command.
+`stack status --json` stays pure JSON for scripts when scoped by PR or
+`--implicit`.
 
 `stack checkout --pr <N>` resolves an open PR to a local branch, refuses dirty
 worktrees, checks out that branch, prints the PR-scoped stack context, and shows
@@ -271,10 +276,10 @@ restacks descendants. Use `--pr <N> --onto-pr-base` when GitHub says a PR's base
 differs from local ancestry. Its next step lists moved descendants, stale
 leases, and the push command to continue.
 
-`stack push --dry-run` prints the push order, identifies the first branch that
-will prepare, and explains why downstream branches wait. `stack push` then walks
-parents first, using fresh leases for `pg push` and stopping at the first missing
-or stale lease after `pg prepare`.
+`stack push --dry-run --pr <N> --children` prints the push order, identifies the
+first branch that will prepare, and explains why downstream branches wait.
+`stack push --pr <N> --children` then walks parents first, using fresh leases for
+`pg push` and stopping at the first missing or stale lease after `pg prepare`.
 
 ## Edge Cases
 
@@ -290,9 +295,12 @@ or stale lease after `pg prepare`.
   expected rather than stale ancestry.
 - Redundant local parent branch: PR-scoped status/push still follow GitHub
   `baseRefName`; local ancestry only triggers a warning.
-- Unrelated same-prefix branches: use `--pr <N> --children` to exclude them.
-- No-PR children: broad stack views include them; PR-scoped child traversal only
-  follows branches with PRs in the GitHub DAG.
+- Unrelated same-prefix branches: default status no longer infers broad local
+  stacks; use `--pr <N> --children` for PR stacks or `--implicit` for explicit
+  local-ancestry diagnostics.
+- No-PR children: only `--implicit` broad stack views include them for
+  diagnostics; PR-scoped child traversal and push only follow branches with PRs
+  in the GitHub DAG.
 - Stale leases: any moved branch tip needs a fresh `pg` approval.
 - Topology mismatch: GitHub PR base wins; use `stack squash --pr <N>
   --onto-pr-base` if the branch itself needs cleanup against the PR base.

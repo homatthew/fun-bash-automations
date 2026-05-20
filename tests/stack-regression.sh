@@ -565,16 +565,23 @@ STACK_TEST_LEASES_JSON=$(jq -c -n --arg rr "$REPO" --arg anchor "$BASE_HEAD" '[
 echo "1..36"
 
 # ------------------------------------------------------------------------
-# 1. status renders all three branches
+# 1. broad status rejects implicit inference; --implicit renders all branches
 # ------------------------------------------------------------------------
-out=$(run_stack status 2>&1)
+default_status_rc=0
+default_status=$(run_stack status 2>&1) || default_status_rc=$?
+[[ "$default_status_rc" != "0" ]] || fail "broad stack status should require --implicit"
+expect_contains "$default_status" "broad implicit stack inference is disabled by default"
+expect_contains "$default_status" "stack trunk list"
+expect_contains "$default_status" "stack status --pr <N> --children"
+
+out=$(run_stack status --implicit 2>&1)
 expect_contains "$out" "mho/feature-base"
 expect_contains "$out" "mho/feature-api"
 expect_contains "$out" "mho/feature-ui"
 expect_contains "$out" "#42"
 expect_contains "$out" "#43"
 expect_contains "$out" "Next step:"
-echo "ok 1 - status renders 3-branch stack with PR numbers"
+echo "ok 1 - broad status requires --implicit; implicit renders 3-branch stack with PR numbers"
 
 # ------------------------------------------------------------------------
 # 2. status surfaces lease state: allowed, stale-tip, missing
@@ -598,7 +605,7 @@ echo "ok 3 - CI rollup summarized to PASS / PENDING"
 # ------------------------------------------------------------------------
 # 4. status --json is valid and has 3 branches in one stack
 # ------------------------------------------------------------------------
-json_out=$(run_stack status --json 2>&1)
+json_out=$(run_stack status --implicit --json 2>&1)
 expect_not_contains "$json_out" "Next step:"
 n_stacks=$(echo "$json_out" | jq '.stacks | length')
 [[ "$n_stacks" == "1" ]] || fail "expected 1 stack, got $n_stacks"
@@ -611,7 +618,7 @@ echo "ok 4 - status --json shape is valid"
 # ------------------------------------------------------------------------
 # 5. status accepts explicit --base and --prefix
 # ------------------------------------------------------------------------
-explicit_out=$(run_stack status --base origin/main --prefix mho/feature- 2>&1)
+explicit_out=$(run_stack status --implicit --base origin/main --prefix mho/feature- 2>&1)
 expect_contains "$explicit_out" "Base: origin/main"
 expect_contains "$explicit_out" "Prefix: mho/feature-"
 expect_contains "$explicit_out" "mho/feature-base"
@@ -644,7 +651,7 @@ echo "ok 7 - sync invokes git-branchless sync --pull"
 out=$(
   export STACK_TEST_PR_JSON='[]'
   export STACK_TEST_LEASES_JSON='[]'
-  run_stack status 2>&1
+  run_stack status --implicit 2>&1
 )
 expect_contains "$out" "mho/feature-base"
 expect_not_contains "$out" "error"
@@ -691,12 +698,11 @@ pull_calls=$(grep -c "sync --pull" "$BRANCHLESS_LOG" || true)
 echo "ok 9 - sync cascades squash-merged parent then invokes branchless once"
 
 # ------------------------------------------------------------------------
-# 10: stack push happy path — branches with PRs get updated and no-PR
-#     branches with fresh leases get pushed for PR creation.
+# 10: stack push requires PR scope; PR-scoped happy path updates PR branches.
 # ------------------------------------------------------------------------
 
-# After test 8's cascade, feature-base is a sibling of main; mho/feature-ui
-# has no PR in STACK_TEST_PR_JSON, so it must be skipped during push.
+# After test 8's cascade, feature-base is a sibling of main. mho/feature-ui has
+# no PR in STACK_TEST_PR_JSON, so PR-scoped push must not include it.
 PG_LOG="$TEST_TMP/pg.log"
 PUSHED_BRANCHES="$TEST_TMP/pushed-branches.log"
 : >"$PG_LOG"
@@ -705,6 +711,13 @@ PUSHED_BRANCHES="$TEST_TMP/pushed-branches.log"
 # Reset to a stable HEAD before stack push (which checks out branches).
 git -C "$REPO" checkout main >/dev/null 2>&1
 git -C "$REPO" remote add upstream git@github.com:example/stack-pr-head.git >/dev/null 2>&1 || true
+
+broad_push_rc=0
+broad_push_out=$(run_stack push 2>&1) || broad_push_rc=$?
+[[ "$broad_push_rc" != "0" ]] || fail "plain stack push should require PR scope"
+expect_contains "$broad_push_out" "broad implicit stack push is disabled by default"
+expect_contains "$broad_push_out" "stack trunk push --stack <name>"
+expect_contains "$broad_push_out" "stack push --pr <N> --children"
 
 fresh_lease='{"allowed":true,"current":{"anchor_matches_head":true},"async_iteration":{"enabled":false}}'
 fresh_async_lease='{"allowed":true,"current":{"anchor_matches_head":false},"async_iteration":{"enabled":true,"pushes":{"used":1,"max":5,"remaining":4}}}'
@@ -715,35 +728,31 @@ export STACK_TEST_PG_CHECK_mho_feature_api="$fresh_async_lease"
 export STACK_TEST_PG_CHECK_mho_feature_ui="$fresh_lease"
 export STACK_TEST_PR_VIEW_42='{"number":42,"headRefName":"mho/feature-base","headRefOid":"old-base","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"main"}'
 export STACK_TEST_PR_VIEW_43='{"number":43,"headRefName":"mho/feature-api","headRefOid":"old-api","headRepositoryOwner":{"login":"example"},"headRepository":{"name":"stack-pr-head"},"baseRefName":"mho/feature-base"}'
-push_out=$(run_stack push 2>&1)
+push_out=$(run_stack push --pr 42 --children 2>&1)
 
 expect_contains "$push_out" "Done."
-# feature-ui has no PR (only #42 + #43 in STACK_TEST_PR_JSON), but a
-# fresh lease lets stack push publish the branch for later PR creation.
-expect_contains "$push_out" "mho/feature-ui: pushing branch for new stacked PR"
+expect_not_contains "$push_out" "mho/feature-ui"
 expect_contains "$push_out" "Agent handoff:"
 expect_contains "$push_out" "Next step:"
 expect_contains "$push_out" "Phase: needs PR description update"
 expect_contains "$push_out" "#42 mho/feature-base"
 expect_contains "$push_out" "update description: /update-pr-description 42"
-expect_contains "$push_out" "mho/feature-ui -> base mho/feature-api"
-expect_contains "$push_out" "create draft PR via /commit-push-pr after push-gate approval"
 push_calls=$(grep -c "^push " "$PG_LOG" || true)
-[[ "$push_calls" == "3" ]] \
-  || fail "expected 3 pg push calls (base + api + ui), got $push_calls: $(cat "$PG_LOG")"
+[[ "$push_calls" == "2" ]] \
+  || fail "expected 2 pg push calls (base + api), got $push_calls: $(cat "$PG_LOG")"
 force_push_calls=$(grep -c "^push push --force-with-lease" "$PG_LOG" || true)
-[[ "$force_push_calls" == "3" ]] \
+[[ "$force_push_calls" == "2" ]] \
   || fail "expected pg push --force-with-lease for all pushes, got: $(cat "$PG_LOG")"
 pr_remote_push_calls=$(grep -c -- "--remote upstream" "$PG_LOG" || true)
 [[ "$pr_remote_push_calls" == "2" ]] \
   || fail "expected existing PR pushes to target PR head remote upstream, got: $(cat "$PG_LOG")"
 set_upstream_calls=$(grep -c -- "--set-upstream" "$PG_LOG" || true)
-[[ "$set_upstream_calls" == "1" ]] \
-  || fail "expected --set-upstream for no-PR branch push, got: $(cat "$PG_LOG")"
+[[ "$set_upstream_calls" == "0" ]] \
+  || fail "did not expect --set-upstream in PR-scoped push, got: $(cat "$PG_LOG")"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "0" ]] \
   || fail "expected 0 pg prepare calls when leases fresh, got $prep_calls"
-echo "ok 10 - stack push reuses fresh and async leases including no-PR branches"
+echo "ok 10 - stack push requires PR scope and reuses fresh PR leases"
 unset STACK_TEST_PR_VIEW_42 STACK_TEST_PR_VIEW_43
 
 # ------------------------------------------------------------------------
@@ -754,19 +763,17 @@ unset STACK_TEST_PR_VIEW_42 STACK_TEST_PR_VIEW_43
 : >"$PG_LOG"
 git -C "$REPO" checkout main >/dev/null 2>&1
 
-# DFS order from order_tree walks roots in for-each-ref order (alphabetical):
-# feature-api first → expect stop on feature-api.
 unset STACK_TEST_PG_CHECK_mho_feature_base STACK_TEST_PG_CHECK_mho_feature_api STACK_TEST_PG_CHECK_mho_feature_ui
 export STACK_TEST_PG_CHECK_DEFAULT='{"allowed":false}'
-stop_out=$(run_stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite 2>&1)
+stop_out=$(run_stack push --prefix mho/feature- --pr 42 --children --async --expires 8h --max-pushes 5 --allow-rewrite 2>&1)
 
 expect_contains "$stop_out" "needs approval, preparing brief"
 expect_contains "$stop_out" "Next step:"
 expect_contains "$stop_out" "Human approval: pg -C"
-expect_contains "$stop_out" "Agent re-run: stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite"
+expect_contains "$stop_out" "Agent re-run: stack push --prefix mho/feature- --pr 42 --children --async --expires 8h --max-pushes 5 --allow-rewrite"
 expect_contains "$stop_out" "Agent handoff:"
 expect_contains "$stop_out" "Phase: needs approval"
-expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature- --async --expires 8h --max-pushes 5 --allow-rewrite"
+expect_contains "$stop_out" "Re-run this stack: stack push --prefix mho/feature- --pr 42 --children --async --expires 8h --max-pushes 5 --allow-rewrite"
 prep_calls=$(grep -c "^prepare " "$PG_LOG" || true)
 [[ "$prep_calls" == "1" ]] \
   || fail "expected exactly 1 pg prepare call (stop on first), got $prep_calls: $(cat "$PG_LOG")"
@@ -919,14 +926,14 @@ git -C "$REPO" worktree add --detach "$LINKED_WT" mho/feature-ui >/dev/null 2>&1
 LINKED_WT=$(cd "$LINKED_WT" && git rev-parse --show-toplevel)
 linked_out=$(
   cd "$LINKED_WT"
-  PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --prefix mho/feature- 2>&1
+  PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --implicit --prefix mho/feature- 2>&1
 )
 expect_contains "$linked_out" "mho/feature-base"
 base_linked_line=$(echo "$linked_out" | grep "mho/feature-base" || true)
 expect_contains "$base_linked_line" "allowed"
 linked_debug_out=$(
   cd "$LINKED_WT"
-  STACK_DEBUG=1 PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --prefix mho/feature- 2>&1
+  STACK_DEBUG=1 PATH="$FAKE_BIN:$PATH" bash "$HOOK_DIR/stack.sh" status --implicit --prefix mho/feature- 2>&1
 )
 expect_contains "$linked_debug_out" "stack: debug: status base="
 expect_contains "$linked_debug_out" "stack: debug: lease lookup repo_root=$LINKED_WT"
@@ -1098,6 +1105,20 @@ missing_branch_rc=$?
 set -e
 [[ "$missing_branch_rc" != "0" ]] || fail "expected missing local branch failure"
 expect_contains "$missing_branch_out" "PR #299 branch not found locally: mho/missing-local"
+
+STACK_TEST_PR_JSON=$(jq -c -n '[
+  {"number":267,"headRefName":"mho/pr267","baseRefName":"mho/pr266","mergeable":"MERGEABLE","reviewDecision":"","statusCheckRollup":[],"url":"https://x/267","title":"pr 267"}
+]')
+LINKED_CHECKOUT_WT="$TEST_TMP/checkout-pr267-linked"
+git -C "$REPO" worktree add "$LINKED_CHECKOUT_WT" mho/pr267 >/dev/null 2>&1
+LINKED_CHECKOUT_WT=$(cd "$LINKED_CHECKOUT_WT" && pwd -P)
+set +e
+linked_checkout_out=$(run_stack checkout --pr 267 2>&1)
+linked_checkout_rc=$?
+set -e
+[[ "$linked_checkout_rc" != "0" ]] || fail "expected linked worktree checkout failure"
+expect_contains "$linked_checkout_out" "checkout failed: mho/pr267 is already checked out in another worktree: $LINKED_CHECKOUT_WT"
+expect_contains "$linked_checkout_out" "cd $LINKED_CHECKOUT_WT"
 REPO="$OLD_REPO"
 echo "ok 23 - checkout --pr reports missing local branches"
 
@@ -1714,7 +1735,7 @@ expect_contains "$help_out" "trunk review --stack NAME [--json]"
 expect_contains "$help_out" "trunk push-plan --stack NAME [--json]"
 expect_contains "$help_out" "trunk push --stack NAME [--tip]"
 expect_contains "$help_out" "squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base]"
-expect_contains "$help_out" "push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]"
+expect_contains "$help_out" "push [--dry-run] --pr N [--children] [--base REF] [--prefix PREFIX]"
 expect_contains "$help_out" "STACK_DEBUG=1"
 expect_contains "$help_out" "Every human-readable command prints Next step:"
 expect_contains "$help_out" "Dolt is required for --stack"
@@ -1732,6 +1753,7 @@ expect_contains "$skill_doc" "stack trunk materialize"
 expect_contains "$skill_doc" "STACK_DEBUG=1"
 expect_contains "$skill_doc" "Next step:"
 expect_contains "$skill_doc" "stack checkout --pr <N>"
+expect_contains "$skill_doc" 'Plain `stack push` no longer acts on broad local ancestry'
 stack_doc=$(cat "$ROOT/llm/stack/README.md")
 expect_contains "$stack_doc" "GitHub PR base wins"
 expect_contains "$stack_doc" "stack insert --branch"
@@ -1741,6 +1763,7 @@ expect_contains "$stack_doc" "expected topology"
 expect_contains "$stack_doc" "brew install dolt"
 expect_contains "$stack_doc" "Next step:"
 expect_contains "$stack_doc" "stack checkout --pr <N>"
+expect_contains "$stack_doc" 'Plain `stack push` no longer acts on broad local ancestry'
 expect_not_contains "$skill_doc" "## Deferred"
 echo "ok 34 - help and stack skill docs match supported commands"
 
