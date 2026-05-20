@@ -404,11 +404,29 @@ SH
   prepare_status_stale=$(bash "$PG" prepare-trunk status --stack demo --json)
   [[ "$(jq -r '.state' <<<"$prepare_status_stale")" == "stale" ]] \
     || fail "expected stale prepare-trunk status after materialization mismatch: $prepare_status_stale"
+  set +e
+  stale_trunk_out=$(PG_AUTO_RUN_APPROVAL=0 bash "$PG" trunk --stack demo 2>&1)
+  stale_trunk_rc=$?
+  stale_trunk_draft_out=$(bash "$PG" trunk-draft --stack demo --format json 2>&1)
+  stale_trunk_draft_rc=$?
+  set -e
+  [[ "$stale_trunk_rc" != "0" ]] || fail "expected pg trunk to reject stale prepare file"
+  expect_contains "$stale_trunk_out" "Approval draft blocked"
+  expect_contains "$stale_trunk_out" "Stack manifest changed after prepare-trunk"
+  expect_contains "$stale_trunk_out" "prepare-trunk --stack demo --from-context"
+  [[ "$stale_trunk_draft_rc" != "0" ]] || fail "expected pg trunk-draft to reject stale prepare file"
+  expect_contains "$stale_trunk_draft_out" "Approval draft blocked"
+  expect_contains "$stale_trunk_draft_out" "Stack manifest changed after prepare-trunk"
+  expect_contains "$stale_trunk_draft_out" "prepare-trunk --stack demo --from-context"
   mv "$prepare_path.good" "$prepare_path"
   trunk_out=$(PG_AUTO_RUN_APPROVAL=0 bash "$PG" trunk --stack demo 2>&1)
   expect_contains "$trunk_out" "Draft file:"
-  draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/Draft file:/ {print $2; exit}')
+  yaml_draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/Draft file:/ {print $2; exit}')
+  draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/JSON draft file:/ {print $2; exit}')
+  [[ -f "$yaml_draft_file" ]] || fail "expected trunk YAML draft file: $trunk_out"
   [[ -f "$draft_file" ]] || fail "expected trunk draft file: $trunk_out"
+  yq eval '.stack' "$yaml_draft_file" | grep -qx 'demo' \
+    || fail "expected trunk YAML draft to parse as stack demo"
   [[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,stack,description,stack_items" ]] \
     || fail "expected human-readable fields at top of trunk draft: $(jq -r 'keys_unsorted[0:6] | join(",")' "$draft_file")"
   expect_contains "$(jq -r '.description.summary' "$draft_file")" "ship demo stack"
@@ -466,17 +484,20 @@ SH
   expect_contains "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" "Edited base item description."
 
   trunk_draft_out=$(bash "$PG" trunk-draft --stack demo --format yaml)
-  [[ "$(jq -r '.stack' <<<"$trunk_draft_out")" == "demo" ]] \
-    || fail "expected trunk-draft JSON to name demo stack: $trunk_draft_out"
-  [[ "$(jq -r '.format' <<<"$trunk_draft_out")" == "yaml" ]] \
-    || fail "expected trunk-draft JSON to report yaml format: $trunk_draft_out"
-  yaml_draft_file=$(jq -r '.draft_file' <<<"$trunk_draft_out")
-  json_draft_file=$(jq -r '.json_draft_file' <<<"$trunk_draft_out")
+  [[ "$(yq eval '.stack' <<<"$trunk_draft_out")" == "demo" ]] \
+    || fail "expected trunk-draft YAML to name demo stack: $trunk_draft_out"
+  [[ "$(yq eval '.format' <<<"$trunk_draft_out")" == "yaml" ]] \
+    || fail "expected trunk-draft YAML to report yaml format: $trunk_draft_out"
+  yaml_draft_file=$(yq eval '.draft_file' <<<"$trunk_draft_out")
+  json_draft_file=$(yq eval '.json_draft_file' <<<"$trunk_draft_out")
   [[ -f "$yaml_draft_file" ]] || fail "expected YAML trunk draft file: $trunk_draft_out"
   [[ -f "$json_draft_file" ]] || fail "expected JSON trunk draft file: $trunk_draft_out"
   expect_contains "$(head -n 1 "$yaml_draft_file")" "pg trunk approval draft"
   yq eval '.stack' "$yaml_draft_file" | grep -qx 'demo' \
     || fail "expected YAML trunk draft to parse as stack demo"
+  trunk_draft_json_out=$(bash "$PG" trunk-draft --stack demo --format yaml --json)
+  [[ "$(jq -r '.stack' <<<"$trunk_draft_json_out")" == "demo" ]] \
+    || fail "expected trunk-draft --json to name demo stack: $trunk_draft_json_out"
 
   bad_item_briefs="$TEST_TMP/bad-item-briefs.json"
   jq -n '[{id:"base", what:"missing peers", why:"incomplete", approach:"incomplete"}]' >"$bad_item_briefs"
