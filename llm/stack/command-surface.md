@@ -24,12 +24,48 @@ push-gate, and Gitless. The ownership boundary is:
 | Push plan | `stack -C <repo> trunk push-plan --stack <name> --json` | stack | Canonical UI contract | Checklist and ordered push units. Gitless renders; stack decides. |
 | Push | `stack -C <repo> trunk push --stack <name>` | stack | Agent action | Walks approved item pushes through push-gate. |
 
+## Stack Review Event Contract
+
+`stack` and `pg` writers publish v1 JSONL event records so Gitless can
+invalidate exactly one repo/stack cache entry without scraping command stderr or
+polling all stacks. The stable event types are:
+
+- `stack_manifest_changed`
+- `materialized`
+- `prepare_context_written`
+- `prepare_trunk_written`
+- `trunk_approved`
+- `lease_changed`
+- `push_plan_changed`
+
+Every record includes:
+
+| Field | Purpose |
+| --- | --- |
+| `schema_version` | Currently `1`; consumers must ignore newer versions they do not understand. |
+| `event_type` | One of the stable event types above. |
+| `repo_key` | Canonical store key for the source repository, usually the absolute git common dir. |
+| `repo_root` | User-facing source worktree path. |
+| `stack_name` | Stack Review stack name. |
+| `materialization_id` | Current materialization identity for stale detection. |
+| `manifest_hash` | Current stack manifest hash for stale detection. |
+| `trunk_tip` | Private trunk tip commit for stale detection. |
+| `sequence` | Monotonic integer in the event stream. |
+| `created_at` | UTC timestamp. |
+| `changed_surface` | Surface changed by this event, such as `manifest`, `materialization`, `prepare_context`, `prepare_trunk`, `approval`, `lease`, or `push_plan`. |
+| `cache_key` | `{repo_key, stack_name}`; the exact Stack Review cache entry to invalidate. |
+| `materialization_key` | `{repo_key, stack_name, materialization_id, manifest_hash, trunk_tip}`; the precise materialized state touched by the event. |
+
+The plumbing command `pg stack-event-contract ...` emits this shape for tests and
+writer integration. It does not write an event file by itself.
+
 ## Advanced and Compatibility Surfaces
 
 | Surface | Owner | Classification | Replacement or visibility |
 | --- | --- | --- | --- |
-| `stack status`, `stack status --pr <N> --children` | stack | Advanced diagnostics | Keep in CLI help; Gitless may expose as secondary diagnostics, not the Stack Review primary path. |
+| `stack status --pr <N> --children`, `stack status --implicit` | stack | Advanced diagnostics | PR-scoped status follows GitHub bases. Broad local-ancestry status requires explicit `--implicit`; Gitless may expose as secondary diagnostics, not the Stack Review primary path. |
 | `stack checkout --pr <N>` | stack | Advanced workflow | CLI-only helper for branch editing. |
+| `stack push --pr <N> --children` | stack | Advanced workflow | PR-scoped push path for non-Dolt stacks. Plain `stack push` is disabled so broad local ancestry cannot define push scope. |
 | `stack sync`, `stack insert`, `stack squash` | stack | Advanced workflow | CLI-only stack maintenance. |
 | `stack trunk init/add/move/remove/status` | stack | Advanced stack authoring | Visible in CLI/docs; Gitless can show copyable commands but should not make these primary review buttons. |
 | `pg prepare-trunk --what ... --item-briefs FILE` | pg | Compatibility/manual prepare | Prefer durable `stack trunk context write` plus `pg prepare-trunk --from-context` in new Stack Review UX. |

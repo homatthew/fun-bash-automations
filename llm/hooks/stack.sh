@@ -2,7 +2,7 @@
 # stack: local-first stacked-PR tooling.
 #
 # Subcommands:
-#   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+#   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--implicit]
 #   checkout --pr N [--base REF] [--prefix PREFIX]
 #   sync   [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 #   insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
@@ -17,7 +17,7 @@
 #   trunk  push-plan --stack NAME [--json]
 #   trunk  push --stack NAME [--tip] [--dry-run] [--remote NAME]
 #   squash [--dry-run] [-m SUBJECT] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
-#   push   [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--async --expires 8h --max-pushes N --allow-rewrite]
+#   push   [--dry-run] --pr N [--children] [--base REF] [--prefix PREFIX] [--async --expires 8h --max-pushes N --allow-rewrite]
 #
 # Data sources merged into one view:
 #   1. git topology        (for-each-ref + merge-base)
@@ -311,12 +311,13 @@ stack_print_next_step() {
 }
 
 stack_status_rerun_command() {
-  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="${4:-false}"
+  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="${4:-false}" include_implicit="${5:-false}"
   local cmd="stack status"
   cmd=$(stack_append_flag "$cmd" "--base" "$base_override")
   cmd=$(stack_append_flag "$cmd" "--prefix" "$prefix_override")
   cmd=$(stack_append_flag "$cmd" "--pr" "$pr_filter")
   [[ "$include_children" == "true" ]] && cmd="$cmd --children"
+  [[ "$include_implicit" == "true" ]] && cmd="$cmd --implicit"
   printf '%s\n' "$cmd"
 }
 
@@ -818,6 +819,19 @@ stack_local_ref_exists() {
   git show-ref --verify --quiet "refs/heads/$ref"
 }
 
+stack_worktree_path_for_branch() {
+  local branch="$1"
+  git worktree list --porcelain 2>/dev/null | awk -v branch="refs/heads/$branch" '
+    /^worktree / { path = substr($0, 10) }
+    /^branch / {
+      if (substr($0, 8) == branch) {
+        print path
+        exit
+      }
+    }
+  '
+}
+
 stack_resolve_pr_parent() {
   local pr_base="$1" base="$2"
   local short_base
@@ -1167,8 +1181,8 @@ stack_push_print_agent_handoff() {
 }
 
 stack_print_status_next_step() {
-  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="$4"
-  local parent_map="$5" local_parent_map="$6" prs="$7" base="$8" prefix="$9"
+  local base_override="$1" prefix_override="$2" pr_filter="${3:-}" include_children="$4" include_implicit="$5"
+  local parent_map="$6" local_parent_map="$7" prs="$8" base="$9" prefix="${10}"
   local ordered mismatches unexpected_mismatches push_cmd status_cmd sync_cmd
   ordered=$(echo "$parent_map" | stack_order_tree "$base")
   if [[ -z "$ordered" ]]; then
@@ -1202,20 +1216,22 @@ stack_print_status_next_step() {
   fi
 
   sync_cmd=$(stack_sync_rerun_command "$base_override" "$prefix_override")
-  push_cmd=$(stack_push_rerun_command "$base_override" "$prefix_override" "" "false")
   if awk -F'\t' 'NF && ($4 + 0) > 0 { found=1 } END { exit(found ? 0 : 1) }' <<<"$parent_map"; then
     stack_print_next_step \
       "Base has commits not in at least one branch; preflight a restack: $sync_cmd" \
-      "After sync and tests pass, run: $push_cmd"
+      "After sync and tests pass, choose a declared stack or PR-scoped push path."
     return 0
   fi
   if [[ -n "$unexpected_mismatches" ]]; then
     stack_print_next_step \
-      "GitHub PR bases are authoritative. Use PR-scoped commands for affected PRs before broad push." \
+      "GitHub PR bases are authoritative. Use PR-scoped commands for affected PRs before pushing." \
       "Example: stack status --pr <N> --children"
     return 0
   fi
-  stack_print_next_step "Run a dry-run push to see approvals and order: $push_cmd --dry-run"
+  stack_print_next_step \
+    "Implicit status is diagnostic only; it does not imply a safe push scope." \
+    "Use declared stacks: stack trunk list" \
+    "Use a PR-defined stack: stack status --pr <N> --children"
 }
 
 # ------------------------------------------------------------------------
@@ -1224,7 +1240,7 @@ stack_print_status_next_step() {
 
 stack_cmd_status() {
   local format="table"
-  local base_override="" prefix_override="" pr_filter="" include_children="false"
+  local base_override="" prefix_override="" pr_filter="" include_children="false" include_implicit="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json)   format="json"; shift ;;
@@ -1232,6 +1248,7 @@ stack_cmd_status() {
       --prefix) prefix_override="${2:-}"; [[ -n "$prefix_override" ]] || stack_fail "--prefix requires a value"; shift 2 ;;
       --pr)     pr_filter="${2:-}"; [[ "$pr_filter" =~ ^[0-9]+$ ]] || stack_fail "--pr requires a PR number"; shift 2 ;;
       --children) include_children="true"; shift ;;
+      --implicit) include_implicit="true"; shift ;;
       -h|--help) stack_usage; return 0 ;;
       *) stack_fail "unknown status flag: $1" ;;
     esac
@@ -1239,11 +1256,18 @@ stack_cmd_status() {
   stack_require jq
   stack_repo_root >/dev/null
 
+  if [[ -z "$pr_filter" && "$include_implicit" != "true" ]]; then
+    stack_fail "broad implicit stack inference is disabled by default.
+Use declared stacks: stack trunk list
+Use a PR-defined stack: stack status --pr <N> --children
+Use local-ancestry diagnostics only when intended: stack status --implicit"
+  fi
+
   local base prefix local_parent_map parent_map prs leases
   base=$(stack_upstream_ref "$base_override")
   prefix=$(stack_prefix "$prefix_override")
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
-  stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") pr=${pr_filter:-none} children=$include_children"
+  stack_debug "status base=$base prefix=$prefix branches=$(stack_count_nonempty_lines <<<"$local_parent_map") pr=${pr_filter:-none} children=$include_children implicit=$include_implicit"
   prs=$(stack_fetch_prs_for_scope "$pr_filter")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
   if [[ -n "$pr_filter" ]]; then
@@ -1257,7 +1281,7 @@ stack_cmd_status() {
   else
     stack_render_table "$base" "$prefix" "$parent_map" "$prs" "$leases"
     stack_print_status_next_step \
-      "$base_override" "$prefix_override" "$pr_filter" "$include_children" \
+      "$base_override" "$prefix_override" "$pr_filter" "$include_children" "$include_implicit" \
       "$parent_map" "$local_parent_map" "$prs" "$base" "$prefix"
   fi
 }
@@ -1290,8 +1314,17 @@ stack_cmd_checkout() {
   stack_local_ref_exists "$branch" \
     || stack_fail "PR #$pr_filter branch not found locally: $branch. Fetch or create the local branch first."
 
-  git checkout "$branch" >/dev/null 2>&1 \
-    || stack_fail "checkout failed: $branch"
+  local checkout_err branch_worktree
+  if ! checkout_err=$(git checkout "$branch" 2>&1 >/dev/null); then
+    branch_worktree=$(stack_worktree_path_for_branch "$branch")
+    if [[ -n "$branch_worktree" ]]; then
+      stack_fail "checkout failed: $branch is already checked out in another worktree: $branch_worktree
+Use that worktree:
+  cd $(stack_shell_quote "$branch_worktree")"
+    fi
+    stack_fail "checkout failed: $branch
+$checkout_err"
+  fi
 
   local_parent_map=$(stack_build_parent_map "$prefix" "$base")
   parent_map=$(stack_resolve_parent_map_from_prs "$local_parent_map" "$prs" "$base")
@@ -1442,8 +1475,8 @@ stack_cmd_sync() {
     echo "No branches moved."
     stack_print_next_step \
       "Refs unchanged." \
-      "Confirm current state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
-      "Then dry-run push if needed: $(stack_push_rerun_command "$base_override" "$prefix_override" "" "false") --dry-run"
+      "Confirm current state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false" "true")" \
+      "Then choose a declared stack or PR-scoped push path if anything still needs pushing."
   else
     local lease_line
     if [[ -n "$stale_branches" ]]; then
@@ -1454,8 +1487,8 @@ stack_cmd_sync() {
     stack_print_next_step \
       "Refs changed: $moved_branches" \
       "$lease_line" \
-      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
-      "When ready, dry-run push: $(stack_push_rerun_command "$base_override" "$prefix_override" "" "false") --dry-run"
+      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false" "true")" \
+      "When ready, choose a declared stack or PR-scoped push path."
   fi
 
   if [[ "$keep_scratch" == "true" ]]; then
@@ -3715,7 +3748,7 @@ stack_cmd_insert() {
     echo "No branches moved."
     stack_print_next_step \
       "Refs unchanged." \
-      "Inspect state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")"
+      "Inspect state: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false" "true")"
   else
     local lease_line
     if [[ -n "$stale_branches" ]]; then
@@ -3723,12 +3756,18 @@ stack_cmd_insert() {
     else
       lease_line="No existing push-gate leases became stale."
     fi
+    local push_line
+    if [[ -n "$after_pr" ]]; then
+      push_line="When ready, dry-run push: $(stack_push_rerun_command "$base_override" "$prefix_override" "$after_pr" "true") --dry-run"
+    else
+      push_line="When ready, choose a declared stack or PR-scoped push path."
+    fi
     stack_print_next_step \
       "Inserted $branch after $after_branch." \
       "Restacked branches: $moved_branches" \
       "$lease_line" \
-      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false")" \
-      "When ready, dry-run push: $(stack_push_rerun_command "$base_override" "$prefix_override" "${after_pr:-}" "${after_pr:+true}") --dry-run"
+      "Run affected tests, then inspect: $(stack_status_rerun_command "$base_override" "$prefix_override" "" "false" "true")" \
+      "$push_line"
   fi
 
   if [[ "$keep_scratch" == "true" ]]; then
@@ -3938,9 +3977,16 @@ stack_cmd_push() {
     esac
   done
   stack_require jq
+  stack_repo_root >/dev/null
+
+  if [[ -z "$pr_filter" ]]; then
+    stack_fail "broad implicit stack push is disabled by default.
+Use declared stacks: stack trunk push --stack <name>
+Use a PR-defined stack: stack push --pr <N> --children
+Use local-ancestry diagnostics only when intended: stack status --implicit"
+  fi
   command -v gh >/dev/null 2>&1 \
     || stack_fail "gh CLI required for stack push"
-  stack_repo_root >/dev/null
 
   local pg_helper
   pg_helper="$(stack_helper_dir)/push-gate.sh"
@@ -4220,10 +4266,13 @@ Commands:
     stack -C /repo trunk review --stack demo --json.
 
   status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+         [--implicit]
     Show one-table view merging git topology, gh PR state, and pg leases.
     With --pr N, scope the view to that PR; --children follows GitHub PR
-    baseRefName children instead of broad local branch prefix. Human output
-    ends with a guided Next step block; --json stays machine-readable.
+    baseRefName children. Without --pr, broad local-ancestry inference is
+    disabled unless --implicit is passed. Prefer `trunk list` for declared
+    stack manifests. Human output ends with a guided Next step block; --json
+    stays machine-readable.
 
   checkout --pr N [--base REF] [--prefix PREFIX]
     Check out the local branch for an open PR, refusing dirty worktrees, then
@@ -4308,15 +4357,14 @@ Commands:
     parent into one commit, then restack selected descendants. Use --onto or
     --onto-pr-base when local ancestry disagrees with PR topology.
 
-  push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+  push [--dry-run] --pr N [--children] [--base REF] [--prefix PREFIX]
        [--async --expires 8h --max-pushes N --allow-rewrite]
-    Walk stack parents-first. Existing PR branches update through
-    `pg push --force-with-lease`. Branches without PRs are still pushed
-    through push-gate when their lease is fresh, using --set-upstream, then
-    listed as draft-PR creation targets. If any branch needs approval, run
-    `pg prepare` and stop with instructions to run `pg`; --async adds async
-    lease metadata to those prepares so one review can cover repeated pushes
-    inside the approved scope. Never bypasses push-gate.
+    Walk a PR-scoped stack parents-first. Existing PR branches update through
+    `pg push --force-with-lease`. Broad local-ancestry push is disabled; use
+    trunk push for declared stacks. If any branch needs approval, run `pg
+    prepare` and stop with instructions to run `pg`; --async adds async lease
+    metadata to those prepares so one review can cover repeated pushes inside
+    the approved scope. Never bypasses push-gate.
 
 Base ref auto-detected from upstream/main or origin/main. Branch prefix
 defaults to mho/ (override via `git config stack.prefix`).

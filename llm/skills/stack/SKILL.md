@@ -1,25 +1,26 @@
 ---
 name: stack
-description: Local-first stacked-PR CLI. Use `stack status` instead of hand-rolling git/gh/pg tool calls, `stack sync` for scratch-preflighted restacks, `stack squash` to collapse noisy incremental commits, and `stack push` instead of the per-branch `pg prepare`/`pg push` loop from the `push-review` skill.
+description: Local-first stacked-PR CLI. Use `stack trunk list` for declared stacks and `stack status --pr <N> --children` for PR-scoped stacks instead of hand-rolling git/gh/pg tool calls; use `stack sync` for scratch-preflighted restacks, `stack squash` to collapse noisy incremental commits, and PR-scoped `stack push` or `stack trunk push` instead of the per-branch `pg prepare`/`pg push` loop from the `push-review` skill.
 ---
 
 # stack
 
 Local-first stacked-PR tooling. Merges `git`, `gh`, CI, and `pg` into one view
-(`stack status`), preflights cascade-rebases in a scratch clone after upstream
+(`stack trunk list` or PR-scoped `stack status`), preflights cascade-rebases in a scratch clone after upstream
 advances or a parent squash-merges (`stack sync`), inserts a new branch into an
 existing stack with descendant restacks (`stack insert`), stores declared stack
 manifests in push-gate's Dolt store (`stack trunk init/add`), materializes them
 onto per-stack private trunks (`stack trunk materialize`), squashes noisy
 incremental branch commits (`stack squash`), and orchestrates the per-branch
-`pg prepare` / `pg push` loop across the whole stack (`stack push`).
+`pg prepare` / `pg push` loop for PR-scoped stacks (`stack push --pr <N> --children`)
+or declared stacks (`stack trunk push --stack <name>`).
 Human-readable output is guided: every command ends with a `Next step:` block
 that states the safe command or human approval action to run next.
 
-`stack push` never bypasses `pg` — it stops and waits for the human to
-approve missing leases, then resumes on re-invocation. With `--async`, it
-prepares async per-branch leases so one human review can authorize repeated
-pushes inside the approved scope and budget.
+`stack push` never bypasses `pg` — it stops and waits for the human to approve
+missing leases, then resumes on re-invocation. With `--async`, it prepares
+async per-branch leases so one human review can authorize repeated pushes
+inside the approved scope and budget.
 
 ## Stale context reset
 
@@ -34,9 +35,14 @@ explicitly re-read or run the helper.
 
 ## When to invoke
 
-- User asks "what's the state of my stack?" — run `stack status`. Don't loop
-  through `git log`, `gh pr list`, `pg leases` yourself; `stack status`
-  already composes them into one table (and `--json` for scripting).
+- User asks "what's the state of my stack?" — run `stack trunk list` first for
+  declared stacks. Don't loop through `git log`, `gh pr list`, `pg leases`
+  yourself; `stack trunk list` is the default dashboard for materialized stacks.
+  Use `stack status --pr <N> --children` for a PR-scoped view.
+- Only use `stack status --implicit` when the user explicitly wants local
+  ancestry diagnostics. Broad implicit stack inference is intentionally not the
+  default because stale scratch and backup branches make the output hard to
+  reason about.
 - User asks about a specific PR stack — run `stack status --pr <N> --children`.
   This uses GitHub PR `baseRefName` as the stack DAG and warns if local branch
   ancestry disagrees. GitHub PR `baseRefName` is authoritative for PR-scoped
@@ -68,22 +74,23 @@ explicitly re-read or run the helper.
   It squashes the current branch's commits relative to its stack parent, then
   restacks selected descendants. When local ancestry is known wrong, prefer
   `stack squash --pr <N> --onto-pr-base`.
-- User wants to push the whole stack — run `stack push`. Walks parents
-  first, runs `pg push` where leases are fresh, runs `pg prepare` and
-  stops where they are not. Re-run after the user approves to continue.
-- User wants unattended or overnight iteration on a stack — run
-  `stack push --async --expires 8h --max-pushes <N>` so generated
-  per-branch prepares carry async metadata. Add `--allow-rewrite` only
-  when rebases/squashes are part of the approved workflow.
+- User wants to push a declared stack — run `stack trunk push --stack <name>`.
+  For a PR-scoped stack, run `stack push --pr <N> --children`. Both paths walk
+  parents first through `pg`, stop for missing approvals, and resume after the
+  user approves.
+- User wants unattended or overnight iteration on a PR-scoped stack — run
+  `stack push --pr <N> --children --async --expires 8h --max-pushes <N>` so
+  generated per-branch prepares carry async metadata. Add `--allow-rewrite`
+  only when rebases/squashes are part of the approved workflow.
 - Starting a push workflow and want a current-state snapshot before handing
-  to `pg` — `stack status`.
+  to `pg` — `stack trunk list` for declared stacks, or
+  `stack status --pr <N> --children` for a specific PR stack.
 
 ## When NOT to use
 
 - Single branch, no stack — normal `git` / `gh` / `pg` is enough.
-- Branches with no local stack ancestry. `stack push` only knows how to push
-  branches it can place in the local stack. For an unrelated one-off branch,
-  use `/commit-push-pr`.
+- Branches outside a declared or PR-scoped stack. For an unrelated one-off
+  branch, use `/commit-push-pr`.
 - Adapting code for parent-PR renames (e.g., class rename, API break).
   `stack sync` handles the commits; you still have to read conflicts and
   adjust code yourself.
@@ -92,7 +99,7 @@ explicitly re-read or run the helper.
 
 ```
 stack -C <repo> <command> [...]
-stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children]
+stack status [--json] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--implicit]
 stack checkout --pr N [--base REF] [--prefix PREFIX]
 stack sync [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
 stack insert --branch BRANCH (--after BRANCH|--after-pr N) [--dry-run] [--keep-scratch] [--base REF] [--prefix PREFIX]
@@ -111,7 +118,7 @@ stack trunk review --stack NAME [--json]
 stack trunk push-plan --stack NAME [--json]
 stack trunk push --stack NAME [--tip] [--dry-run] [--remote NAME]
 stack squash [--dry-run] [-m "subject"] [--branch BRANCH] [--onto REF|--onto-pr-base] [--pr N] [--base REF] [--prefix PREFIX]
-stack push [--dry-run] [--base REF] [--prefix PREFIX] [--pr N] [--children] [--async --expires 8h --max-pushes N --allow-rewrite]
+stack push [--dry-run] --pr N [--children] [--base REF] [--prefix PREFIX] [--async --expires 8h --max-pushes N --allow-rewrite]
 ```
 
 Base ref auto-detected from `upstream/main` or `origin/main`. Branch
@@ -248,8 +255,9 @@ stack checkout --pr <N>       # when editing this PR
 stack push --pr <N> --children
 ```
 
-Broad `stack push` is still supported, but it can include unrelated local stacks
-that share the configured prefix.
+Plain `stack push` no longer acts on broad local ancestry. Use
+`stack trunk push --stack <name>` for declared stacks, or
+`stack push --pr <N> --children` for PR-scoped stacks.
 
 `stack checkout --pr N` is intentionally simple. It does not absorb/fixup
 changes or infer edit intent; it only checks out the PR branch and prints the
@@ -257,10 +265,8 @@ rails:
 `edit -> git add && git commit -> stack squash --pr N --onto-pr-base -> tests
 -> stack push --dry-run --pr N --children -> stack push --pr N --children`.
 
-`stack push` walks the stack parents-first. For each branch:
-- No PR → still goes through `pg check`; if the lease is fresh, pushes the
-  branch with `pg push --force-with-lease --set-upstream`, then lists the
-  draft PR to create with the correct base.
+`stack push --pr <N> --children` walks the PR-scoped stack parents-first. For
+each branch:
 - No unpushed commits → skipped silently.
 - Lease fresh (`pg check` returns `allowed && anchor==HEAD`) → runs
   `pg push --force-with-lease --assert-flow "update pr #N\nbranch <name>\n..."`.
@@ -269,22 +275,24 @@ rails:
   from the original approved anchor. Push-gate still enforces expiry, budget,
   branch/remote scope, rewrite approval, semantic scope, and self-assertion.
 - Lease missing or stale → runs `pg prepare` with auto-derived
-  what/why/approach, prints "Run `pg -C <repo>` to approve, then re-run
-  `stack push`", and exits 0. Idempotent: re-invoke after each approval.
+  what/why/approach, prints "Run `pg -C <repo>` to approve, then re-run the
+  exact PR-scoped `stack push` command", and exits 0. Idempotent: re-invoke
+  after each approval.
 
-Use `stack push --async --expires 8h --max-pushes 20` when the user has asked
-for one review to cover repeated iteration. The flags are forwarded only to
-new `pg prepare` calls for stale/missing branch leases; existing valid async
-leases are reused. Normal `stack push` still produces exact-tip prepares.
+Use `stack push --pr <N> --children --async --expires 8h --max-pushes 20` when
+the user has asked for one review to cover repeated iteration. The flags are
+forwarded only to new `pg prepare` calls for stale/missing branch leases;
+existing valid async leases are reused. Normal PR-scoped `stack push` still
+produces exact-tip prepares.
 
 At the end of a push attempt, `stack push` prints an **Agent handoff** block.
 Use it as the checklist for the next agent action. It includes a phase
 (`needs approval`, `ready to push`, `needs restack`, `needs PR description
 update`, or `done`), existing PR numbers to refresh with
-`/update-pr-description`, no-PR branches with their target base, and the exact
-`stack push` command to re-run when a custom `--base`, `--prefix`, or PR scope
-was used. PR description bases follow GitHub semantics: the root PR compares
-against its base branch and each child PR compares against its parent branch.
+`/update-pr-description`, and the exact PR-scoped `stack push` command to
+re-run when a custom `--base`, `--prefix`, or PR scope was used. PR description
+bases follow GitHub semantics: the root PR compares against its base branch and
+each child PR compares against its parent branch.
 
 The canonical long-form guide is `llm/stack/README.md`.
 
@@ -313,7 +321,8 @@ The canonical long-form guide is `llm/stack/README.md`.
 
 ## Output shape (JSON)
 
-`stack status --json` emits:
+`stack status --json` is PR-scoped unless `--implicit` is passed. Broad local
+ancestry inference requires `stack status --implicit --json` and emits:
 
 ```json
 {
