@@ -135,7 +135,11 @@ append_preserved_codex_config_sections() {
 
     awk '
         function is_preserved_header(line) {
-            return (line ~ /^\[hooks\.state(\.|])/ || line == "[tui.model_availability_nux]")
+            return (line ~ /^\[hooks\.state(\.|])/ ||
+                    line == "[tui.model_availability_nux]" ||
+                    line ~ /^\[marketplaces\./ ||
+                    line ~ /^\[plugins\./ ||
+                    line ~ /^\[projects\./)
         }
         /^\[[^]]+\]$/ {
             keep = is_preserved_header($0)
@@ -158,7 +162,10 @@ render_codex_config() {
     local tmp
     tmp="$(mktemp "$HOME/.codex/config.toml.XXXXXX")"
 
-    sed "s|__CODEX_BASE_URL__|$base_url|g" "$ROOT/codex/config.toml" > "$tmp"
+    sed \
+        -e "s|__CODEX_BASE_URL__|$base_url|g" \
+        -e "s|__FBA_ROOT__|$ROOT|g" \
+        "$ROOT/codex/config.toml" > "$tmp"
     append_preserved_codex_config_sections "$target" >> "$tmp"
     mv "$tmp" "$target"
     chmod 600 "$target"

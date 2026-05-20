@@ -14,16 +14,35 @@ plugin behavior.
 
 ## Portable MCP (configure in Codex)
 
+- `chrome-devtools`
+  - command: `npx`
+  - args: `chrome-devtools-mcp@latest`
+
+- `core-tools`
+  - HTTP MCP gateway for Netflix search, manuals, Slack RAG, and direct Slack
+    thread fetch.
+
+- `ndex-slack-private`
+  - Slack MCP from the ODS first-team Claude plugin.
+  - Codex uses `bin/launch-slack-mcp` so Keychain Slack token behavior matches
+    local agent setup (`slack-user-token` or `claude-slack-user-token`).
+
+- `NECP`
+  - HTTP MCP gateway for Netflix engineering context.
+
+- `netflix-ci-official`
+  - HTTP MCP gateway for Netflix CI / Boost tooling.
+
+- `nflx-spinnaker`
+  - command: `npx`
+  - args: `-y @netflix-internal/mcp-server-spinnaker@latest`
+
 - Sourcegraph MCP
+  - Configured as both stdio `sourcegraph` and HTTP `sourcegraph-official`,
+    matching the current Claude setup.
   - If Sourcegraph returns a 502, especially `downstream` or
     `ngp-mcp-sourcegraph`, ask the user to open
     `http://go/authorize-sourcegraph`, then retry the query.
-
-- `chrome-devtools-mcp@chrome-devtools-plugins`
-  - Claude plugin contains an MCP server definition:
-    - command: `npx`
-    - args: `chrome-devtools-mcp@latest`
-  - Codex parity target: register as Codex MCP server.
 
 ## Non-MCP Claude Plugin Workflows (shared skill/helper parity)
 
