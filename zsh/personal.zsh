@@ -270,7 +270,17 @@ elif [ -d /usr/lib/go ]; then
     export GOROOT=/usr/lib/go                    # Debian/Ubuntu
 fi
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-export PATH=$HOME/.local/bin:$HOME/repos/fun-bash-automations/bin:$PATH
+_mho_personal_zsh="${${(%):-%x}:A}"
+_mho_fba_root="${_mho_personal_zsh:h:h}"
+if [ ! -x "$_mho_fba_root/bin/fba-deploy" ]; then
+    _mho_fba_root="$HOME/repos/fun-bash-automations"
+fi
+export FBA_ROOT="${FBA_ROOT:-$_mho_fba_root}"
+if [ -d "$FBA_ROOT/bin" ]; then
+  export PATH=$HOME/.local/bin:$FBA_ROOT/bin:$PATH
+else
+  export PATH=$HOME/.local/bin:$PATH
+fi
 if [ -d "$BUN_INSTALL/bin" ]; then
   export PATH="$BUN_INSTALL/bin:$PATH"
 fi
@@ -307,8 +317,8 @@ alias rbi='git rebase -i master'
 alias squash='rbi && gca'
 
 # rp - repository navigation (source function, then load completion)
-[ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp.sh"
-[ -f "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh" ] && source "/Users/matthewho/repos/fun-bash-automations/rp/rp-completion.sh"
+[ -f "$FBA_ROOT/rp/rp.sh" ] && source "$FBA_ROOT/rp/rp.sh"
+[ -f "$FBA_ROOT/rp/rp-completion.sh" ] && source "$FBA_ROOT/rp/rp-completion.sh"
 
 # ==============================================================================
 # LLM Config Sync
@@ -329,7 +339,14 @@ claude-sync() {
 
 # fba-deploy: Project repo-owned LLM config into local runtimes.
 fba-deploy() {
-    "$HOME/repos/fun-bash-automations/bin/fba-deploy" "$@"
+    if [ -x "$FBA_ROOT/bin/fba-deploy" ]; then
+        "$FBA_ROOT/bin/fba-deploy" "$@"
+    elif command -v fba-deploy >/dev/null 2>&1; then
+        command fba-deploy "$@"
+    else
+        echo "fba-deploy missing: $FBA_ROOT/bin/fba-deploy"
+        return 1
+    fi
 }
 
 # Backward-compatible wrappers
@@ -350,7 +367,11 @@ alias llm-deploy=fba-deploy
 
 # stack-latest: human-shell alias for agent-stack-refresh. Agents should run
 # ~/.local/bin/agent-stack-refresh directly because aliases may not be loaded.
-alias stack-latest="$HOME/.local/bin/agent-stack-refresh"
+if [ -x "$FBA_ROOT/bin/agent-stack-refresh" ]; then
+    alias stack-latest="$FBA_ROOT/bin/agent-stack-refresh"
+else
+    alias stack-latest="$HOME/.local/bin/agent-stack-refresh"
+fi
 
 # push-gate: Manage durable push leases for agent pushes.
 # Generates approval drafts, stamps leases, and wraps agent pushes with
@@ -358,8 +379,12 @@ alias stack-latest="$HOME/.local/bin/agent-stack-refresh"
 # A real `pg` executable also lives in ~/repos/fun-bash-automations/bin so
 # non-interactive remote shells do not depend on this zsh function.
 push-gate() {
-    local helper="$HOME/repos/fun-bash-automations/llm/hooks/push-gate.sh"
+    local helper="$FBA_ROOT/llm/hooks/push-gate.sh"
     if [ ! -x "$helper" ]; then
+        if command -v pg >/dev/null 2>&1; then
+            command pg "$@"
+            return $?
+        fi
         echo "push-gate helper missing: $helper"
         return 1
     fi
