@@ -649,6 +649,7 @@ VALUES (
 );
 " >/dev/null
   pg_dolt_commit "stack init $name"
+  pg_emit_stack_event "stack_manifest_changed" "$name" "manifest"
   echo "Stack stored: $name"
 }
 
@@ -709,6 +710,7 @@ UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHE
 " >/dev/null
   version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
   pg_dolt_commit "stack add $stack_name/$item_id"
+  pg_emit_stack_event "stack_manifest_changed" "$stack_name" "manifest"
   echo "Stack item stored: $stack_name/$item_id (version $version)"
 }
 
@@ -794,6 +796,7 @@ ORDER BY order_index;
   pg_dolt_sql "UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" >/dev/null
   version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
   pg_dolt_commit "stack move $stack_name/$item_id"
+  pg_emit_stack_event "stack_manifest_changed" "$stack_name" "manifest"
   echo "Stack item moved: $stack_name/$item_id (version $version)"
 }
 
@@ -837,6 +840,7 @@ DELETE FROM trunk_materializations WHERE repo_key = $(pg_sql_quote "$repo_key") 
 DELETE FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");
 " >/dev/null
     pg_dolt_commit "stack prune $stack_name"
+    pg_emit_stack_event "stack_manifest_changed" "$stack_name" "manifest"
     echo "Stack pruned: $stack_name (removed final item $item_id)"
     return 0
   fi
@@ -844,6 +848,7 @@ DELETE FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_
   pg_dolt_sql "UPDATE stacks SET version = version + 1, updated_at = $(pg_sql_quote "$now") WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" >/dev/null
   version=$(pg_dolt_sql_csv "SELECT version FROM stacks WHERE repo_key = $(pg_sql_quote "$repo_key") AND name = $(pg_sql_quote "$stack_name");" | tail -n +2 | head -1)
   pg_dolt_commit "stack remove $stack_name/$item_id"
+  pg_emit_stack_event "stack_manifest_changed" "$stack_name" "manifest"
   echo "Stack item removed: $stack_name/$item_id (version $version)"
 }
 
@@ -948,6 +953,7 @@ VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quo
 " >/dev/null
   done < <(jq -r '.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' <<<"$materialization_json")
   pg_dolt_commit "stack materialize $stack_name"
+  pg_emit_stack_event "materialized" "$stack_name" "materialization" "$materialization_json"
   echo "Materialization stored: $stack_name $materialization_id"
 }
 
@@ -1036,6 +1042,22 @@ pg_trunk_draft_path() {
     "$(pg_branch_slug "$repo_name")" "$(pg_branch_slug "$stack_name")"
 }
 
+pg_stack_events_dir() {
+  printf '%s\n' "${PG_EVENTS_DIR:-$HOME/.push-gate/events}"
+}
+
+pg_stack_event_next_sequence() {
+  local dir="$1" seq_file tmp last=0 next
+  seq_file="$dir/.sequence"
+  [[ -f "$seq_file" ]] && read -r last <"$seq_file" || true
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  next=$((last + 1))
+  tmp=$(mktemp "$dir/.sequence.XXXXXX") || return 1
+  printf '%s\n' "$next" >"$tmp"
+  mv "$tmp" "$seq_file"
+  printf '%s\n' "$next"
+}
+
 pg_cmd_stack_event_contract() {
   local event_type="" stack_name="" repo_key="" repo_root=""
   local materialization_id="" manifest_hash="" trunk_tip=""
@@ -1065,8 +1087,6 @@ pg_cmd_stack_event_contract() {
   sequence="${sequence:-1}"
   created_at="${created_at:-$(pg_now_utc)}"
   [[ "$sequence" =~ ^[0-9]+$ ]] || pg_fail "stack-event-contract --sequence must be an integer"
-  [[ -n "$materialization_id" && -n "$manifest_hash" && -n "$trunk_tip" ]] \
-    || pg_fail "stack-event-contract requires --materialization-id, --manifest-hash, and --trunk-tip"
   [[ -n "$changed_surface" ]] || pg_fail "stack-event-contract requires --changed-surface"
   jq -n \
     --arg event_type "$event_type" \
@@ -1085,9 +1105,9 @@ pg_cmd_stack_event_contract() {
       repo_key: $repo_key,
       repo_root: $repo_root,
       stack_name: $stack_name,
-      materialization_id: $materialization_id,
-      manifest_hash: $manifest_hash,
-      trunk_tip: $trunk_tip,
+      materialization_id: (if $materialization_id == "" then null else $materialization_id end),
+      manifest_hash: (if $manifest_hash == "" then null else $manifest_hash end),
+      trunk_tip: (if $trunk_tip == "" then null else $trunk_tip end),
       sequence: ($sequence | tonumber),
       created_at: $created_at,
       changed_surface: $changed_surface,
@@ -1098,11 +1118,41 @@ pg_cmd_stack_event_contract() {
       materialization_key: {
         repo_key: $repo_key,
         stack_name: $stack_name,
-        materialization_id: $materialization_id,
-        manifest_hash: $manifest_hash,
-        trunk_tip: $trunk_tip
+        materialization_id: (if $materialization_id == "" then null else $materialization_id end),
+        manifest_hash: (if $manifest_hash == "" then null else $manifest_hash end),
+        trunk_tip: (if $trunk_tip == "" then null else $trunk_tip end)
       }
     }'
+}
+
+pg_emit_stack_event() {
+  local event_type="$1" stack_name="$2" changed_surface="$3" materialization="${4:-}"
+  local dir repo_key repo_root sequence created_at materialization_id manifest_hash trunk_tip event tmp final
+  dir=$(pg_stack_events_dir)
+  mkdir -p "$dir" 2>/dev/null || return 0
+  repo_key=$(pg_repo_key 2>/dev/null || true)
+  repo_root=$(pg_repo_root 2>/dev/null || pg_main_repo_path 2>/dev/null || true)
+  [[ -n "$materialization" ]] || materialization=$(pg_trunk_latest_materialization_json "$stack_name" 2>/dev/null || true)
+  materialization_id=$(jq -r '.materialization_id // ""' <<<"${materialization:-{}}" 2>/dev/null || true)
+  manifest_hash=$(jq -r '.manifest_hash // ""' <<<"${materialization:-{}}" 2>/dev/null || true)
+  trunk_tip=$(jq -r '.trunk_tip // ""' <<<"${materialization:-{}}" 2>/dev/null || true)
+  sequence=$(pg_stack_event_next_sequence "$dir") || return 0
+  created_at=$(pg_now_utc)
+  event=$(pg_cmd_stack_event_contract \
+    --type "$event_type" \
+    --stack "$stack_name" \
+    --repo-key "$repo_key" \
+    --repo-root "$repo_root" \
+    --materialization-id "$materialization_id" \
+    --manifest-hash "$manifest_hash" \
+    --trunk-tip "$trunk_tip" \
+    --sequence "$sequence" \
+    --created-at "$created_at" \
+    --changed-surface "$changed_surface") || return 0
+  tmp=$(mktemp "$dir/.event.$sequence.XXXXXX") || return 0
+  jq -c . <<<"$event" >"$tmp" || { rm -f "$tmp"; return 0; }
+  final="$dir/$(printf '%020d-%s-%s.json' "$sequence" "$(pg_branch_slug "$repo_key")" "$(pg_branch_slug "$stack_name")")"
+  mv "$tmp" "$final" 2>/dev/null || rm -f "$tmp"
 }
 
 pg_trunk_prepare_status_json() {
@@ -1701,6 +1751,7 @@ REPLACE INTO trunk_prepare_contexts (repo_key, stack_name, materialization_id, m
 VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$materialization_id"), $(pg_sql_quote "$manifest_hash"), $(pg_sql_quote "$trunk_tip"), $(pg_sql_quote "$item_shape"), $(pg_sql_quote "$context"), $(pg_sql_quote "$source_json"), $(pg_sql_quote "$created_at"), $(pg_sql_quote "$now"));
 " >/dev/null
   pg_dolt_commit "stack prepare context $stack_name"
+  pg_emit_stack_event "prepare_context_written" "$stack_name" "prepare_context" "$materialization"
   [[ "$format" == "json" ]] && { pg_trunk_prepare_context_payload_json "$stack_name"; return 0; }
   echo "Prepare context stored: $stack_name $materialization_id"
   if [[ "$(jq -r '.complete' <<<"$completeness")" != "true" ]]; then
@@ -1932,6 +1983,7 @@ pg_cmd_prepare_trunk() {
       context_references: (if $context_references == null then null else $context_references end),
       context_source: (if $context_source == null then null else $context_source end)
     }' >"$path"
+  pg_emit_stack_event "prepare_trunk_written" "$stack_name" "prepare_trunk" "$materialization"
   echo "Prepared trunk brief written: $path"
   echo "Now ask the user to run:  pg -C $repo_root trunk --stack $stack_name"
 }
@@ -2503,6 +2555,7 @@ VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quo
 " >/dev/null
   done < <(jq -r '.materialization.items[] | [.id, .order_index, .branch, .commit, (.pr // "")] | @tsv' "$draft")
   pg_dolt_commit "trunk lease $stack_name"
+  pg_emit_stack_event "trunk_approved" "$stack_name" "approval" "$draft_materialization"
   rm -f "$(pg_trunk_prepare_path "$stack_name")"
   trap - RETURN
   rm -f "$cleanup_draft" "$normalized_draft"
@@ -2542,6 +2595,7 @@ DELETE FROM pending_trunk_assertions
 WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
 " >/dev/null
   pg_dolt_commit "revoke trunk lease $stack_name"
+  pg_emit_stack_event "lease_changed" "$stack_name" "lease"
   echo "Revoked trunk lease for $stack_name"
 }
 
@@ -2553,12 +2607,14 @@ pg_trunk_record_pending_assertion() {
 REPLACE INTO pending_trunk_assertions (repo_key, stack_name, branch, remote, source_ref, commit_sha, assert_flow, created_at)
 VALUES ($(pg_sql_quote "$repo_key"), $(pg_sql_quote "$stack_name"), $(pg_sql_quote "$branch"), $(pg_sql_quote "$remote"), $(pg_sql_quote "$source_ref"), $(pg_sql_quote "$commit_sha"), $(pg_sql_quote "$assert_flow"), $(pg_sql_quote "$now"));
 " >/dev/null
+  pg_emit_stack_event "push_plan_changed" "$stack_name" "push_plan"
 }
 
 pg_trunk_clear_pending_assertion() {
   local stack_name="$1" branch="$2" repo_key
   repo_key=$(pg_repo_key) || return 0
   pg_dolt_sql "DELETE FROM pending_trunk_assertions WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name") AND branch = $(pg_sql_quote "$branch");" >/dev/null || true
+  pg_emit_stack_event "push_plan_changed" "$stack_name" "push_plan"
 }
 
 pg_trunk_record_async_success() {
@@ -2595,6 +2651,7 @@ SET async_json = $(pg_sql_quote "$updated"),
 WHERE repo_key = $(pg_sql_quote "$repo_key") AND stack_name = $(pg_sql_quote "$stack_name");
 " >/dev/null
   pg_dolt_commit "trunk async push $stack_name"
+  pg_emit_stack_event "push_plan_changed" "$stack_name" "push_plan"
 }
 
 pg_trunk_pending_allows_push() {
