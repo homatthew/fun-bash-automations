@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SLACK_USER_TOKEN="$(security find-generic-password -s "slack-user-token" -w 2>/dev/null || true)"
+if [[ -z "$SLACK_USER_TOKEN" ]]; then
+    SLACK_USER_TOKEN="$(security find-generic-password -s "claude-slack-user-token" -w 2>/dev/null || true)"
+fi
+if [[ -n "$SLACK_USER_TOKEN" ]]; then
+    export SLACK_USER_TOKEN
+fi
+
+exec npx @netflix-internal/ndex-slack-private "$@"

@@ -14,7 +14,7 @@ ACCOUNT="${USER:-$(id -un)}"
 # name | prompt | secret (1 = silent read)
 ITEMS=(
   "claude-slack-bot-token|Bot User OAuth Token (xoxb-...)|1"
-  "claude-slack-user-token|User OAuth Token (xoxp-..., optional)|1"
+  "claude-slack-user-token|User OAuth Token for Claude/Codex private Slack MCP (xoxp-..., optional)|1"
   "claude-slack-webhook|Incoming Webhook URL (https://hooks.slack.com/..., optional)|1"
   "claude-slack-channel|Channel ID (C..., e.g. C0AFGU74PTN)|0"
   "claude-slack-user-id|Your Slack member ID (U..., for @mentions, optional)|0"
@@ -69,4 +69,4 @@ for row in "${ITEMS[@]}"; do
 done
 
 printf 'Done. Verify with:\n'
-printf '  security find-generic-password -a "$USER" -s claude-slack-bot-token -w | head -c 8\n'
+printf '  security find-generic-password -a "$USER" -s claude-slack-user-token -w | head -c 8\n'
