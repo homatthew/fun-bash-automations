@@ -3034,8 +3034,24 @@ pg_stacked_parent_base_ref() {
   echo "$best_ref"
 }
 
+pg_should_prefer_upstream_base_over_pr() {
+  local repo_name branch upstream
+  repo_name=$(pg_repo_name 2>/dev/null || true)
+  branch=$(pg_branch_name 2>/dev/null || true)
+  [[ "$repo_name" == "fun-bash-automations" && "$branch" == "mh-netflix" ]] || return 1
+  upstream=$(pg_upstream_ref 2>/dev/null || true)
+  [[ -n "$upstream" ]] || return 1
+}
+
 pg_default_base_ref_snapshot() {
   local pr_base upstream stacked_parent remote
+  if pg_should_prefer_upstream_base_over_pr; then
+    upstream=$(pg_upstream_ref)
+    if [[ -n "$upstream" ]]; then
+      echo "$upstream"
+      return 0
+    fi
+  fi
   pr_base=$(pg_pr_base_ref_snapshot)
   if [[ -n "$pr_base" ]]; then
     echo "$pr_base"

@@ -144,7 +144,8 @@ make_repo() {
   local name="$1"
   local base="$TEST_TMP/$name"
   local origin="$base/origin.git"
-  local repo="$base/repo"
+  local repo_dir="${2:-repo}"
+  local repo="$base/$repo_dir"
   local bin_dir="$base/bin"
   mkdir -p "$base"
   git -c init.defaultBranch=main init --bare "$origin" >/dev/null
@@ -246,7 +247,7 @@ expect_no_trailing_whitespace() {
   [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
 }
 
-echo "1..37"
+echo "1..38"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -667,6 +668,36 @@ pr_base_draft=$(extract_path "$pr_base_output" "^JSON draft file:")
   || fail "expected PR approval scope to use PR base origin/main, got $(jq -r '.approved_scope.base_ref' "$pr_base_draft")"
 echo "ok 26 - existing PR approval scope uses GitHub PR base instead of tracking branch"
 
+IFS='|' read -r FBA_BASE_REPO FBA_BASE_BIN FBA_BASE_ORIGIN <<<"$(make_repo fba-delivery-base fun-bash-automations)"
+FAKE_BIN="$FBA_BASE_BIN"
+(
+  cd "$FBA_BASE_REPO"
+  git checkout -b mh-netflix >/dev/null
+  printf 'delivery\n' >delivery.txt
+  git add delivery.txt
+  git commit -m "delivery branch baseline" >/dev/null
+  git push -u origin mh-netflix >/dev/null
+
+  git checkout main >/dev/null
+  printf 'main only\n' >main-only.txt
+  git add main-only.txt
+  git commit -m "main only work" >/dev/null
+  git push origin main >/dev/null
+
+  git checkout mh-netflix >/dev/null
+  printf 'pending\n' >>delivery.txt
+  git add delivery.txt
+  git commit -m "pending delivery work" >/dev/null
+)
+export PG_TEST_PR_JSON='[{"number":3,"url":"https://example.test/pr/3","baseRefName":"main"}]'
+fba_base_output=$(run_helper "$FBA_BASE_REPO" draft-approve \
+  --intent $'update fun-bash-automations delivery branch\nsame branch\nno rewrite' \
+  --assert-flow $'update fun-bash-automations delivery branch\nbranch mh-netflix\nno rewrite')
+fba_base_draft=$(extract_path "$fba_base_output" "^JSON draft file:")
+[[ "$(jq -r '.approved_scope.base_ref' "$fba_base_draft")" == "origin/mh-netflix" ]] \
+  || fail "expected fun-bash-automations mh-netflix to use upstream base, got $(jq -r '.approved_scope.base_ref' "$fba_base_draft")"
+echo "ok 27 - fun-bash-automations mh-netflix ignores stale PR base and uses tracking branch"
+
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"
 (
@@ -695,7 +726,7 @@ export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/
 run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
 [[ "$(jq -r '.pr_number' "$topo_bind_lease")" == "77" ]] || fail "expected bind-pr to use upstream pr_repo and bind PR #77"
 [[ "$(jq -r '.pr_repo' "$topo_bind_lease")" == "example.test/Netflix-Skunkworks/topology-bind" ]] || fail "expected bound lease to retain upstream pr_repo"
-echo "ok 27 - bind-pr uses topology-selected upstream PR repo"
+echo "ok 28 - bind-pr uses topology-selected upstream PR repo"
 
 IFS='|' read -r LOW_REPO LOW_BIN LOW_ORIGIN <<<"$(make_repo low-stakes)"
 FAKE_BIN="$LOW_BIN"
@@ -724,7 +755,7 @@ low_draft_file=$(extract_path "$low_draft_output" "^JSON draft file:")
   || fail "expected low-stakes draft to carry async"
 [[ "$(jq -r '.async_iteration.scope.branch_name' "$low_draft_file")" == "mho/low-stakes" ]] \
   || fail "expected low-stakes draft to scope branch"
-echo "ok 28 - low-stakes prepare creates reviewed short async lease draft"
+echo "ok 29 - low-stakes prepare creates reviewed short async lease draft"
 
 yes_draft_output=$(run_helper "$LOW_REPO" --yes)
 yes_script=$(extract_path "$yes_draft_output" "^Approval script:")
@@ -732,7 +763,7 @@ yes_output=$(EDITOR=true bash "$yes_script" 2>&1 || true)
 expect_contains "$yes_output" "Proceed: yes (--yes, after editor review)"
 expect_contains "$yes_output" "pg approve requires an interactive terminal"
 [[ "$yes_output" != *"Proceed? [Y/n]"* ]] || fail "expected --yes to skip final prompt"
-echo "ok 29 - --yes skips final prompt but still requires editor and tty approval"
+echo "ok 30 - --yes skips final prompt but still requires editor and tty approval"
 
 review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux)
 [[ "$(jq -r '.diff.branch' <<<"$review_diff_json")" == "mho/low-stakes" ]] \
@@ -743,7 +774,7 @@ expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "DiffviewO
 review_command=$(run_helper "$LOW_REPO" review-diff --print-command --no-tmux)
 expect_contains "$review_command" "DiffviewOpen"
 expect_contains "$review_command" "PG_REVIEW_COMMENTS_FILE="
-echo "ok 30 - review-diff exposes exact Diffview command without launching UI"
+echo "ok 31 - review-diff exposes exact Diffview command without launching UI"
 
 comments_file=$(jq -r '.diff.comments_file' <<<"$review_diff_json")
 mkdir -p "$(dirname "$comments_file")"
@@ -758,19 +789,19 @@ comments_json=$(run_helper "$LOW_REPO" review-comments --json)
   || fail "expected one unresolved review comment: $comments_json"
 [[ "$(jq -r '.comments[0].file' <<<"$comments_json")" == "low-stakes.txt" ]] \
   || fail "expected normalized review comment file: $comments_json"
-echo "ok 31 - review-comments exports local comments for agents"
+echo "ok 32 - review-comments exports local comments for agents"
 
 queue_json=$(run_helper "$LOW_REPO" queue --json)
 [[ "$(jq -r '.prepared | length >= 1' <<<"$queue_json")" == "true" ]] \
   || fail "expected queue to include prepared briefs: $queue_json"
 [[ "$(jq -r '.leases | type' <<<"$queue_json")" == "array" ]] \
   || fail "expected queue to include leases array: $queue_json"
-echo "ok 32 - queue reports prepared briefs and active leases"
+echo "ok 33 - queue reports prepared briefs and active leases"
 
 approve_all_output=$(run_helper "$LOW_REPO" approve-all -C "$LOW_REPO" 2>&1) && approve_all_rc=0 || approve_all_rc=$?
 [[ "$approve_all_rc" != "0" ]] || fail "expected approve-all to require an interactive terminal"
 expect_contains "$approve_all_output" "requires an interactive terminal"
-echo "ok 33 - approve-all cannot be used as a noninteractive approval bypass"
+echo "ok 34 - approve-all cannot be used as a noninteractive approval bypass"
 
 IFS='|' read -r INFER_REPO INFER_BIN INFER_ORIGIN <<<"$(make_repo inference-disabled)"
 FAKE_BIN="$INFER_BIN"
@@ -788,7 +819,7 @@ set -e
 [[ "$inference_rc" != "0" ]] || fail "expected PG_ALLOW_INFERENCE draft approval to be rejected"
 expect_contains "$inference_output" "PG_ALLOW_INFERENCE is no longer accepted"
 expect_contains "$inference_output" "pg prepare required"
-echo "ok 34 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
+echo "ok 35 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
 
 IFS='|' read -r STACK_BASE_REPO STACK_BASE_BIN STACK_BASE_ORIGIN <<<"$(make_repo stacked-parent-base)"
 FAKE_BIN="$STACK_BASE_BIN"
@@ -814,7 +845,7 @@ stack_base_output=$(run_helper "$STACK_BASE_REPO" draft-approve \
 stack_base_draft=$(extract_path "$stack_base_output" "^JSON draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$stack_base_draft")" == "refs/remotes/origin/mho/parent-feature" ]] \
   || fail "expected stacked child approval scope to use parent PR branch, got $(jq -r '.approved_scope.base_ref' "$stack_base_draft")"
-echo "ok 35 - stacked child without upstream uses closest open parent PR branch as approval base"
+echo "ok 36 - stacked child without upstream uses closest open parent PR branch as approval base"
 
 IFS='|' read -r ASYNC_WORK_REPO ASYNC_WORK_BIN ASYNC_WORK_ORIGIN <<<"$(make_repo async-work-package)"
 FAKE_BIN="$ASYNC_WORK_BIN"
@@ -869,7 +900,7 @@ async_work_block=$(run_helper "$ASYNC_WORK_REPO" check)
   || fail "expected unrelated async work-package path to be blocked: $async_work_block"
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "outside the reviewed async work package"
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "src/unrelated.sh"
-echo "ok 36 - async work package can cover expected future files while blocking common-token path collisions"
+echo "ok 37 - async work package can cover expected future files while blocking common-token path collisions"
 
 IFS='|' read -r INTENT_REPO INTENT_BIN INTENT_ORIGIN <<<"$(make_repo semantic-check-alignment)"
 FAKE_BIN="$INTENT_BIN"
@@ -915,4 +946,4 @@ intent_push_rc=$?
 set -e
 [[ "$intent_push_rc" != "0" ]] || fail "expected pg push to reject semantic mismatch"
 expect_contains "$intent_push" "$(jq -r '.reason' <<<"$intent_check")"
-echo "ok 37 - pg check and pg push both surface semantic intent mismatches"
+echo "ok 38 - pg check and pg push both surface semantic intent mismatches"
