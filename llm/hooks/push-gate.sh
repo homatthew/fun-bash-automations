@@ -3353,9 +3353,10 @@ $commits" </dev/null >/dev/null 2>"$codex_err"
 }
 
 # Attempt to auto-detect bead references from commit subjects/bodies on
-# this branch. Looks for tokens like "bead-xxx", "[bead-xxx]", "fba-123",
-# "dump-64q" — alphanumeric-slug ids used by the beads tracker. Returns
-# one id per line, deduped.
+# this branch. Looks for tokens like "fba-123" and "dump-64q" —
+# alphanumeric-slug ids used by the beads tracker. Require a digit in
+# the suffix so prose terms like "push-gate" and "draft-approve" do not
+# trigger a slow bd lookup storm on documentation-heavy branches.
 pg_detect_beads() {
   local base_ref commits
   base_ref=$(pg_default_base_ref_snapshot)
@@ -3365,7 +3366,7 @@ pg_detect_beads() {
   commits="$commits
 $(git branch --show-current 2>/dev/null)"
   printf '%s\n' "$commits" \
-    | grep -oE '\b[a-z][a-z0-9-]*-[a-z0-9]{2,}\b' \
+    | grep -oE '\b[a-z][a-z0-9]*-[a-z0-9]*[0-9][a-z0-9]*\b' \
     | grep -v -E '^(git|no|yes|pr)-' \
     | awk '!seen[$0]++' \
     || true
