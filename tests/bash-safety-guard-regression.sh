@@ -31,7 +31,7 @@ write_payload() {
   jq -n --argjson files "$files_json" '{files:$files}' >"$path"
 }
 
-echo "1..30"
+echo "1..35"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -175,3 +175,23 @@ printf 'i-06d1de1f25c667a62 %s\n' "$future_expiry" >"$SSH_LEASE_FILE"
 pilgrim_allow=$(run_guard "ssh -F $pilgrim_config matthewho@ignored uptime")
 [[ -z "$pilgrim_allow" ]] || fail "expected Pilgrim placeholder SSH to match instance-id lease, got: $pilgrim_allow"
 echo "ok 30 - Pilgrim placeholder SSH config suggests and accepts instance-id lease"
+
+fba_pr_create_block=$(run_guard "gh pr create --base main --head mh-netflix --title nope")
+expect_contains "$fba_pr_create_block" "fun-bash-automations uses mh-netflix as the delivery branch"
+echo "ok 31 - fun-bash-automations gh pr create is blocked"
+
+fba_pr_ready_block=$(run_guard "gh -R homatthew/fun-bash-automations pr ready 3")
+expect_contains "$fba_pr_ready_block" "Do not create, reopen, or mark ready PRs"
+echo "ok 32 - fun-bash-automations gh pr ready is blocked with explicit repo"
+
+fba_pr_reopen_block=$(run_guard "gh pr reopen --repo=homatthew/fun-bash-automations 3")
+expect_contains "$fba_pr_reopen_block" "Do not create, reopen, or mark ready PRs"
+echo "ok 33 - fun-bash-automations gh pr reopen is blocked with repo flag"
+
+fba_pr_view_allow=$(run_guard "gh pr view 3 --json number")
+[[ -z "$fba_pr_view_allow" ]] || fail "expected fun-bash-automations gh pr view to be allowed, got: $fba_pr_view_allow"
+echo "ok 34 - fun-bash-automations gh pr view stays allowed"
+
+other_pr_create_allow=$(run_guard "gh -R homatthew/other-repo pr create --base main --head feature")
+[[ -z "$other_pr_create_allow" ]] || fail "expected non-FBA gh pr create to be allowed by this guard, got: $other_pr_create_allow"
+echo "ok 35 - non-FBA gh pr create is not blocked by FBA-specific rule"

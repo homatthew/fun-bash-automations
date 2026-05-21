@@ -94,6 +94,10 @@ If the push is blocked, use `pg doctor` or generate a replacement lease. For reb
 
 Skip this step if a PR already exists (Step 2 found one).
 
+Also skip this step for `homatthew/fun-bash-automations`: that repo delivers
+on `mh-netflix`, and agents must not create, reopen, or mark ready PRs from
+`mh-netflix` to `main`.
+
 First, detect repo type and fork topology:
 
 ```bash

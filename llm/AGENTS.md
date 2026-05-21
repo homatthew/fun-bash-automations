@@ -6,6 +6,8 @@ workflows across Claude, Codex, and future harnesses.
 ## Core Rules
 
 - Keep history linear in `fun-bash-automations` on branch `mh-netflix`.
+- Do not create, reopen, or mark ready PRs from `fun-bash-automations`
+  `mh-netflix` to `main`; `mh-netflix` is the delivery branch for this repo.
 - Do not push unless explicitly asked.
 - Explicit finish-workflow invocations such as `/go`, `/commit-push-pr`,
   `/push-review`, and `/stacked-pr` count as an explicit ask for the

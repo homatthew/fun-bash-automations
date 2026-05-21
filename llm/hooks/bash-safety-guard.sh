@@ -29,6 +29,16 @@ has_wrong_netflix_gh_host() {
   echo "$COMMAND" | grep -qE "(^|[;&|[:space:]])(export[[:space:]]+)?GH_HOST=['\"]?github\\.netflix\\.net['\"]?([[:space:];&|]|$)"
 }
 
+is_fun_bash_automations_repo() {
+  local root remote
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ "$(basename "$root")" = "fun-bash-automations" ]; then
+    return 0
+  fi
+  remote=$(git config --get remote.origin.url 2>/dev/null || true)
+  [[ "$remote" == *"fun-bash-automations"* ]]
+}
+
 ssh_lease_file() {
   printf '%s\n' "${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
 }
@@ -391,6 +401,81 @@ has_netflix_gist_hostname() {
   echo "$COMMAND" | grep -qE "(^|[[:space:]])GH_HOST=['\"]?git\\.netflix\\.net['\"]?([[:space:]]|$)|--hostname(=|[[:space:]]+)['\"]?git\\.netflix\\.net['\"]?([[:space:]]|$)"
 }
 
+has_fba_pr_open_command() {
+  python3 - "$COMMAND" "$(is_fun_bash_automations_repo && printf true || printf false)" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+cwd_is_fba = sys.argv[2] == "true"
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def repo_is_fba(repo):
+    if not repo:
+        return False
+    repo = repo.rstrip("/")
+    return (
+        repo == "homatthew/fun-bash-automations"
+        or repo == "fun-bash-automations"
+        or repo.endswith("/fun-bash-automations")
+        or "fun-bash-automations.git" in repo
+    )
+
+def fba_target(args):
+    repo = None
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token in {"-R", "--repo"} and idx + 1 < len(args):
+            repo = args[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--repo="):
+            repo = token.split("=", 1)[1]
+        idx += 1
+    return repo_is_fba(repo) or (repo is None and cwd_is_fba)
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "gh":
+        continue
+    args = segment[1:]
+    while args and args[0] in {"-R", "--repo"}:
+        args = args[2:] if len(args) > 1 else []
+    while args and args[0].startswith("--repo="):
+        args = args[1:]
+    if len(args) >= 2 and args[0] == "pr" and args[1] in {"create", "ready", "reopen"}:
+        if fba_target(segment[1:]):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
 is_gh_api_gist_create() {
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*gh\s+api([[:space:]]|$)' || return 1
   echo "$COMMAND" | grep -qE "(^|[[:space:]\"'])/?gists([[:space:]\"']|$)" || return 1
@@ -695,6 +780,12 @@ check_gh_host_safety() {
   deny "Blocked: GH_HOST=github.netflix.net is wrong for Netflix GHE. Use GH_HOST=git.netflix.net."
 }
 
+# --- 10ba. fun-bash-automations PR Safety ---
+check_fba_pr_safety() {
+  has_fba_pr_open_command || return
+  deny "Blocked: fun-bash-automations uses mh-netflix as the delivery branch. Do not create, reopen, or mark ready PRs from mh-netflix to main."
+}
+
 # --- 10c. GitHub Gist Host Safety ---
 check_gh_gist_host_safety() {
   is_gh_api_gist_create || return
@@ -749,6 +840,7 @@ check_remote_exec
 check_package_publish
 check_gh_destructive
 check_gh_host_safety
+check_fba_pr_safety
 check_gh_gist_host_safety
 check_gh_gist_filename_safety
 check_process_kill
