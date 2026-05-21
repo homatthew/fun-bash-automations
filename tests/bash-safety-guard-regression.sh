@@ -31,7 +31,7 @@ write_payload() {
   jq -n --argjson files "$files_json" '{files:$files}' >"$path"
 }
 
-echo "1..28"
+echo "1..30"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -152,3 +152,26 @@ echo "ok 27 - ssh user@host normalizes to host lease"
 scp_env_lease_allow=$(run_guard "scp cassandra@nfcassandra-node.example:/tmp/schema.cql $TEST_TMP/schema.cql")
 [[ -z "$scp_env_lease_allow" ]] || fail "expected scp to use configured lease file, got: $scp_env_lease_allow"
 echo "ok 28 - scp uses shared ssh lease helper"
+
+ssh_search_allow=$(run_guard "rg -n ssh llm/hooks/bash-safety-guard.sh")
+[[ -z "$ssh_search_allow" ]] || fail "expected local rg search for ssh text to be allowed, got: $ssh_search_allow"
+echo "ok 29 - local search containing ssh text is not treated as remote access"
+
+pilgrim_config_dir="$TEST_TMP/pilgrim/i-06d1de1f25c667a62"
+mkdir -p "$pilgrim_config_dir"
+pilgrim_config="$pilgrim_config_dir/config.nodelete"
+cat >"$pilgrim_config" <<'EOF'
+Host ignored
+  Hostname 100.94.160.30
+  User matthewho
+EOF
+pilgrim_block=$(run_guard "ssh -F $pilgrim_config matthewho@ignored uptime")
+expect_contains "$pilgrim_block" "ssh to 'i-06d1de1f25c667a62' requires a lease"
+expect_contains "$pilgrim_block" "ssh-gate i-06d1de1f25c667a62"
+if [[ "$pilgrim_block" == *"ssh-gate ignored"* ]]; then
+  fail "expected Pilgrim placeholder host not to suggest ssh-gate ignored: $pilgrim_block"
+fi
+printf 'i-06d1de1f25c667a62 %s\n' "$future_expiry" >"$SSH_LEASE_FILE"
+pilgrim_allow=$(run_guard "ssh -F $pilgrim_config matthewho@ignored uptime")
+[[ -z "$pilgrim_allow" ]] || fail "expected Pilgrim placeholder SSH to match instance-id lease, got: $pilgrim_allow"
+echo "ok 30 - Pilgrim placeholder SSH config suggests and accepts instance-id lease"

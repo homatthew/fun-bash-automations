@@ -64,6 +64,7 @@ value_options = {
     "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
     "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
 }
+placeholder_hosts = {"ignored", "ignore", "placeholder", "dummy"}
 
 def strip_env_assignments(segment):
     idx = 0
@@ -78,27 +79,106 @@ def normalize_host(token):
         token = token[1:token.index("]")]
     return token
 
+def resolve_config_target(config_path, host):
+    if not config_path or host not in placeholder_hosts:
+        return host
+
+    instance_match = re.search(r"i-[0-9a-fA-F]{8,}", config_path)
+    if instance_match:
+        return instance_match.group(0)
+
+    hostname = None
+    active = False
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                key = parts[0].lower()
+                values = parts[1:]
+                if key == "host":
+                    active = host in values or "*" in values
+                elif active and key == "hostname" and values:
+                    hostname = values[0]
+                    break
+    except OSError:
+        return host
+
+    return hostname or host
+
 for segment in segments:
     segment = strip_env_assignments(segment)
     if not segment or segment[0] != "ssh":
         continue
     idx = 1
+    config_path = None
     while idx < len(segment):
         token = segment[idx]
         if token == "--":
             idx += 1
             if idx < len(segment):
-                print(normalize_host(segment[idx]))
+                print(resolve_config_target(config_path, normalize_host(segment[idx])))
             sys.exit(0)
+        if token == "-F" and idx + 1 < len(segment):
+            config_path = segment[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("-F") and len(token) > 2:
+            config_path = token[2:]
+            idx += 1
+            continue
         if token in value_options:
             idx += 2
             continue
         if token.startswith("-"):
             idx += 1
             continue
-        print(normalize_host(token))
+        print(resolve_config_target(config_path, normalize_host(token)))
         sys.exit(0)
 sys.exit(0)
+PY
+}
+
+has_ssh_invocation() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if segment and segment[0] == "ssh":
+        sys.exit(0)
+sys.exit(1)
 PY
 }
 
@@ -560,9 +640,9 @@ check_remote_exec() {
     deny "Blocked: unsafe SSH host-key option ($unsafe_ssh_options). Use StrictHostKeyChecking=accept-new instead."
   fi
   # Check SSH lease file for approved hosts (12-hour leases via ssh-gate)
-  if echo "$COMMAND" | grep -qE '(^|[;&|]\s*)ssh\s'; then
-    local SSH_TARGET
-    SSH_TARGET=$(extract_ssh_target)
+  local SSH_TARGET
+  SSH_TARGET=$(extract_ssh_target)
+  if [ -n "$SSH_TARGET" ] || has_ssh_invocation; then
     if has_valid_ssh_lease "$SSH_TARGET"; then
       return
     fi
