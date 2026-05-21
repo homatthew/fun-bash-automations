@@ -5175,6 +5175,22 @@ pg_cmd_check() {
   head=$(git rev-parse HEAD 2>/dev/null || echo '')
   validation=$(pg_validate_branch_lease_state "$lease_json" "$branch_ref" "$remote" "$head")
 
+  local validation_allowed intent_result intent_allowed intent_reason
+  validation_allowed=$(echo "$validation" | jq -r '.allowed')
+  if [[ "$validation_allowed" == "true" ]]; then
+    intent_result=$(pg_validate_intent_match "$lease_json")
+    intent_allowed=$(echo "$intent_result" | jq -r '.allowed')
+    if [[ "$intent_allowed" != "true" ]]; then
+      intent_reason=$(echo "$intent_result" | jq -r '.reason')
+      validation=$(echo "$validation" | jq \
+        --arg reason "$intent_reason" \
+        --argjson intent "$intent_result" \
+        '.allowed = false | .reason = $reason | .intent = $intent')
+    else
+      validation=$(echo "$validation" | jq --argjson intent "$intent_result" '.intent = $intent')
+    fi
+  fi
+
   scope=$(echo "$lease_json" | jq -c '.approved_scope // null')
   base_ref=$(echo "$scope" | jq -r '.base_ref // empty')
 

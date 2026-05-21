@@ -116,6 +116,28 @@ echo "unexpected gh invocation: $*" >&2
 exit 1
 EOF
   chmod +x "$bin_dir/gh"
+  cat >"$bin_dir/codex" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+output=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output-last-message)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$output" ]] || { echo "missing --output-last-message" >&2; exit 1; }
+printf '%s\n' "${PG_TEST_CODEX_RESPONSE:-MATCH: test semantic check ok}" >"$output"
+exit "${PG_TEST_CODEX_RC:-0}"
+EOF
+  chmod +x "$bin_dir/codex"
 }
 
 make_repo() {
@@ -224,7 +246,7 @@ expect_no_trailing_whitespace() {
   [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
 }
 
-echo "1..36"
+echo "1..37"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -848,3 +870,49 @@ async_work_block=$(run_helper "$ASYNC_WORK_REPO" check)
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "outside the reviewed async work package"
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "src/unrelated.sh"
 echo "ok 36 - async work package can cover expected future files while blocking common-token path collisions"
+
+IFS='|' read -r INTENT_REPO INTENT_BIN INTENT_ORIGIN <<<"$(make_repo semantic-check-alignment)"
+FAKE_BIN="$INTENT_BIN"
+(
+  cd "$INTENT_REPO"
+  git checkout -b mho/semantic-check-alignment >/dev/null
+)
+export PG_TEST_PR_JSON='[]'
+export PG_TEST_PR_LIST_MAP=''
+run_helper "$INTENT_REPO" prepare \
+  --async \
+  --expires 8h \
+  --max-pushes 6 \
+  --what "Write widget-review documentation" \
+  --why "allow reviewed async feature building while human is unavailable" \
+  --approach "add widget-review documentation under docs and verify semantic checks" >/dev/null
+intent_output=$(run_helper "$INTENT_REPO" draft-approve)
+intent_draft=$(extract_path "$intent_output" "^JSON draft file:")
+intent_common=$(current_common_dir "$INTENT_REPO")
+intent_lease="$intent_common/push-gate/leases/refs/heads/mho/semantic-check-alignment.json"
+mkdir -p "$(dirname "$intent_lease")"
+jq --arg expires_at "$(future_utc)" \
+  '.status = "active"
+   | .updated_at = .created_at
+   | .async_iteration.expires_at = $expires_at' \
+  "$intent_draft" >"$intent_lease"
+(
+  cd "$INTENT_REPO"
+  mkdir -p docs
+  printf 'review docs\n' >docs/widget-review.md
+  git add docs/widget-review.md
+  git commit -m "widget review documentation" >/dev/null
+)
+intent_check=$(PG_TEST_CODEX_RESPONSE='MISMATCH: widget review documentation is outside approved intent' \
+  run_helper "$INTENT_REPO" check)
+[[ "$(jq -r '.allowed' <<<"$intent_check")" == "false" ]] \
+  || fail "expected pg check to surface semantic intent mismatch: $intent_check"
+expect_contains "$(jq -r '.reason' <<<"$intent_check")" "branch diverges from approved intent"
+set +e
+intent_push=$(PG_TEST_CODEX_RESPONSE='MISMATCH: widget review documentation is outside approved intent' \
+  run_helper "$INTENT_REPO" push --assert-flow $'update pr line\nbranch mho/semantic-check-alignment\nno rewrite' 2>&1)
+intent_push_rc=$?
+set -e
+[[ "$intent_push_rc" != "0" ]] || fail "expected pg push to reject semantic mismatch"
+expect_contains "$intent_push" "$(jq -r '.reason' <<<"$intent_check")"
+echo "ok 37 - pg check and pg push both surface semantic intent mismatches"
