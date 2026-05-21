@@ -2085,6 +2085,7 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     data = json.load(fh)
 
 def wrap_line(line):
+    line = line.rstrip(" \t\r")
     if len(line) <= WIDTH:
         return line
     prefix = re.match(r"\s*", line).group(0)
@@ -2146,13 +2147,16 @@ def emit_multiline(prefix, text, indent):
     lines = text.splitlines() or [""]
     pad = " " * (indent + 2)
     for line in lines:
-        print(pad + line)
+        if line == "":
+            print("")
+        else:
+            print(pad + line.rstrip(" \t\r"))
 
 def emit_value(value, indent=0, key_prefix=None):
     pad = " " * indent
     if isinstance(value, dict):
         if key_prefix is not None:
-            print(key_prefix)
+            print(key_prefix.rstrip())
         if not value:
             if key_prefix is None:
                 print("{}")
@@ -2167,7 +2171,7 @@ def emit_value(value, indent=0, key_prefix=None):
             print((key_prefix or pad) + "[]")
             return
         if key_prefix is not None:
-            print(key_prefix)
+            print(key_prefix.rstrip())
             child_indent = indent + 2
         else:
             child_indent = indent

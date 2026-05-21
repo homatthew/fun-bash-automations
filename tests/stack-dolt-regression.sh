@@ -27,6 +27,12 @@ expect_contains() {
   [[ "$haystack" == *"$needle"* ]] || fail "expected [$needle] in: $haystack"
 }
 
+expect_no_trailing_whitespace() {
+  local file="$1" matches
+  matches=$(grep -nE '[[:blank:]]$' "$file" || true)
+  [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
+}
+
 event_count() {
   [[ -d "$PG_EVENTS_DIR" ]] || { printf '0\n'; return 0; }
   find "$PG_EVENTS_DIR" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' '
@@ -476,6 +482,7 @@ SH
   draft_file=$(printf '%s\n' "$trunk_out" | awk -F': ' '/JSON draft file:/ {print $2; exit}')
   [[ -f "$yaml_draft_file" ]] || fail "expected trunk YAML draft file: $trunk_out"
   [[ -f "$draft_file" ]] || fail "expected trunk draft file: $trunk_out"
+  expect_no_trailing_whitespace "$yaml_draft_file"
   yq eval '.stack' "$yaml_draft_file" | grep -qx 'demo' \
     || fail "expected trunk YAML draft to parse as stack demo"
   [[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,stack,description,stack_items" ]] \
@@ -554,6 +561,7 @@ SH
   json_draft_file=$(yq eval '.json_draft_file' <<<"$trunk_draft_out")
   [[ -f "$yaml_draft_file" ]] || fail "expected YAML trunk draft file: $trunk_draft_out"
   [[ -f "$json_draft_file" ]] || fail "expected JSON trunk draft file: $trunk_draft_out"
+  expect_no_trailing_whitespace "$yaml_draft_file"
   expect_contains "$(head -n 1 "$yaml_draft_file")" "pg trunk approval draft"
   yq eval '.stack' "$yaml_draft_file" | grep -qx 'demo' \
     || fail "expected YAML trunk draft to parse as stack demo"
