@@ -264,12 +264,28 @@ echo "ok 2 - draft script renders readable approval summary"
 
 common_dir=$(current_common_dir "$REPO")
 lease_path="$common_dir/push-gate/leases/refs/heads/mho/existing-pr.json"
-yq eval '.description.summary = "feature start from edited description" | .brief.what = "stale brief field"' \
-  -i "$draft_yaml_file"
+SUMMARY_WITH_TRAILING_BLANKS=$'feature start from edited description\n\n'
+INTENT_WITH_TRAILING_BLANKS=$'edited intent\n\n'
+ASSERT_WITH_TRAILING_BLANKS=$'edited assertion\n\n'
+SUMMARY_WITH_TRAILING_BLANKS="$SUMMARY_WITH_TRAILING_BLANKS" \
+  INTENT_WITH_TRAILING_BLANKS="$INTENT_WITH_TRAILING_BLANKS" \
+  ASSERT_WITH_TRAILING_BLANKS="$ASSERT_WITH_TRAILING_BLANKS" \
+  yq eval '
+    .description.summary = strenv(SUMMARY_WITH_TRAILING_BLANKS)
+    | .brief.what = "stale brief field\n\n"
+    | .user_intent = strenv(INTENT_WITH_TRAILING_BLANKS)
+    | .agent_assertion_template = strenv(ASSERT_WITH_TRAILING_BLANKS)
+  ' -i "$draft_yaml_file"
 approval_block=$(printf 'y\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$approval_block" "pg approve requires an interactive terminal"
 [[ "$(jq -r '.brief.what' "$draft_file")" == "feature start from edited description" ]] \
   || fail "expected approve to normalize brief from edited description"
+[[ "$(jq -r '.description.summary' "$draft_file")" == "feature start from edited description" ]] \
+  || fail "expected approve to trim trailing blank lines from description"
+[[ "$(jq -r '.user_intent' "$draft_file")" == "edited intent" ]] \
+  || fail "expected approve to trim trailing blank lines from user intent"
+[[ "$(jq -r '.agent_assertion_template' "$draft_file")" == "edited assertion" ]] \
+  || fail "expected approve to trim trailing blank lines from assertion template"
 mkdir -p "$(dirname "$lease_path")"
 jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$draft_file" >"$lease_path"
 expect_file "$lease_path"

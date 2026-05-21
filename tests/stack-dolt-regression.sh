@@ -523,7 +523,12 @@ SH
   expect_contains "$preview_out" "Changed files:"
   expect_contains "$preview_out" "added:"
   expect_contains "$preview_out" "api.txt"
-  jq '.stack_items[0].description.summary = ["Edited base item description."] | .stack_items[0].brief.what = ["stale brief field"]' \
+  jq '
+    .description.summary = "ship demo stack\n\n"
+    | .description.motivation = "verify rich trunk review details\n\n"
+    | .stack_items[0].description.summary = ["Edited base item description.\n\n"]
+    | .stack_items[0].brief.what = ["stale brief field\n\n"]
+  ' \
     "$draft_file" >"$draft_file.tmp"
   mv "$draft_file.tmp" "$draft_file"
   set +e
@@ -532,7 +537,13 @@ SH
   set -e
   [[ "$approve_trunk_rc" != "0" ]] || fail "expected noninteractive trunk approval to fail"
   expect_contains "$approve_trunk_out" "requires an interactive terminal"
+  [[ "$(jq -r '.description.summary' "$draft_file")" == "ship demo stack" ]] \
+    || fail "expected trunk approval to trim trailing blank lines from description summary"
+  [[ "$(jq -r '.description.motivation' "$draft_file")" == "verify rich trunk review details" ]] \
+    || fail "expected trunk approval to trim trailing blank lines from description motivation"
   expect_contains "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" "Edited base item description."
+  [[ "$(jq -r '.stack_items[0].brief.what[0]' "$draft_file")" == "Edited base item description." ]] \
+    || fail "expected trunk approval to trim trailing blank lines from item brief"
 
   trunk_draft_out=$(bash "$PG" trunk-draft --stack demo --format yaml)
   [[ "$(yq eval '.stack' <<<"$trunk_draft_out")" == "demo" ]] \

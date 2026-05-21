@@ -2103,6 +2103,7 @@ def wrap_line(line):
 def wrap_text(value):
     if not isinstance(value, str):
         return value
+    value = value.strip(" \t\r\n")
     return "\n".join(wrap_line(line) for line in value.splitlines())
 
 def wrap_desc(desc):
@@ -2452,31 +2453,38 @@ pg_cmd_approve_trunk() {
   esac
   normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-trunk-draft.XXXXXX")
   jq '
+    def trim_text:
+      if type == "string" then gsub("^[ \t\r\n]+"; "") | gsub("[ \t\r\n]+$"; "")
+      elif type == "array" then map(if type == "string" then trim_text else . end)
+      else .
+      end;
     def from_brief:
       {
-        summary: .brief.what,
-        motivation: .brief.why,
-        approach: .brief.approach,
-        scope: .brief.scope,
-        risks: .brief.risks,
-        testing: .brief.verification
+        summary: (.brief.what | trim_text),
+        motivation: (.brief.why | trim_text),
+        approach: (.brief.approach | trim_text),
+        scope: (.brief.scope | trim_text),
+        risks: (.brief.risks | trim_text),
+        testing: (.brief.verification | trim_text)
       };
     .description = (from_brief + (.description // {}))
+    | .description |= with_entries(.value |= trim_text)
     | .brief = {
-        what: .description.summary,
-        why: .description.motivation,
-        approach: .description.approach,
-        scope: .description.scope,
-        risks: .description.risks
+        what: (.description.summary | trim_text),
+        why: (.description.motivation | trim_text),
+        approach: (.description.approach | trim_text),
+        scope: (.description.scope | trim_text),
+        risks: (.description.risks | trim_text)
       }
     | .stack_items = ((.stack_items // []) | map(
         .description = (from_brief + (.description // {}))
+        | .description |= with_entries(.value |= trim_text)
         | .brief = {
-            what: .description.summary,
-            why: .description.motivation,
-            approach: .description.approach,
-            risks: .description.risks,
-            verification: .description.testing
+            what: (.description.summary | trim_text),
+            why: (.description.motivation | trim_text),
+            approach: (.description.approach | trim_text),
+            risks: (.description.risks | trim_text),
+            verification: (.description.testing | trim_text)
           }
       ))
   ' "$draft" >"$normalized_draft" || {
@@ -4643,22 +4651,29 @@ pg_cmd_approve() {
   local normalized_draft
   normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-approve-draft.XXXXXX")
   jq '
+    def trim_text:
+      if type == "string" then gsub("^[ \t\r\n]+"; "") | gsub("[ \t\r\n]+$"; "")
+      else .
+      end;
     def from_brief:
       {
-        summary: .brief.what,
-        motivation: .brief.why,
-        approach: .brief.approach,
-        scope: .brief.scope,
-        risks: .brief.risks,
+        summary: (.brief.what | trim_text),
+        motivation: (.brief.why | trim_text),
+        approach: (.brief.approach | trim_text),
+        scope: (.brief.scope | trim_text),
+        risks: (.brief.risks | trim_text),
         testing: null
       };
     .description = (from_brief + (.description // {}))
+    | .description |= with_entries(.value |= trim_text)
+    | .user_intent |= trim_text
+    | .agent_assertion_template |= trim_text
     | .brief = {
-        what: .description.summary,
-        why: .description.motivation,
-        approach: .description.approach,
-        scope: .description.scope,
-        risks: .description.risks
+        what: (.description.summary | trim_text),
+        why: (.description.motivation | trim_text),
+        approach: (.description.approach | trim_text),
+        scope: (.description.scope | trim_text),
+        risks: (.description.risks | trim_text)
       }
   ' "$draft" >"$normalized_draft" || {
     rm -f "$normalized_draft"
