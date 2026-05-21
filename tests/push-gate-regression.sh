@@ -224,7 +224,7 @@ expect_no_trailing_whitespace() {
   [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
 }
 
-echo "1..29"
+echo "1..30"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -250,6 +250,28 @@ expect_contains "$detected_beads" "fba-123"
 [[ "$detected_beads" != *"draft-approve"* ]] || fail "expected bead detection to ignore draft-approve prose token"
 [[ "$detected_beads" != *"child-codex"* ]] || fail "expected bead detection to ignore child-codex prose token"
 echo "ok 2 - bead detection ignores prose hyphenated terms"
+
+IFS='|' read -r LONG_REPO LONG_BIN LONG_ORIGIN <<<"$(make_repo long-approval-context)"
+FAKE_BIN="$LONG_BIN"
+(
+  cd "$LONG_REPO"
+  git checkout -b mho/long-approval-context >/dev/null
+  for i in $(seq 1 30); do
+    printf 'line %s\n' "$i" >"file-$i.txt"
+    git add "file-$i.txt"
+    git commit -m "long approval context $i" >/dev/null
+  done
+)
+run_helper "$LONG_REPO" prepare \
+  --what "long approval context" \
+  --why "exercise long branch approval context" \
+  --approach "generate approval draft without pipefail SIGPIPE" >/dev/null
+long_draft_output=$(PG_AUTO_RUN_APPROVAL=0 run_helper "$LONG_REPO")
+expect_contains "$long_draft_output" "Approval script:"
+long_draft_yaml=$(extract_path "$long_draft_output" "^Draft file:")
+expect_file "$long_draft_yaml"
+expect_no_trailing_whitespace "$long_draft_yaml"
+echo "ok 3 - long approval context draft does not trip pipefail or whitespace"
 
 IFS='|' read -r REPO FAKE_BIN ORIGIN <<<"$(make_repo existing-pr)"
 EXISTING_FAKE_BIN="$FAKE_BIN"
@@ -288,7 +310,7 @@ preview_output=$(printf 'n\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$preview_output" "Push lease approval"
 expect_contains "$preview_output" "PR: #123"
 expect_contains "$preview_output" "feature start"
-echo "ok 3 - draft script renders readable approval summary"
+echo "ok 4 - draft script renders readable approval summary"
 
 common_dir=$(current_common_dir "$REPO")
 lease_path="$common_dir/push-gate/leases/refs/heads/mho/existing-pr.json"
@@ -321,11 +343,11 @@ lease_pr=$(jq -r '.pr_number' "$lease_path")
 [[ "$lease_pr" == "123" ]] || fail "expected PR number 123 in lease, got $lease_pr"
 [[ "$(jq -r '.description.summary' "$lease_path")" == "feature start from edited description" ]] \
   || fail "expected PR-description-style description to be stored in lease"
-echo "ok 4 - noninteractive approval is blocked; lease fixture installed"
+echo "ok 5 - noninteractive approval is blocked; lease fixture installed"
 
 raw_output=$(run_guard "$REPO" "git push -u origin mho/existing-pr")
 expect_contains "$raw_output" "pg push"
-echo "ok 5 - raw git push denied without pending assertion"
+echo "ok 6 - raw git push denied without pending assertion"
 
 run_helper "$REPO" push \
   --assert-flow $'update pr #123\nbranch mho/existing-pr\nchange guard + docs\nno rewrite' \
@@ -333,7 +355,7 @@ run_helper "$REPO" push \
 remote_feature=$(git -C "$REPO" rev-parse refs/remotes/origin/mho/existing-pr)
 [[ "$remote_feature" == "$(current_head "$REPO")" ]] || fail "expected pg push to update origin/mho/existing-pr"
 expect_no_file "$common_dir/push-gate/pending/refs/heads/mho/existing-pr.json"
-echo "ok 6 - pg push succeeds and clears pending assertion"
+echo "ok 7 - pg push succeeds and clears pending assertion"
 
 (
   cd "$REPO"
@@ -344,7 +366,7 @@ echo "ok 6 - pg push succeeds and clears pending assertion"
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 descendant_block=$(run_guard "$REPO" "git push -u origin mho/existing-pr")
 expect_contains "$descendant_block" "HEAD changed after approval"
-echo "ok 7 - non-async lease blocks descendant push"
+echo "ok 8 - non-async lease blocks descendant push"
 
 jq --arg expires_at "$(future_utc)" '
   .async_iteration = {
@@ -368,12 +390,12 @@ mv "$lease_path.tmp" "$lease_path"
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 allow_output=$(run_guard "$REPO" "git push -u origin mho/existing-pr")
 [[ -z "$allow_output" ]] || fail "expected async guarded push to be allowed, got: $allow_output"
-echo "ok 8 - async lease allows descendant push under budget"
+echo "ok 9 - async lease allows descendant push under budget"
 
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 head_push_output=$(run_guard "$REPO" "git push -u origin HEAD")
 [[ -z "$head_push_output" ]] || fail "expected git push -u origin HEAD to be allowed, got: $head_push_output"
-echo "ok 9 - attached-branch git push -u origin HEAD is allowed under async lease"
+echo "ok 10 - attached-branch git push -u origin HEAD is allowed under async lease"
 
 (
   cd "$REPO"
@@ -386,7 +408,7 @@ echo "ok 9 - attached-branch git push -u origin HEAD is allowed under async leas
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 rewrite_output=$(run_guard "$REPO" "git push --force-with-lease origin mho/existing-pr")
 expect_contains "$rewrite_output" "async rewrite was not approved"
-echo "ok 10 - async rewrite denied unless approved"
+echo "ok 11 - async rewrite denied unless approved"
 
 jq '.async_iteration.allow_rewrite = true | .async_iteration.used_pushes = 2' \
   "$lease_path" >"$lease_path.tmp"
@@ -394,7 +416,7 @@ mv "$lease_path.tmp" "$lease_path"
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 budget_output=$(run_guard "$REPO" "git push --force-with-lease origin mho/existing-pr")
 expect_contains "$budget_output" "budget exhausted"
-echo "ok 11 - async budget exhaustion blocks pushes"
+echo "ok 12 - async budget exhaustion blocks pushes"
 
 jq '.async_iteration.used_pushes = 0 | .async_iteration.expires_at = "2000-01-01T00:00:00Z"' \
   "$lease_path" >"$lease_path.tmp"
@@ -402,7 +424,7 @@ mv "$lease_path.tmp" "$lease_path"
 write_pending "$REPO" "origin" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 expired_output=$(run_guard "$REPO" "git push --force-with-lease origin mho/existing-pr")
 expect_contains "$expired_output" "expired"
-echo "ok 12 - async expiry blocks pushes"
+echo "ok 13 - async expiry blocks pushes"
 
 jq --arg expires_at "$(future_utc)" '.async_iteration.expires_at = $expires_at' \
   "$lease_path" >"$lease_path.tmp"
@@ -426,7 +448,7 @@ git -C "$REPO" remote set-url origin "$ORIGIN"
   || fail "failed git push consumed async budget: $(jq -r '.async_iteration.used_pushes' "$lease_path") output: $failed_push"
 expect_no_file "$common_dir/push-gate/pending/refs/heads/mho/existing-pr.json"
 [[ ! -e "$stale_lock" ]] || fail "stale push lock was not cleared"
-echo "ok 13 - async rewrite allowed when approved and failed pushes do not consume budget"
+echo "ok 14 - async rewrite allowed when approved and failed pushes do not consume budget"
 
 IFS='|' read -r BOOTSTRAP_REPO BOOTSTRAP_BIN BOOTSTRAP_ORIGIN <<<"$(make_repo bootstrap)"
 FAKE_BIN="$BOOTSTRAP_BIN"
@@ -460,7 +482,7 @@ export PG_TEST_PR_JSON='[{"number":99,"url":"https://example.test/pr/99"}]'
 write_pending "$BOOTSTRAP_REPO" "origin" "refs/heads/mho/bootstrap" "$(current_head "$BOOTSTRAP_REPO")" "55"
 pr_mismatch=$(run_guard "$BOOTSTRAP_REPO" "git push -u origin mho/bootstrap")
 expect_contains "$pr_mismatch" "PR"
-echo "ok 14 - bootstrap lease binds PR later and mismatched PR is denied"
+echo "ok 15 - bootstrap lease binds PR later and mismatched PR is denied"
 
 export PG_TEST_PR_JSON='[{"number":123,"url":"https://example.test/pr/123"}]'
 FAKE_BIN="$EXISTING_FAKE_BIN"
@@ -469,7 +491,7 @@ upstream_block=$(run_guard "$REPO" "git push upstream HEAD:main")
 expect_contains "$upstream_block" "upstream/main"
 origin_block=$(run_guard "$REPO" "git push origin HEAD:main")
 expect_contains "$origin_block" "origin/main"
-echo "ok 15 - protected main pushes are blocked on origin and upstream"
+echo "ok 16 - protected main pushes are blocked on origin and upstream"
 
 (
   cd "$REPO"
@@ -483,7 +505,7 @@ expect_contains "$plain_main_upstream" "tracks upstream/main"
   cd "$REPO"
   git branch --set-upstream-to=origin/mho/existing-pr mho/existing-pr >/dev/null
 )
-echo "ok 16 - plain push is blocked when feature branch tracks upstream main"
+echo "ok 17 - plain push is blocked when feature branch tracks upstream main"
 
 upstream_draft=$(run_helper "$REPO" draft-approve \
   --remote upstream \
@@ -497,7 +519,7 @@ jq '.status = "active" | .updated_at = .created_at | .user_intent = ""' "$upstre
 write_pending "$REPO" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$REPO")" "123"
 upstream_feature=$(run_guard "$REPO" "git push upstream mho/existing-pr")
 [[ -z "$upstream_feature" ]] || fail "expected upstream feature push to be allowed, got: $upstream_feature"
-echo "ok 17 - upstream feature push allowed with matching lease"
+echo "ok 18 - upstream feature push allowed with matching lease"
 
 (
   cd "$REPO"
@@ -508,7 +530,7 @@ WORKTREE="$TEST_TMP/upstream-worktree"
 write_pending "$WORKTREE" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$WORKTREE")" "123"
 worktree_refspec=$(run_guard "$WORKTREE" "git push upstream temp/upstream-source:mho/existing-pr")
 [[ -z "$worktree_refspec" ]] || fail "expected worktree explicit refspec push to be allowed, got: $worktree_refspec"
-echo "ok 18 - worktree explicit refspec push is allowed"
+echo "ok 19 - worktree explicit refspec push is allowed"
 
 (
   cd "$WORKTREE"
@@ -517,12 +539,12 @@ echo "ok 18 - worktree explicit refspec push is allowed"
 write_pending "$WORKTREE" "upstream" "refs/heads/mho/existing-pr" "$(current_head "$WORKTREE")" "123"
 detached_refspec=$(run_guard "$WORKTREE" "git push upstream HEAD:mho/existing-pr")
 [[ -z "$detached_refspec" ]] || fail "expected detached HEAD explicit refspec push to be allowed, got: $detached_refspec"
-echo "ok 19 - detached HEAD explicit refspec push is allowed"
+echo "ok 20 - detached HEAD explicit refspec push is allowed"
 
 detached_head=$(run_guard "$WORKTREE" "git push upstream HEAD")
 expect_contains "$detached_head" "explicit target branch"
 [[ "$detached_head" != *"git branch context"* ]] || fail "expected detached HEAD denial to avoid generic branch-context message, got: $detached_head"
-echo "ok 20 - detached HEAD without explicit target gets accurate denial"
+echo "ok 21 - detached HEAD without explicit target gets accurate denial"
 
 (
   cd "$REPO"
@@ -531,7 +553,7 @@ echo "ok 20 - detached HEAD without explicit target gets accurate denial"
 shared_view=$(run_helper "$TEST_TMP/existing-pr-view" show mho/existing-pr)
 expect_contains "$shared_view" "mho/existing-pr"
 expect_contains "$shared_view" "123"
-echo "ok 21 - leases are visible across worktrees via git-common-dir"
+echo "ok 22 - leases are visible across worktrees via git-common-dir"
 
 IFS='|' read -r TOPO_REPO TOPO_BIN TOPO_ORIGIN <<<"$(make_repo topology-write)"
 FAKE_BIN="$TOPO_BIN"
@@ -552,7 +574,7 @@ topo_output=$(run_helper "$TOPO_REPO" draft-approve \
 topo_draft=$(extract_path "$topo_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_draft")" == "upstream" ]] || fail "expected writable-upstream default remote to be upstream"
 [[ "$(jq -r '.pr_repo' "$topo_draft")" == "example.test/Netflix-Skunkworks/topology-write" ]] || fail "expected pr_repo to default to upstream topology"
-echo "ok 22 - topology picks upstream PR repo and upstream push remote when writable"
+echo "ok 23 - topology picks upstream PR repo and upstream push remote when writable"
 
 IFS='|' read -r TOPO_READ_REPO TOPO_READ_BIN TOPO_READ_ORIGIN <<<"$(make_repo topology-read)"
 FAKE_BIN="$TOPO_READ_BIN"
@@ -571,7 +593,7 @@ topo_read_output=$(run_helper "$TOPO_READ_REPO" draft-approve \
 topo_read_draft=$(extract_path "$topo_read_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_read_draft")" == "origin" ]] || fail "expected non-writable upstream to fall back to origin push remote"
 [[ "$(jq -r '.pr_repo' "$topo_read_draft")" == "example.test/Netflix-Skunkworks/topology-read" ]] || fail "expected pr_repo to stay on upstream even when push remote falls back"
-echo "ok 23 - topology falls back to origin push remote when upstream is not writable"
+echo "ok 24 - topology falls back to origin push remote when upstream is not writable"
 
 IFS='|' read -r TOPO_TRACK_REPO TOPO_TRACK_BIN TOPO_TRACK_ORIGIN <<<"$(make_repo topology-track)"
 FAKE_BIN="$TOPO_TRACK_BIN"
@@ -590,7 +612,7 @@ topo_track_output=$(run_helper "$TOPO_TRACK_REPO" draft-approve \
   --assert-flow $'update pr line\nbranch mho/topology-track\nno rewrite')
 topo_track_draft=$(extract_path "$topo_track_output" "^JSON draft file:")
 [[ "$(jq -r '.remote' "$topo_track_draft")" == "origin" ]] || fail "expected tracked branch to keep origin remote"
-echo "ok 24 - tracked branch keeps existing remote instead of auto-flipping to upstream"
+echo "ok 25 - tracked branch keeps existing remote instead of auto-flipping to upstream"
 
 IFS='|' read -r PR_BASE_REPO PR_BASE_BIN PR_BASE_ORIGIN <<<"$(make_repo pr-base-scope)"
 FAKE_BIN="$PR_BASE_BIN"
@@ -621,7 +643,7 @@ pr_base_output=$(run_helper "$PR_BASE_REPO" draft-approve \
 pr_base_draft=$(extract_path "$pr_base_output" "^JSON draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$pr_base_draft")" == "refs/remotes/origin/main" ]] \
   || fail "expected PR approval scope to use PR base origin/main, got $(jq -r '.approved_scope.base_ref' "$pr_base_draft")"
-echo "ok 25 - existing PR approval scope uses GitHub PR base instead of tracking branch"
+echo "ok 26 - existing PR approval scope uses GitHub PR base instead of tracking branch"
 
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"
@@ -651,7 +673,7 @@ export PG_TEST_PR_LIST_MAP='{"example.test/Netflix-Skunkworks/topology-bind|mho/
 run_helper "$TOPO_BIND_REPO" bind-pr --auto >/dev/null
 [[ "$(jq -r '.pr_number' "$topo_bind_lease")" == "77" ]] || fail "expected bind-pr to use upstream pr_repo and bind PR #77"
 [[ "$(jq -r '.pr_repo' "$topo_bind_lease")" == "example.test/Netflix-Skunkworks/topology-bind" ]] || fail "expected bound lease to retain upstream pr_repo"
-echo "ok 26 - bind-pr uses topology-selected upstream PR repo"
+echo "ok 27 - bind-pr uses topology-selected upstream PR repo"
 
 IFS='|' read -r LOW_REPO LOW_BIN LOW_ORIGIN <<<"$(make_repo low-stakes)"
 FAKE_BIN="$LOW_BIN"
@@ -680,7 +702,7 @@ low_draft_file=$(extract_path "$low_draft_output" "^JSON draft file:")
   || fail "expected low-stakes draft to carry async"
 [[ "$(jq -r '.async_iteration.scope.branch_name' "$low_draft_file")" == "mho/low-stakes" ]] \
   || fail "expected low-stakes draft to scope branch"
-echo "ok 27 - low-stakes prepare creates reviewed short async lease draft"
+echo "ok 28 - low-stakes prepare creates reviewed short async lease draft"
 
 yes_draft_output=$(run_helper "$LOW_REPO" --yes)
 yes_script=$(extract_path "$yes_draft_output" "^Approval script:")
@@ -688,7 +710,7 @@ yes_output=$(EDITOR=true bash "$yes_script" 2>&1 || true)
 expect_contains "$yes_output" "Proceed: yes (--yes, after editor review)"
 expect_contains "$yes_output" "pg approve requires an interactive terminal"
 [[ "$yes_output" != *"Proceed? [Y/n]"* ]] || fail "expected --yes to skip final prompt"
-echo "ok 28 - --yes skips final prompt but still requires editor and tty approval"
+echo "ok 29 - --yes skips final prompt but still requires editor and tty approval"
 
 IFS='|' read -r INFER_REPO INFER_BIN INFER_ORIGIN <<<"$(make_repo inference-disabled)"
 FAKE_BIN="$INFER_BIN"
@@ -706,4 +728,4 @@ set -e
 [[ "$inference_rc" != "0" ]] || fail "expected PG_ALLOW_INFERENCE draft approval to be rejected"
 expect_contains "$inference_output" "PG_ALLOW_INFERENCE is no longer accepted"
 expect_contains "$inference_output" "pg prepare required"
-echo "ok 29 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
+echo "ok 30 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"

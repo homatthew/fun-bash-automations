@@ -3222,7 +3222,7 @@ pg_semantic_brief() {
   local base_ref commits shortstat branch
   base_ref=$(pg_default_base_ref_snapshot)
   [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1 || return 0
-  commits=$(git log "$base_ref"..HEAD --format='%h %s%n%b' 2>/dev/null | head -200)
+  commits=$(git log "$base_ref"..HEAD --format='%h %s%n%b' 2>/dev/null | head -200 || true)
   [[ -n "$commits" ]] || return 0
   shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
   branch=$(pg_branch_name 2>/dev/null || echo "")
@@ -4509,9 +4509,9 @@ EOF
   local context_block=""
   if [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
     local commit_log file_stats shortstat
-    commit_log=$(git log "$base_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20)
+    commit_log=$(git log "$base_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20 || true)
     file_stats=$(git diff --stat "$base_ref"..HEAD 2>/dev/null \
-      | sed '$d' | sed 's/^/#   /' | head -15)
+      | sed '$d' | sed 's/^/#   /' | head -15 || true)
     shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
     context_block="# ───────── what you're approving ─────────
 # base: $base_ref
