@@ -218,6 +218,12 @@ extract_path() {
   echo "$output" | awk -v prefix="$prefix" '$0 ~ prefix {print $NF}'
 }
 
+expect_no_trailing_whitespace() {
+  local file="$1" matches
+  matches=$(grep -nE '[[:blank:]]$' "$file" || true)
+  [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
+}
+
 echo "1..29"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
@@ -266,6 +272,7 @@ draft_file=$(extract_path "$draft_output" "^JSON draft file:")
 expect_file "$draft_script"
 expect_file "$draft_yaml_file"
 expect_file "$draft_file"
+expect_no_trailing_whitespace "$draft_yaml_file"
 [[ "$(yq eval '.description.summary' "$draft_yaml_file")" == "feature start" ]] \
   || fail "expected YAML approval draft to parse"
 expect_contains "$(cat "$draft_yaml_file")" "user_intent: |-"
