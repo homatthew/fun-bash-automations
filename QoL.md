@@ -103,12 +103,16 @@ Press `Ctrl+G` then the second key:
 | `pg -C <path>` | Run pg in another repo without `cd` |
 | `pgr [shortname]` | fzf picker over active-lease repos + `~/repos/*`, then `pg -C` there |
 | `pg leases` | Table of active leases across all repos (SQLite index) |
+| `pg queue` | Show prepared briefs plus active leases |
+| `pg approve-all -C repo1 -C repo2` | Sequentially run normal human approval review for multiple repos |
 | `pg leases --all --json` | Full lease index as JSON |
 | `pg leases reindex` | Scan `~/repos/*/.git/push-gate/leases/*` into the DB |
+| `pg review-diff` | Open the exact approval diff in Neovim Diffview |
+| `pg review-comments --json` | Export local pre-push review comments for agents |
 | `pg push --assert-flow TEXT` | Guarded push (requires active lease, scope-validated) |
 | `pg check [branch]` | Machine-readable: does current HEAD fit the approved scope? |
 
-Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`. All installed by `setupPermissions.sh`.
+Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`, `nvim`, `Diffview.nvim`. All installed by dotfiles bootstrap.
 
 ---
 

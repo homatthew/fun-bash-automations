@@ -139,6 +139,7 @@ echo "-- CLI wrappers --"
 assert_executable "$ROOT/bin/stack" "bin/stack executable"
 assert_executable "$ROOT/bin/pg" "bin/pg executable"
 assert_executable "$ROOT/bin/push-gate" "bin/push-gate executable"
+assert_executable "$ROOT/bin/slack-private-thread" "bin/slack-private-thread executable"
 if PATH="$ROOT/bin:/usr/bin:/bin" pg --help >/dev/null 2>&1; then
   pass "pg works without shell aliases"
 else

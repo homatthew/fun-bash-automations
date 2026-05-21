@@ -224,7 +224,7 @@ expect_no_trailing_whitespace() {
   [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
 }
 
-echo "1..30"
+echo "1..36"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -712,6 +712,44 @@ expect_contains "$yes_output" "pg approve requires an interactive terminal"
 [[ "$yes_output" != *"Proceed? [Y/n]"* ]] || fail "expected --yes to skip final prompt"
 echo "ok 29 - --yes skips final prompt but still requires editor and tty approval"
 
+review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux)
+[[ "$(jq -r '.diff.branch' <<<"$review_diff_json")" == "mho/low-stakes" ]] \
+  || fail "expected review-diff branch metadata: $review_diff_json"
+[[ "$(jq -r '.reviewer.tool' <<<"$review_diff_json")" == "diffview.nvim" ]] \
+  || fail "expected review-diff to target Diffview.nvim: $review_diff_json"
+expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "DiffviewOpen"
+review_command=$(run_helper "$LOW_REPO" review-diff --print-command --no-tmux)
+expect_contains "$review_command" "DiffviewOpen"
+expect_contains "$review_command" "PG_REVIEW_COMMENTS_FILE="
+echo "ok 30 - review-diff exposes exact Diffview command without launching UI"
+
+comments_file=$(jq -r '.diff.comments_file' <<<"$review_diff_json")
+mkdir -p "$(dirname "$comments_file")"
+jq -n \
+  --arg head "$(jq -r '.diff.head' <<<"$review_diff_json")" \
+  '{head:$head, comments:[{path:"low-stakes.txt", line:1, body:"tighten wording", status:"open"}]}' \
+  >"$comments_file"
+comments_json=$(run_helper "$LOW_REPO" review-comments --json)
+[[ "$(jq -r '.supported' <<<"$comments_json")" == "true" ]] \
+  || fail "expected review-comments to parse export: $comments_json"
+[[ "$(jq -r '.counts.unresolved' <<<"$comments_json")" == "1" ]] \
+  || fail "expected one unresolved review comment: $comments_json"
+[[ "$(jq -r '.comments[0].file' <<<"$comments_json")" == "low-stakes.txt" ]] \
+  || fail "expected normalized review comment file: $comments_json"
+echo "ok 31 - review-comments exports local comments for agents"
+
+queue_json=$(run_helper "$LOW_REPO" queue --json)
+[[ "$(jq -r '.prepared | length >= 1' <<<"$queue_json")" == "true" ]] \
+  || fail "expected queue to include prepared briefs: $queue_json"
+[[ "$(jq -r '.leases | type' <<<"$queue_json")" == "array" ]] \
+  || fail "expected queue to include leases array: $queue_json"
+echo "ok 32 - queue reports prepared briefs and active leases"
+
+approve_all_output=$(run_helper "$LOW_REPO" approve-all -C "$LOW_REPO" 2>&1) && approve_all_rc=0 || approve_all_rc=$?
+[[ "$approve_all_rc" != "0" ]] || fail "expected approve-all to require an interactive terminal"
+expect_contains "$approve_all_output" "requires an interactive terminal"
+echo "ok 33 - approve-all cannot be used as a noninteractive approval bypass"
+
 IFS='|' read -r INFER_REPO INFER_BIN INFER_ORIGIN <<<"$(make_repo inference-disabled)"
 FAKE_BIN="$INFER_BIN"
 (
@@ -728,4 +766,85 @@ set -e
 [[ "$inference_rc" != "0" ]] || fail "expected PG_ALLOW_INFERENCE draft approval to be rejected"
 expect_contains "$inference_output" "PG_ALLOW_INFERENCE is no longer accepted"
 expect_contains "$inference_output" "pg prepare required"
-echo "ok 30 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
+echo "ok 34 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
+
+IFS='|' read -r STACK_BASE_REPO STACK_BASE_BIN STACK_BASE_ORIGIN <<<"$(make_repo stacked-parent-base)"
+FAKE_BIN="$STACK_BASE_BIN"
+(
+  cd "$STACK_BASE_REPO"
+  git checkout -b mho/parent-feature >/dev/null
+  printf 'parent\n' >parent.txt
+  git add parent.txt
+  git commit -m "parent feature work" >/dev/null
+  git push -u origin mho/parent-feature >/dev/null
+
+  git checkout -b mho/child-hook >/dev/null
+  git branch --unset-upstream >/dev/null 2>&1 || true
+  printf 'child\n' >child-hook.txt
+  git add child-hook.txt
+  git commit -m "child hook work" >/dev/null
+)
+export PG_TEST_PR_JSON='[]'
+export PG_TEST_PR_LIST_MAP='{"mho/parent-feature":[{"number":77,"url":"https://example.test/pr/77","baseRefName":"main"}],"mho/child-hook":[]}'
+stack_base_output=$(run_helper "$STACK_BASE_REPO" draft-approve \
+  --intent $'child hook work\nsame child branch\nexclude parent branch from scope' \
+  --assert-flow $'new child pr flow\nbranch mho/child-hook\nbase parent feature')
+stack_base_draft=$(extract_path "$stack_base_output" "^JSON draft file:")
+[[ "$(jq -r '.approved_scope.base_ref' "$stack_base_draft")" == "refs/remotes/origin/mho/parent-feature" ]] \
+  || fail "expected stacked child approval scope to use parent PR branch, got $(jq -r '.approved_scope.base_ref' "$stack_base_draft")"
+echo "ok 35 - stacked child without upstream uses closest open parent PR branch as approval base"
+
+IFS='|' read -r ASYNC_WORK_REPO ASYNC_WORK_BIN ASYNC_WORK_ORIGIN <<<"$(make_repo async-work-package)"
+FAKE_BIN="$ASYNC_WORK_BIN"
+(
+  cd "$ASYNC_WORK_REPO"
+  git checkout -b mho/async-work-package >/dev/null
+)
+export PG_TEST_PR_JSON='[]'
+export PG_TEST_PR_LIST_MAP=''
+run_helper "$ASYNC_WORK_REPO" prepare \
+  --async \
+  --expires 8h \
+  --max-pushes 6 \
+  --what "Build widget-review push-gate async feature" \
+  --why "allow reviewed async feature building while human is unavailable" \
+  --approach "add widget-review implementation files, regression tests, and docs under the reviewed package" >/dev/null
+async_work_output=$(run_helper "$ASYNC_WORK_REPO" draft-approve)
+async_work_draft=$(extract_path "$async_work_output" "^JSON draft file:")
+[[ "$(jq -r '.approved_scope.work_package.enabled' "$async_work_draft")" == "true" ]] \
+  || fail "expected async draft to include reviewed work package scope"
+[[ "$(jq -r '.approved_scope.paths | length' "$async_work_draft")" == "0" ]] \
+  || fail "expected async work package fixture to start with no changed paths"
+async_work_common=$(current_common_dir "$ASYNC_WORK_REPO")
+async_work_lease="$async_work_common/push-gate/leases/refs/heads/mho/async-work-package.json"
+mkdir -p "$(dirname "$async_work_lease")"
+jq --arg expires_at "$(future_utc)" \
+  '.status = "active"
+   | .updated_at = .created_at
+   | .user_intent = ""
+   | .async_iteration.expires_at = $expires_at' \
+  "$async_work_draft" >"$async_work_lease"
+(
+  cd "$ASYNC_WORK_REPO"
+  mkdir -p docs src/widget-review tests
+  printf 'usage\n' >docs/setup.md
+  printf 'widget review\n' >src/widget-review/flow.sh
+  printf 'regression\n' >tests/review-flow.test
+  git add docs/setup.md src/widget-review/flow.sh tests/review-flow.test
+  git commit -m "widget review implementation" >/dev/null
+)
+async_work_allow=$(run_helper "$ASYNC_WORK_REPO" check)
+[[ "$(jq -r '.allowed' <<<"$async_work_allow")" == "true" ]] \
+  || fail "expected descendant widget-review file to remain inside async work package: $async_work_allow"
+(
+  cd "$ASYNC_WORK_REPO"
+  printf 'unrelated\n' >src/unrelated.sh
+  git add src/unrelated.sh
+  git commit -m "widget review billing stray" >/dev/null
+)
+async_work_block=$(run_helper "$ASYNC_WORK_REPO" check)
+[[ "$(jq -r '.allowed' <<<"$async_work_block")" == "false" ]] \
+  || fail "expected unrelated async work-package path to be blocked: $async_work_block"
+expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "outside the reviewed async work package"
+expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "src/unrelated.sh"
+echo "ok 36 - async work package can cover expected future files while blocking common-token path collisions"

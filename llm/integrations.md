@@ -26,6 +26,34 @@ plugin behavior.
   - Slack MCP from the ODS first-team Claude plugin.
   - Codex uses `bin/launch-slack-mcp` so Keychain Slack token behavior matches
     local agent setup (`slack-user-token` or `claude-slack-user-token`).
+  - Prefer `slack-user-token` as the canonical Keychain service name;
+    `claude-slack-user-token` is supported only as a compatibility fallback.
+  - Private Slack decision tree:
+    1. Use `core-tools.fetch_slack_thread` for Slack content the Netflix MCP
+       gateway can access.
+    2. If `core-tools` returns `403` for a private channel, use
+       `ndex-slack-private`; the gateway identity lacks private-channel access.
+    3. If `ndex-slack-private` returns `Transport closed`, do not assume Slack
+       auth is broken. Codex lost the MCP stdio process; validate the same
+       permalink through the CLI fallback before asking for auth repair.
+  - CLI fallback for private threads:
+    ```bash
+    bin/slack-private-thread --permalink "<permalink>"
+    ```
+    Equivalent raw command:
+    ```bash
+    SLACK_USER_TOKEN="$(security find-generic-password -s slack-user-token -w 2>/dev/null || security find-generic-password -s claude-slack-user-token -w)" \
+      npx -y -p @netflix-internal/ndex-slack-private \
+      ndex-slack-private-cli get_thread_from_permalink --permalink "<permalink>"
+    ```
+  - Troubleshooting:
+    - `403` from `core-tools` means the gateway identity cannot read that
+      private channel.
+    - `Transport closed` from `ndex-slack-private` means the local MCP transport
+      closed; the Slack token can still be valid.
+    - Confirm token validity with the CLI fallback. Do not print token values.
+    - Restart Codex after changing Keychain token values so the MCP server
+      re-reads the token.
 
 - `NECP`
   - HTTP MCP gateway for Netflix engineering context.
