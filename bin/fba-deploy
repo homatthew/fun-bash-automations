@@ -134,6 +134,10 @@ append_preserved_codex_config_sections() {
     [[ -f "$existing_config" ]] || return 0
 
     awk '
+        function is_managed_header(line) {
+            return (line == "[marketplaces.ods-datastores-minimal]" ||
+                    line == "[plugins.\"ods-datastores-minimal@ods-datastores-minimal\"]")
+        }
         function is_preserved_header(line) {
             return (line ~ /^\[hooks\.state(\.|])/ ||
                     line == "[tui.model_availability_nux]" ||
@@ -142,7 +146,7 @@ append_preserved_codex_config_sections() {
                     line ~ /^\[projects\./)
         }
         /^\[[^]]+\]$/ {
-            keep = is_preserved_header($0)
+            keep = is_preserved_header($0) && !is_managed_header($0)
         }
         keep {
             print

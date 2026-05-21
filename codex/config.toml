@@ -67,3 +67,10 @@ url = "http://ngpmcpgateway.prod.local.dev.netflix.net:9123/proxy-mcp/necpmcp-pr
 
 [mcp_servers.ndex-slack-private]
 command = "__FBA_ROOT__/bin/launch-slack-mcp"
+
+[marketplaces.ods-datastores-minimal]
+source_type = "git"
+source = "https://git.netflix.net/matthewho/cde-ods-skills.git"
+
+[plugins."ods-datastores-minimal@ods-datastores-minimal"]
+enabled = true
