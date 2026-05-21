@@ -175,6 +175,15 @@ if grep -Fq "[tui.model_availability_nux]" "$TMP_HOME/.codex/config.toml"; then
 else
   fail "codex model availability state preserved"
 fi
+if grep -Fq "[marketplaces.ods-datastores-minimal]" "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'source = "https://git.netflix.net/matthewho/cde-ods-skills.git"' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'ref = "15290c5e2fcf0908af20226d0c553cac4b2ec736"' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'sparse_paths = [".agents/plugins", "codex-plugins/ods-datastores-minimal"]' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq '[plugins."ods-datastores-minimal@ods-datastores-minimal"]' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex ODS plugin pin projected"
+else
+  fail "codex ODS plugin pin projected"
+fi
 
 # --- Phase 2: Linux notify.sh smoke ---
 echo ""
