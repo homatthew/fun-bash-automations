@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: slack-private-thread [--permalink] <slack-permalink>
+
+Fetch a private Slack thread through @netflix-internal/ndex-slack-private.
+Reads SLACK_USER_TOKEN from macOS Keychain service slack-user-token first,
+then claude-slack-user-token for compatibility. The token is never printed.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --permalink)
+        shift
+        ;;
+esac
+
+if [[ $# -ne 1 || -z "${1:-}" ]]; then
+    usage >&2
+    exit 2
+fi
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "slack-private-thread requires macOS Keychain." >&2
+    exit 1
+fi
+
+permalink="$1"
+token="$(security find-generic-password -s "slack-user-token" -w 2>/dev/null || true)"
+if [[ -z "$token" ]]; then
+    token="$(security find-generic-password -s "claude-slack-user-token" -w 2>/dev/null || true)"
+fi
+
+if [[ -z "$token" ]]; then
+    cat >&2 <<'EOF'
+No Slack user token found in Keychain.
+
+Expected service name:
+  slack-user-token
+
+Compatibility fallback:
+  claude-slack-user-token
+
+Store a token without printing it:
+  security add-generic-password -U -a "$USER" -s "slack-user-token" -w
+EOF
+    exit 1
+fi
+
+export SLACK_USER_TOKEN="$token"
+unset token
+
+exec npx -y -p @netflix-internal/ndex-slack-private \
+    ndex-slack-private-cli get_thread_from_permalink \
+    --permalink "$permalink"

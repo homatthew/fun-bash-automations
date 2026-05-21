@@ -2823,6 +2823,14 @@ pg_shell_quote() {
   printf '%s' "$quoted"
 }
 
+pg_shell_join() {
+  local out="" arg
+  for arg in "$@"; do
+    out="${out:+$out }$(pg_shell_quote "$arg")"
+  done
+  printf '%s' "$out"
+}
+
 # Resolve the MAIN repo path even when we're inside a worktree. Worktrees
 # report their own toplevel via rev-parse, but share the main repo's common
 # .git directory — dirname of that is the main repo root.
@@ -2981,8 +2989,53 @@ pg_upstream_ref() {
   git rev-parse --abbrev-ref --symbolic-full-name "${branch}@{upstream}" 2>/dev/null || true
 }
 
+pg_branch_has_open_pr() {
+  local branch="$1" pr_repo="${2:-}" raw
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  if [[ -n "$pr_repo" ]]; then
+    raw=$(gh pr list --repo "$pr_repo" --head "$branch" --state open --json number 2>/dev/null || true)
+  else
+    raw=$(gh pr list --head "$branch" --state open --json number 2>/dev/null || true)
+  fi
+  [[ "$(jq -r 'length' <<<"${raw:-[]}" 2>/dev/null || echo 0)" -gt 0 ]]
+}
+
+pg_stacked_parent_base_ref() {
+  local current pr_repo remote best_ref="" best_count="" branch ref count
+  current=$(pg_branch_name 2>/dev/null || true)
+  [[ -n "$current" ]] || return 1
+  pr_repo=$(pg_default_pr_repo 2>/dev/null || true)
+  remote=$(pg_default_remote "$current" 2>/dev/null || true)
+
+  while IFS= read -r branch; do
+    [[ -n "$branch" ]] || continue
+    case "$branch" in
+      "$current"|main|master) continue ;;
+    esac
+    git merge-base --is-ancestor "refs/heads/$branch" HEAD 2>/dev/null || continue
+    pg_branch_has_open_pr "$branch" "$pr_repo" || continue
+    ref="refs/heads/$branch"
+    if [[ -n "$remote" ]] && git show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
+      ref="refs/remotes/$remote/$branch"
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      ref="refs/remotes/origin/$branch"
+    elif git show-ref --verify --quiet "refs/remotes/upstream/$branch"; then
+      ref="refs/remotes/upstream/$branch"
+    fi
+    count=$(git rev-list --count "$ref"..HEAD 2>/dev/null || echo 999999)
+    if [[ -z "$best_count" || "$count" -lt "$best_count" ]]; then
+      best_count="$count"
+      best_ref="$ref"
+    fi
+  done < <(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
+
+  [[ -n "$best_ref" ]] || return 1
+  echo "$best_ref"
+}
+
 pg_default_base_ref_snapshot() {
-  local pr_base upstream remote
+  local pr_base upstream stacked_parent remote
   pr_base=$(pg_pr_base_ref_snapshot)
   if [[ -n "$pr_base" ]]; then
     echo "$pr_base"
@@ -2991,6 +3044,11 @@ pg_default_base_ref_snapshot() {
   upstream=$(pg_upstream_ref)
   if [[ -n "$upstream" ]]; then
     echo "$upstream"
+    return 0
+  fi
+  stacked_parent=$(pg_stacked_parent_base_ref 2>/dev/null || true)
+  if [[ -n "$stacked_parent" ]]; then
+    echo "$stacked_parent"
     return 0
   fi
   remote=$(pg_default_remote || true)
@@ -3508,6 +3566,15 @@ pg_render_lease_summary() {
     (if ((desc.risks // "") != "") then "  Risks: " + (desc.risks | tostring) else empty end),
     (if ((desc.testing // "") != "") then "  Testing: " + (desc.testing | tostring) else empty end),
     "",
+    "Review:",
+    "  Diff command: " + (.local_review.command // "pg review-diff"),
+    (if (.local_review.supported // false) then
+      "  Local comments: " + ((.local_review.counts.unresolved // 0) | tostring) + " unresolved / " + ((.local_review.counts.total // 0) | tostring) + " total"
+      + (if (.local_review.stale // false) then " (stale for current HEAD)" else "" end)
+    else
+      "  Local comments: none exported"
+    end),
+    "",
     "User intent:",
     (.user_intent // ""),
     "",
@@ -3516,6 +3583,7 @@ pg_render_lease_summary() {
     "",
     (if (.approved_scope // null) == null then "Approved scope: (none — single-push anchor-exact lease)" else
       "Approved scope:\n  base_ref:        " + (.approved_scope.base_ref // "") +
+      "\n  async_package:  " + (if (.approved_scope.work_package.enabled // false) then "enabled" else "disabled" end) +
       "\n  paths:           " + ((.approved_scope.paths // []) | join(", ")) +
       "\n  subjects:        " + ((.approved_scope.subjects // []) | join(", ")) +
       "\n  max_commits:     " + ((.approved_scope.max_commits // 0) | tostring) +
@@ -3700,6 +3768,72 @@ pg_detect_scope() {
     '{base_ref: $base, paths: $paths, subjects: $subjects, max_commits: $max_commits, max_added_lines: $max_added_lines}'
 }
 
+pg_tokens_from_text_json() {
+  printf '%s\n' "$@" \
+    | tr 'A-Z' 'a-z' \
+    | tr -c 'a-z0-9_./-' '\n' \
+    | awk '
+      BEGIN {
+        # Keep docs/test tokens here: async work packages use them to allow
+        # explicitly reviewed future docs/tests before those paths exist.
+        split("the and for fix add use new ref feat chore into from with this that when where why how what also not but all any can did does has have had was were been being make made set get run put implement implementation improve update workflow work package split reviewed covering", words, " ")
+        for (i in words) stop[words[i]] = 1
+      }
+      length($0) >= 3 && !stop[$0] {
+        print
+        split($0, parts, /[^a-z0-9]+/)
+        for (i in parts) {
+          if (length(parts[i]) >= 3 && !stop[parts[i]]) print parts[i]
+        }
+      }
+    ' \
+    | sort -u \
+    | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+pg_scope_add_async_work_package() {
+  local scope_json="$1" async_json="$2" what="$3" why="$4" approach="$5" scope="$6" risks="$7"
+  [[ "$scope_json" != "null" ]] || { printf '%s\n' "$scope_json"; return 0; }
+  [[ "$(jq -r '.enabled // false' <<<"$async_json")" == "true" ]] || { printf '%s\n' "$scope_json"; return 0; }
+
+  local tokens prefixes current_max_commits current_max_lines max_pushes commit_budget line_budget
+  tokens=$(pg_tokens_from_text_json "$what" "$why" "$approach" "$scope" "$risks")
+  prefixes=$(jq -c '
+    (.paths // [])
+    | map(select(contains("/")) | split("/")[0:-1] | join("/") + "/*")
+    | unique
+  ' <<<"$scope_json")
+  current_max_commits=$(jq -r '.max_commits // 0' <<<"$scope_json")
+  current_max_lines=$(jq -r '.max_added_lines // 0' <<<"$scope_json")
+  max_pushes=$(jq -r '.max_pushes // 20' <<<"$async_json")
+  commit_budget=$((current_max_commits + max_pushes))
+  line_budget=$((current_max_lines > max_pushes * 300 ? current_max_lines : max_pushes * 300))
+
+  jq \
+    --arg what "$what" \
+    --arg why "$why" \
+    --arg approach "$approach" \
+    --arg scope "$scope" \
+    --arg risks "$risks" \
+    --argjson tokens "$tokens" \
+    --argjson prefixes "$prefixes" \
+    --argjson commit_budget "$commit_budget" \
+    --argjson line_budget "$line_budget" \
+    '.work_package = {
+        enabled: true,
+        what: $what,
+        why: $why,
+        approach: $approach,
+        scope: (if $scope == "" then null else $scope end),
+        risks: (if $risks == "" then null else $risks end),
+        subject_tokens: $tokens,
+        path_prefixes: $prefixes
+      }
+     | .subjects = (((.subjects // []) + $tokens) | unique)
+     | .max_commits = ([.max_commits // 0, $commit_budget] | max)
+     | .max_added_lines = ([.max_added_lines // 0, $line_budget] | max)' <<<"$scope_json"
+}
+
 # Ask an LLM whether commits new since the last push semantically
 # match the user-approved intent. Re-pushes of already-published
 # commits are instant-MATCH (nothing new to check). New commits that
@@ -3843,7 +3977,7 @@ EOF
 # the approved scope. Emits {allowed, reason}.
 pg_validate_scope() {
   local lease_json="$1"
-  local scope base_ref paths subjects max_commits max_added
+  local scope base_ref paths subjects max_commits max_added work_package_enabled
   local changed_files count added
 
   scope=$(echo "$lease_json" | jq -c '.approved_scope // null')
@@ -3860,10 +3994,13 @@ pg_validate_scope() {
 
   # Paths allowlist
   changed_files=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null)
-  local allow_paths_json allow_paths_count
+  local allow_paths_json allow_paths_count work_prefixes_json work_tokens_json
   allow_paths_json=$(echo "$scope" | jq -c '.paths // []')
   allow_paths_count=$(echo "$allow_paths_json" | jq 'length')
-  if [[ "$allow_paths_count" -gt 0 ]]; then
+  work_package_enabled=$(echo "$scope" | jq -r '.work_package.enabled // false')
+  work_prefixes_json=$(echo "$scope" | jq -c '.work_package.path_prefixes // []')
+  work_tokens_json=$(echo "$scope" | jq -c '.work_package.subject_tokens // []')
+  if [[ "$allow_paths_count" -gt 0 || "$work_package_enabled" == "true" ]]; then
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
       local ok="false" pat
@@ -3875,8 +4012,46 @@ pg_validate_scope() {
           break
         fi
       done < <(echo "$allow_paths_json" | jq -r '.[]')
+      if [[ "$ok" != "true" && "$work_package_enabled" == "true" ]]; then
+        while IFS= read -r pat; do
+          [[ -z "$pat" ]] && continue
+          # shellcheck disable=SC2053
+          if [[ "$f" == $pat ]]; then
+            ok="true"
+            break
+          fi
+        done < <(echo "$work_prefixes_json" | jq -r '.[]')
+      fi
+      if [[ "$ok" != "true" && "$work_package_enabled" == "true" ]]; then
+        local f_lc f_token token_hits=0
+        f_lc=$(tr 'A-Z' 'a-z' <<<"$f")
+        if [[ "$f_lc" =~ (^|/)(tests?|src/test)/ || "$f_lc" =~ (_test|test_|\.test\.) ]] \
+          && echo "$work_tokens_json" | jq -e 'any(.[]; . == "tests" or . == "test" or . == "fixture" or . == "fixtures" or . == "regression")' >/dev/null; then
+          ok="true"
+        elif [[ "$f_lc" =~ \.(md|rst|adoc|txt)$ ]] \
+          && echo "$work_tokens_json" | jq -e 'any(.[]; . == "docs" or . == "doc" or . == "documentation" or . == "readme")' >/dev/null; then
+          ok="true"
+        else
+          while IFS= read -r f_token; do
+            [[ -z "$f_token" ]] && continue
+            case "$f_token" in
+              app|bin|cmd|lib|pkg|src|tmp|var|opt|etc|main|test|tests|doc|docs|config|internal)
+                continue
+                ;;
+            esac
+            if echo "$work_tokens_json" | jq -e --arg token "$f_token" 'index($token) != null' >/dev/null; then
+              token_hits=$((token_hits + 1))
+            fi
+          done < <(tr 'A-Z' 'a-z' <<<"$f" | tr -c 'a-z0-9' '\n' | awk 'length($0) >= 3')
+          [[ "$token_hits" -ge 2 ]] && ok="true"
+        fi
+      fi
       if [[ "$ok" != "true" ]]; then
-        jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside approved_scope.paths. Re-run pg prepare and ask the user to review.")}'
+        if [[ "$work_package_enabled" == "true" ]]; then
+          jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside the reviewed async work package path hints. Re-run pg prepare and ask the user to review if this file is intended.")}'
+        else
+          jq -n --arg file "$f" '{allowed:false, reason:("Blocked: file \($file) is outside approved_scope.paths. Re-run pg prepare and ask the user to review.")}'
+        fi
         return 0
       fi
     done <<<"$changed_files"
@@ -4216,7 +4391,7 @@ pg_cmd_draft_approve() {
   local intent="" assert_flow="" remote="" branch="" pr_override="" pr_repo=""
   local approved_paths="" approved_subjects="" max_commits="" max_added_lines="" no_scope="false"
   local assume_yes="false"
-  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file yaml_file script_file script_path scope_json
+  local branch_name branch_ref repo_name repo_root common_dir pr_json pr_number pr_url pr_mode approved_anchor base_ref draft_file yaml_file script_file script_path scope_json review_json
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -y|--yes)
@@ -4417,8 +4592,12 @@ EOF
       if [[ -n "$max_added_lines" ]]; then
         scope_json=$(echo "$scope_json" | jq --argjson n "$max_added_lines" '.max_added_lines = $n')
       fi
+      scope_json=$(pg_scope_add_async_work_package "$scope_json" "$_pg_async_json" \
+        "${_pg_what:-}" "${_pg_why:-}" "${_pg_approach:-}" "${_pg_scope:-}" "${_pg_risks:-}")
     fi
   fi
+
+  review_json=$(pg_review_status_for_draft_json "$branch_name")
 
   draft_file="/tmp/pg-approve-$(pg_branch_slug "$repo_name")-$(pg_branch_slug "$branch_name").json"
   yaml_file="${draft_file%.json}.yaml"
@@ -4442,6 +4621,7 @@ EOF
     --arg user_intent "$intent" \
     --arg agent_assertion_template "$assert_flow" \
     --argjson approved_scope "$scope_json" \
+    --argjson local_review "$review_json" \
     --arg brief_what "${_pg_what:-}" \
     --arg brief_why "${_pg_why:-}" \
     --arg brief_approach "${_pg_approach:-}" \
@@ -4463,6 +4643,7 @@ EOF
       },
       user_intent: $user_intent,
       agent_assertion_template: $agent_assertion_template,
+      local_review: $local_review,
       approved_scope: $approved_scope,
       repo_name: $repo_name,
       repo_root: $repo_root,
@@ -4508,21 +4689,44 @@ EOF
   # frames what they're actually approving without making them type it.
   local context_block=""
   if [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
-    local commit_log file_stats shortstat
+    local commit_log file_stats shortstat commit_count file_count pending_ref pending_shortstat pending_count pending_file_count
+    commit_count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
+    file_count=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')
     commit_log=$(git log "$base_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20 || true)
     file_stats=$(git diff --stat "$base_ref"..HEAD 2>/dev/null \
       | sed '$d' | sed 's/^/#   /' | head -15 || true)
     shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+    pending_ref="$base_ref"
+    if git show-ref --verify --quiet "refs/remotes/$remote/$branch_name"; then
+      pending_ref="refs/remotes/$remote/$branch_name"
+    fi
+    pending_count=$(git rev-list --count "$pending_ref"..HEAD 2>/dev/null || echo 0)
+    pending_file_count=$(git diff --name-only "$pending_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')
+    pending_shortstat=$(git diff --shortstat "$pending_ref"..HEAD 2>/dev/null | sed 's/^ *//')
     context_block="# ───────── what you're approving ─────────
-# base: $base_ref
+# review diff: pg review-diff
 #
-# commits:
+# pending push: $pending_ref..HEAD
+#   commits: $pending_count
+#   files: ${pending_file_count:-0}
+#   stats: ${pending_shortstat:-(no diff)}
+#
+# full branch/PR diff: $base_ref..HEAD
+#   commits: $commit_count
+#   files: ${file_count:-0}
+#   stats: ${shortstat:-(no diff)}
+#
+# semantic scope cap:
+#   async work package: $(jq -r 'if (.work_package.enabled // false) then "enabled" else "disabled" end' <<<"$scope_json" 2>/dev/null || echo "disabled")
+#   max_commits: $(jq -r '.max_commits // "(none)"' <<<"$scope_json" 2>/dev/null || echo "(none)")
+#   max_added_lines: $(jq -r '.max_added_lines // "(none)"' <<<"$scope_json" 2>/dev/null || echo "(none)")
+#
+# commits (showing up to 20 of $commit_count):
 ${commit_log:-#   (none)}
 #
-# files (and line-change stats):
+# files (showing up to 15 of ${file_count:-0}):
 ${file_stats:-#   (none)}
 #
-# total: ${shortstat:-(no diff)}
 # ─────────────────────────────────────────
 #"
   fi
@@ -5008,6 +5212,317 @@ pg_cmd_check() {
     }'
 }
 
+pg_review_diff_json() {
+  local branch="${1:-}" explicit_base="${2:-}" explicit_head="${3:-HEAD}"
+  local branch_ref lease_path lease_json base_ref head branch_name
+  local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file
+  branch_ref=$(pg_branch_ref "$branch")
+  branch_name=$(pg_branch_display "$branch_ref")
+  lease_path=$(pg_lease_path_for_ref "$branch_ref")
+  lease_json=""
+  [[ -f "$lease_path" ]] && lease_json=$(cat "$lease_path")
+  if [[ -n "$explicit_base" ]]; then
+    base_ref="$explicit_base"
+  elif [[ -n "$lease_json" ]]; then
+    base_ref=$(jq -r '.approved_scope.base_ref // .base_ref_snapshot // empty' <<<"$lease_json")
+  else
+    base_ref=$(pg_default_base_ref_snapshot)
+  fi
+  [[ -n "$base_ref" ]] || { pg_fail "Unable to resolve review diff base. Run pg prepare and pg first, or pass --base."; return 1; }
+  git rev-parse --verify "$base_ref" >/dev/null 2>&1 || { pg_fail "Review diff base does not exist: $base_ref"; return 1; }
+  head=$(git rev-parse --verify "${explicit_head}^{commit}" 2>/dev/null) || { pg_fail "Review diff head does not exist: $explicit_head"; return 1; }
+  commits=$(git rev-list --count "$base_ref..$head" 2>/dev/null || echo 0)
+  files=$(git diff --name-only "$base_ref..$head" 2>/dev/null | wc -l | tr -d ' ')
+  added=$(git diff --numstat "$base_ref..$head" 2>/dev/null | awk '{a += ($1 == "-" ? 0 : $1)} END {print a + 0}')
+  deleted=$(git diff --numstat "$base_ref..$head" 2>/dev/null | awk '{d += ($2 == "-" ? 0 : $2)} END {print d + 0}')
+  shortstat=$(git diff --shortstat "$base_ref..$head" 2>/dev/null | sed 's/^ *//')
+  [[ -n "$shortstat" ]] || shortstat="no diff"
+  diff_range="$base_ref..$head"
+  review_dir="$(pg_store_dir)/reviews/$(pg_branch_slug "$branch_name")"
+  comments_file="$review_dir/$head.json"
+  stale_comments_file="$review_dir/latest.json"
+  jq -n \
+    --arg repo "$(pg_repo_root)" \
+    --arg repo_name "$(pg_repo_name)" \
+    --arg branch "$branch_name" \
+    --arg branch_ref "$branch_ref" \
+    --arg base "$base_ref" \
+    --arg head "$head" \
+    --arg range "$diff_range" \
+    --arg shortstat "$shortstat" \
+    --argjson commits "$commits" \
+    --argjson files "$files" \
+    --argjson added "$added" \
+    --argjson deleted "$deleted" \
+    --arg comments_file "$comments_file" \
+    --arg stale_comments_file "$stale_comments_file" \
+    '{
+      repo: $repo,
+      repo_name: $repo_name,
+      branch: $branch,
+      branch_ref: $branch_ref,
+      base: $base,
+      head: $head,
+      range: $range,
+      stats: {
+        commits: $commits,
+        files: $files,
+        added_lines: $added,
+        deleted_lines: $deleted,
+        shortstat: $shortstat
+      },
+      comments_file: $comments_file,
+      latest_comments_file: $stale_comments_file
+    }'
+}
+
+pg_review_command_json() {
+  local info="$1" no_tmux="$2"
+  local repo base head comments_file nvim_cmd shell_cmd tmux_cmd use_tmux
+  repo=$(jq -r '.repo' <<<"$info")
+  base=$(jq -r '.base' <<<"$info")
+  head=$(jq -r '.head' <<<"$info")
+  comments_file=$(jq -r '.comments_file' <<<"$info")
+  nvim_cmd=$(pg_shell_join env \
+    "PG_REVIEW_BASE=$base" \
+    "PG_REVIEW_HEAD=$head" \
+    "PG_REVIEW_COMMENTS_FILE=$comments_file" \
+    nvim -c "DiffviewOpen $base..$head")
+  shell_cmd="cd $(pg_shell_quote "$repo") && $nvim_cmd"
+  use_tmux="false"
+  tmux_cmd=""
+  if [[ "$no_tmux" != "true" && -n "${TMUX:-}" && -t 1 ]]; then
+    use_tmux="true"
+    tmux_cmd=$(pg_shell_join tmux display-popup -E -w 95% -h 90% "$shell_cmd")
+  fi
+  jq -n \
+    --arg tool "diffview.nvim" \
+    --arg command "$shell_cmd" \
+    --arg tmux_command "$tmux_cmd" \
+    --argjson use_tmux "$use_tmux" \
+    '{tool:$tool, command:$command, tmux_command:(if $tmux_command == "" then null else $tmux_command end), use_tmux:$use_tmux}'
+}
+
+pg_cmd_review_diff() {
+  local branch="" base="" head="HEAD" format="human" print_command="false" no_tmux="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2 ;;
+      --base) base="$2"; shift 2 ;;
+      --head) head="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      --print-command) print_command="true"; shift ;;
+      --no-tmux) no_tmux="true"; shift ;;
+      *) pg_fail "Unknown review-diff option: $1"; return 1 ;;
+    esac
+  done
+  local info command_json command tmux_command repo comments_file
+  info=$(pg_review_diff_json "$branch" "$base" "$head") || return 1
+  command_json=$(pg_review_command_json "$info" "$no_tmux")
+  if [[ "$format" == "json" ]]; then
+    jq -n --argjson diff "$info" --argjson reviewer "$command_json" '{diff:$diff, reviewer:$reviewer}'
+    return 0
+  fi
+  jq -r '
+    "Push-gate review diff",
+    "",
+    "Repo: " + .repo,
+    "Branch: " + .branch,
+    "Base: " + .base,
+    "Head: " + .head,
+    "Stats: " + .stats.shortstat,
+    "Comments file: " + .comments_file
+  ' <<<"$info"
+  command=$(jq -r '.command' <<<"$command_json")
+  tmux_command=$(jq -r '.tmux_command // ""' <<<"$command_json")
+  if [[ "$print_command" == "true" ]]; then
+    if [[ -n "$tmux_command" ]]; then
+      printf '%s\n' "$tmux_command"
+    else
+      printf '%s\n' "$command"
+    fi
+    return 0
+  fi
+  command -v nvim >/dev/null 2>&1 || {
+    pg_fail "pg review-diff requires nvim with Diffview.nvim installed. Run dotfiles bootstrap or install Neovim review dependencies."
+    return 1
+  }
+  nvim --headless '+if exists(":DiffviewOpen") | qall | else | cquit | endif' >/dev/null 2>&1 || {
+    pg_fail "pg review-diff requires Diffview.nvim. Run dotfiles bootstrap to install the Neovim review dependencies."
+    return 1
+  }
+  repo=$(jq -r '.repo' <<<"$info")
+  base=$(jq -r '.base' <<<"$info")
+  head=$(jq -r '.head' <<<"$info")
+  comments_file=$(jq -r '.comments_file' <<<"$info")
+  mkdir -p "$(dirname "$comments_file")"
+  if [[ -n "$tmux_command" ]]; then
+    tmux display-popup -E -w 95% -h 90% "$command"
+  else
+    [[ -t 0 || -t 1 ]] || { pg_fail "pg review-diff requires an interactive terminal unless --json or --print-command is used."; return 1; }
+    (
+      cd "$repo"
+      PG_REVIEW_BASE="$base" \
+        PG_REVIEW_HEAD="$head" \
+        PG_REVIEW_COMMENTS_FILE="$comments_file" \
+        nvim -c "DiffviewOpen $base..$head"
+    )
+  fi
+}
+
+pg_review_comments_payload_json() {
+  local branch="${1:-}" file="${2:-}" info comments_file source_file
+  info=$(pg_review_diff_json "$branch" "" "HEAD") || return 1
+  comments_file="${file:-$(jq -r '.comments_file' <<<"$info")}"
+  source_file="$comments_file"
+  if [[ ! -f "$source_file" ]]; then
+    source_file=$(jq -r '.latest_comments_file' <<<"$info")
+    if [[ ! -f "$source_file" ]]; then
+      jq -n --argjson diff "$info" '{supported:false, reason:"No local review comment export found.", diff:$diff, comments:[], counts:{total:0, unresolved:0, stale:0}}'
+      return 0
+    fi
+  fi
+  jq -n --argjson diff "$info" --arg source "$source_file" --slurpfile raw "$source_file" '
+    def comments_from($v):
+      if ($v | type) == "array" then $v
+      elif (($v.comments // null) | type) == "array" then $v.comments
+      elif (($v.annotations // null) | type) == "array" then $v.annotations
+      elif (($v.items // null) | type) == "array" then $v.items
+      else [] end;
+    ($raw[0] // {}) as $doc
+    | (comments_from($doc)
+      | map({
+          file: (.file // .path // .filename // ""),
+          line: (.line // .start_line // .original_line // null),
+          end_line: (.end_line // .line // .start_line // null),
+          body: (.body // .comment // .text // .message // ""),
+          status: (.status // (if (.resolved // false) then "resolved" else "open" end)),
+          severity: (.severity // .level // null)
+        })
+      | map(select((.body | tostring | length) > 0))) as $comments
+    | ($doc.head // $doc.commit // $doc.review_head // "") as $review_head
+    | ($review_head != "" and $review_head != $diff.head) as $stale
+    | {
+        supported:true,
+        source:$source,
+        stale:$stale,
+        diff:$diff,
+        review_head:(if $review_head == "" then null else $review_head end),
+        comments:$comments,
+        counts:{
+          total:($comments | length),
+          unresolved:($comments | map(select((.status // "open") != "resolved" and (.status // "open") != "closed")) | length),
+          stale:(if $stale then ($comments | length) else 0 end)
+        }
+      }'
+}
+
+pg_cmd_review_comments() {
+  local branch="" file="" format="human"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2 ;;
+      --file) file="$2"; shift 2 ;;
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown review-comments option: $1"; return 1 ;;
+    esac
+  done
+  local payload
+  payload=$(pg_review_comments_payload_json "$branch" "$file") || return 1
+  if [[ "$format" == "json" ]]; then
+    printf '%s\n' "$payload"
+    return 0
+  fi
+  jq -r '
+    if (.supported | not) then
+      "No local review comments found for current head."
+    else
+      "Local review comments",
+      "Source: " + .source,
+      "Head: " + .diff.head,
+      (if .stale then "Status: stale for current head" else "Status: current" end),
+      "Unresolved: " + (.counts.unresolved | tostring) + "/" + (.counts.total | tostring),
+      "",
+      (.comments[]? | "- " + .file + ":" + ((.line // "?") | tostring) + " [" + (.status // "open") + "] " + .body)
+    end
+  ' <<<"$payload"
+}
+
+pg_review_status_for_draft_json() {
+  local branch="${1:-}"
+  pg_review_comments_payload_json "$branch" "" 2>/dev/null \
+    | jq '{supported, stale:(.stale // false), source:(.source // null), counts, diff:{base:(.diff.base // null), head:(.diff.head // null)}, command:"pg review-diff"}' \
+    2>/dev/null \
+    || jq -n '{supported:false, stale:false, source:null, counts:{total:0, unresolved:0, stale:0}, diff:{base:null, head:null}, command:"pg review-diff"}'
+}
+
+pg_cmd_queue() {
+  local format="human"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) format="json"; shift ;;
+      *) pg_fail "Unknown queue option: $1"; return 1 ;;
+    esac
+  done
+  local leases prepared='[]'
+  leases=$(pg_cmd_leases --json 2>/dev/null || echo '[]')
+  prepared=$(
+    {
+      printf '%s\n' "/tmp"
+      [[ -n "${TMPDIR:-}" ]] && printf '%s\n' "${TMPDIR%/}"
+    } \
+    | awk '!seen[$0]++' \
+    | while IFS= read -r dir; do
+        [[ -d "$dir" ]] || continue
+        find "${dir%/}/" -maxdepth 1 -name 'pg-prepare-*.json' -type f -print 2>/dev/null
+      done \
+    | while IFS= read -r f; do jq -c --arg file "$f" '{file:$file, repo:(.repo // null), prepared_at:(.prepared_at // null), head:(.prepared_at_head // null), what:(.what // null)}' "$f" 2>/dev/null || true; done \
+    | jq -s '.')
+  if [[ "$format" == "json" ]]; then
+    jq -n --argjson leases "$leases" --argjson prepared "$prepared" '{leases:$leases, prepared:$prepared}'
+    return 0
+  fi
+  echo "Prepared briefs:"
+  if [[ "$(jq 'length' <<<"$prepared")" -eq 0 ]]; then
+    echo "  (none)"
+  else
+    jq -r '.[] | "  - " + .file + " · " + (.what // "(no what)")' <<<"$prepared"
+  fi
+  echo
+  echo "Active leases:"
+  if [[ "$(jq 'length' <<<"$leases")" -eq 0 ]]; then
+    echo "  (none)"
+  else
+    jq -r '.[] | "  - " + .repo_name + " " + .branch_name + " · " + .status + " · pushes " + ((.async_iteration.pushes.used // 0) | tostring) + "/" + ((.async_iteration.pushes.max // 0) | tostring)' <<<"$leases"
+  fi
+}
+
+pg_cmd_approve_all() {
+  local repos=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -C) repos+=("$2"); shift 2 ;;
+      *) pg_fail "Unknown approve-all option: $1"; return 1 ;;
+    esac
+  done
+  [[ "${#repos[@]}" -gt 0 ]] || { pg_fail "pg approve-all requires at least one -C <repo>"; return 1; }
+  [[ -t 0 || -t 1 ]] || { pg_fail "pg approve-all requires an interactive terminal because each repo must open the normal editor review."; return 1; }
+  local repo helper i resume j
+  helper=$(pg_helper_path)
+  for ((i = 0; i < ${#repos[@]}; i++)); do
+    repo="${repos[$i]}"
+    echo "== pg approval: $repo =="
+    if ! "$helper" -C "$repo"; then
+      resume="pg approve-all"
+      for ((j = i; j < ${#repos[@]}; j++)); do
+        resume+=" -C $(pg_shell_quote "${repos[$j]}")"
+      done
+      pg_fail "approve-all stopped at $repo. Resume with: $resume"
+      return 1
+    fi
+  done
+}
+
 pg_cmd_revoke() {
   local branch="${1:-}" branch_ref lease_path pending_path
   branch_ref=$(pg_branch_ref "$branch")
@@ -5382,8 +5897,20 @@ pg_main() {
     leases)
       pg_cmd_leases "$@"
       ;;
+    queue)
+      pg_cmd_queue "$@"
+      ;;
+    approve-all)
+      pg_cmd_approve_all "$@"
+      ;;
     check)
       pg_cmd_check "$@"
+      ;;
+    review-diff)
+      pg_cmd_review_diff "$@"
+      ;;
+    review-comments)
+      pg_cmd_review_comments "$@"
       ;;
     check-trunk)
       pg_cmd_check_trunk "$@"
@@ -5472,9 +5999,13 @@ The canonical three-step flow (one command per actor):
 Status / inspection:
 
   pg leases                        All active leases across repos.
+  pg queue                         Prepared briefs and active approval leases.
+  pg approve-all -C repo1 -C repo2 Sequential normal approval review per repo.
 
 Useful inspection:
 
+  pg review-diff                   Open exact pending-push diff in Neovim Diffview.
+  pg review-comments [--json]      Print exported local pre-push review comments.
   pg check [branch]         Is HEAD within the approved scope? (JSON)
   pg check-trunk --stack S  Is the materialized stack trunk still approved? (JSON)
   pg check-intent [branch]  LLM: does the diff match user_intent? (JSON)

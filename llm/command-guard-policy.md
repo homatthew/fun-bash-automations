@@ -77,6 +77,21 @@ response has two parts:
 The `--assert-flow TEXT` argument on `pg push` is the semantic-scope
 assertion checked against the approved template — it is NOT a bypass.
 
+For async branch work, the human-approved prepare brief becomes an
+`approved_scope.work_package`. Descendant commits may add expected files that
+match the reviewed package path hints or text tokens, but unrelated paths,
+unmatched commit subjects, expired leases, exhausted budgets, and unapproved
+rewrites still block. Agents must treat those block reasons as requiring a new
+prepare and human review.
+
+For local pre-push review, use `pg review-diff`. It opens the exact
+push-gate `base..HEAD` comparison in Neovim Diffview and does not create,
+approve, mutate, or consume leases. `pg review-comments --json` may be used by
+agents to read exported local review comments for the current head when a
+review artifact exists; stale comments must not be treated as approval.
+`pg queue` is inspection only. `pg approve-all -C ...` is only sequencing
+sugar: each repo still gets the normal editor review and approval flow.
+
 Stack trunks use the same policy at stack scope. `stack trunk init/add` writes
 the manifest to push-gate's Dolt store, `stack trunk materialize --stack <name>`
 records the generated trunk tip and item commits, the agent runs
@@ -92,7 +107,8 @@ current HEAD against the active lease's `approved_scope`. Output is JSON:
 
 - `allowed` (bool) — would the push pass scope validation?
 - `reason` (string, present when `allowed: false`) — actionable block reason
-- `approved_scope` — full scope record (base_ref, paths, subjects, caps)
+- `approved_scope` — full scope record (base_ref, paths, subjects, caps,
+  optional async work package)
 - `current` — head, approved_anchor, `anchor_matches_head`, commits,
   added_lines, changed_files, subjects
 

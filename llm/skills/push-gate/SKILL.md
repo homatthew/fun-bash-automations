@@ -60,6 +60,19 @@ If you find yourself about to type any of those, STOP.
 4. pg leases                        ← (optional) list active leases
 ```
 
+Useful local review helpers:
+
+- `pg review-diff` opens the exact approved `base..HEAD` comparison in
+  Neovim Diffview. It is for human pre-push review only; it does not mutate
+  leases or approvals.
+- `pg review-comments --json` reads exported local review comments for the
+  current head when a review artifact exists. Treat stale comments as context,
+  not as approval.
+- `pg queue` shows prepared briefs and active leases.
+- `pg approve-all -C repo1 -C repo2` sequentially runs normal `pg` approval
+  for each repo. It still opens the editor for each approval and is not a
+  bypass.
+
 **Step 1** runs a single flow:
 - LLM interviews the commits → fills `what / why / approach / scope / risks`
 - vim opens on `/tmp/pg-approve-<repo>-<branch>.yaml`
@@ -93,6 +106,15 @@ For low-stakes iteration, `--low-stakes` is shorthand on `pg prepare` and
 `pg prepare-trunk` for a reviewed async lease with `--expires 1h` and
 `--max-pushes 5`.
 
+For unattended branch work, the reviewed `--what`, `--why`, `--approach`,
+`--scope`, and `--risks` form an async work package in
+`approved_scope.work_package`. That package can cover future descendant commits
+that add expected implementation/test/doc files even when those files did not
+exist at approval time. It is still narrow: path prefixes, reviewed text
+tokens, commit-subject tokens, expiry, push budget, and rewrite policy are all
+checked. Unrelated paths or subjects require a new `pg prepare` and human
+review.
+
 Branch flow:
 
 ```bash
@@ -106,6 +128,12 @@ Use `--allow-rewrite` only when the reviewed workflow includes intentional
 rebases/squashes/force-with-lease updates. Otherwise async permits only
 descendant commits. Normal non-async approvals are exact-tip approvals; if
 `HEAD` changes after review, re-run `pg prepare` and ask for review again.
+
+For stacked child branches with no PR and no upstream, branch approval chooses
+the closest local ancestor branch that already has an open PR before falling
+back to `origin/main` or `origin/master`. The chosen base is shown in the YAML
+context and preview as `approved_scope.base_ref`; if it is surprising, stop and
+set the branch upstream or re-prepare with the intended stack state.
 
 `pg check`, `pg check-trunk`, and `pg leases --json` expose
 `async_iteration.enabled`, expiry, push budget, remaining pushes, scope, and a
@@ -209,6 +237,8 @@ or running the approval script yourself with env overrides.
 current diff against it:
 
 - new file outside `approved_scope.paths` → blocked
+- async branch file outside `approved_scope.work_package` path hints or text
+  tokens → blocked
 - commit subject with no keyword overlap with `approved_scope.subjects`
   → blocked
 - commit count over `max_commits` → blocked
