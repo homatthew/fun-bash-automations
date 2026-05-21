@@ -171,6 +171,12 @@ lease, and never bypass the failure with an override env.
 
 - Block agent-initiated merge/close/delete actions that require human judgment
 
+### fun-bash-automations PR safety
+
+- Block `gh pr create`, `gh pr ready`, and `gh pr reopen` for
+  `homatthew/fun-bash-automations`. That repo delivers on `mh-netflix`; agents
+  must not create or ready PRs from `mh-netflix` to `main`.
+
 ### GitHub host safety
 
 - Block `GH_HOST=github.netflix.net`; agents must use
