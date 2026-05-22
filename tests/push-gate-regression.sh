@@ -247,7 +247,7 @@ expect_no_trailing_whitespace() {
   [[ -z "$matches" ]] || fail "expected no trailing whitespace in $file: $matches"
 }
 
-echo "1..38"
+echo "1..40"
 
 legacy_output=$(bash "$HELPER" 5 2>&1 || true)
 expect_contains "$legacy_output" "Durable leases replaced minute windows"
@@ -772,20 +772,28 @@ echo "ok 30 - --yes skips final prompt but still requires editor and tty approva
 review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux)
 [[ "$(jq -r '.diff.branch' <<<"$review_diff_json")" == "mho/low-stakes" ]] \
   || fail "expected review-diff branch metadata: $review_diff_json"
+[[ "$(jq -r '.diff.label' <<<"$review_diff_json")" == "pending-push" ]] \
+  || fail "expected review-diff to label pending-push diff: $review_diff_json"
+[[ "$(jq -r '.diff.full_review.label' <<<"$review_diff_json")" == "full-review" ]] \
+  || fail "expected review-diff to expose separate full-review diff: $review_diff_json"
 [[ "$(jq -r '.reviewer.tool' <<<"$review_diff_json")" == "diffview.nvim" ]] \
   || fail "expected review-diff to target Diffview.nvim: $review_diff_json"
 expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "DiffviewOpen"
+expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "review-tools.vim"
+expect_contains "$(jq -r '.reviewer.comments_command' <<<"$review_diff_json")" ":PgReviewComment"
 review_command=$(run_helper "$LOW_REPO" review-diff --print-command --no-tmux)
 expect_contains "$review_command" "DiffviewOpen"
 expect_contains "$review_command" "PG_REVIEW_COMMENTS_FILE="
 echo "ok 31 - review-diff exposes exact Diffview command without launching UI"
 
 comments_file=$(jq -r '.diff.comments_file' <<<"$review_diff_json")
-mkdir -p "$(dirname "$comments_file")"
-jq -n \
-  --arg head "$(jq -r '.diff.head' <<<"$review_diff_json")" \
-  '{head:$head, comments:[{path:"low-stakes.txt", line:1, body:"tighten wording", status:"open"}]}' \
-  >"$comments_file"
+add_comment_output=$(run_helper "$LOW_REPO" review-comments add \
+  --comments-file "$comments_file" \
+  --head "$(jq -r '.diff.head' <<<"$review_diff_json")" \
+  --file "low-stakes.txt" \
+  --line 1 \
+  --body "tighten wording")
+expect_contains "$add_comment_output" "Recorded review comment: low-stakes.txt:1"
 comments_json=$(run_helper "$LOW_REPO" review-comments --json)
 [[ "$(jq -r '.supported' <<<"$comments_json")" == "true" ]] \
   || fail "expected review-comments to parse export: $comments_json"
@@ -793,19 +801,83 @@ comments_json=$(run_helper "$LOW_REPO" review-comments --json)
   || fail "expected one unresolved review comment: $comments_json"
 [[ "$(jq -r '.comments[0].file' <<<"$comments_json")" == "low-stakes.txt" ]] \
   || fail "expected normalized review comment file: $comments_json"
-echo "ok 32 - review-comments exports local comments for agents"
+(
+  cd "$LOW_REPO"
+  printf 'new head\n' >>low-stakes.txt
+  git add low-stakes.txt
+  git commit -m "low stakes followup" >/dev/null
+)
+stale_comments_json=$(run_helper "$LOW_REPO" review-comments --json)
+[[ "$(jq -r '.stale' <<<"$stale_comments_json")" == "true" ]] \
+  || fail "expected review comments to become stale after HEAD changes: $stale_comments_json"
+[[ "$(jq -r '.counts.stale' <<<"$stale_comments_json")" == "1" ]] \
+  || fail "expected stale comment count after HEAD changes: $stale_comments_json"
+echo "ok 32 - review-comments records local comments and marks stale after HEAD changes"
+
+IFS='|' read -r STALE_REPO STALE_BIN STALE_ORIGIN <<<"$(make_repo stale-review-base)"
+FAKE_BIN="$STALE_BIN"
+(
+  cd "$STALE_REPO"
+  git checkout -b mho/stale-review-base >/dev/null
+  printf 'feature\n' >feature.txt
+  git add feature.txt
+  git commit -m "feature before upstream moves" >/dev/null
+)
+UPDATER="$TEST_TMP/stale-review-base-updater"
+git clone "$STALE_ORIGIN" "$UPDATER" >/dev/null 2>&1
+(
+  cd "$UPDATER"
+  git config user.name "Push Gate Test"
+  git config user.email "push-gate@test"
+  printf 'upstream\n' >>README.md
+  git add README.md
+  git commit -m "advance main" >/dev/null
+  git push origin main >/dev/null
+)
+stale_base_output=$(run_helper "$STALE_REPO" review-diff --json --no-tmux 2>&1) && stale_base_rc=0 || stale_base_rc=$?
+[[ "$stale_base_rc" != "0" ]] || fail "expected stale review base to block Diffview"
+expect_contains "$stale_base_output" "Review pending-push base moved after fetch"
+(
+  cd "$STALE_REPO"
+  git rebase refs/remotes/origin/main >/dev/null
+)
+fresh_base_json=$(run_helper "$STALE_REPO" review-diff --json --no-tmux)
+[[ "$(jq -r '.diff.base_freshness.allowed' <<<"$fresh_base_json")" == "true" ]] \
+  || fail "expected rebased branch to pass review base freshness: $fresh_base_json"
+echo "ok 33 - review-diff blocks stale upstream base before Diffview"
+
+IFS='|' read -r STACK_REPO STACK_BIN STACK_ORIGIN <<<"$(make_repo stacked-review-base)"
+FAKE_BIN="$STACK_BIN"
+(
+  cd "$STACK_REPO"
+  git checkout -b mho/parent >/dev/null
+  printf 'parent\n' >parent.txt
+  git add parent.txt
+  git commit -m "parent change" >/dev/null
+  git push -u origin mho/parent >/dev/null
+  git checkout -b mho/child >/dev/null
+  printf 'child\n' >child.txt
+  git add child.txt
+  git commit -m "child change" >/dev/null
+)
+PG_TEST_PR_LIST_MAP='{"|mho/parent":[{"number":7}]}'
+stack_base_json=$(run_helper "$STACK_REPO" review-diff --json --no-tmux)
+unset PG_TEST_PR_LIST_MAP
+[[ "$(jq -r '.diff.base' <<<"$stack_base_json")" == "refs/remotes/origin/mho/parent" ]] \
+  || fail "expected stacked branch review to use parent base, not origin/main: $stack_base_json"
+echo "ok 34 - review-diff uses stacked parent base when present"
 
 queue_json=$(run_helper "$LOW_REPO" queue --json)
 [[ "$(jq -r '.prepared | length >= 1' <<<"$queue_json")" == "true" ]] \
   || fail "expected queue to include prepared briefs: $queue_json"
 [[ "$(jq -r '.leases | type' <<<"$queue_json")" == "array" ]] \
   || fail "expected queue to include leases array: $queue_json"
-echo "ok 33 - queue reports prepared briefs and active leases"
+echo "ok 35 - queue reports prepared briefs and active leases"
 
 approve_all_output=$(run_helper "$LOW_REPO" approve-all -C "$LOW_REPO" 2>&1) && approve_all_rc=0 || approve_all_rc=$?
 [[ "$approve_all_rc" != "0" ]] || fail "expected approve-all to require an interactive terminal"
 expect_contains "$approve_all_output" "requires an interactive terminal"
-echo "ok 34 - approve-all cannot be used as a noninteractive approval bypass"
+echo "ok 36 - approve-all cannot be used as a noninteractive approval bypass"
 
 IFS='|' read -r INFER_REPO INFER_BIN INFER_ORIGIN <<<"$(make_repo inference-disabled)"
 FAKE_BIN="$INFER_BIN"
@@ -823,7 +895,7 @@ set -e
 [[ "$inference_rc" != "0" ]] || fail "expected PG_ALLOW_INFERENCE draft approval to be rejected"
 expect_contains "$inference_output" "PG_ALLOW_INFERENCE is no longer accepted"
 expect_contains "$inference_output" "pg prepare required"
-echo "ok 35 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
+echo "ok 37 - PG_ALLOW_INFERENCE is disabled as an agent-facing bypass"
 
 IFS='|' read -r STACK_BASE_REPO STACK_BASE_BIN STACK_BASE_ORIGIN <<<"$(make_repo stacked-parent-base)"
 FAKE_BIN="$STACK_BASE_BIN"
@@ -849,7 +921,7 @@ stack_base_output=$(run_helper "$STACK_BASE_REPO" draft-approve \
 stack_base_draft=$(extract_path "$stack_base_output" "^JSON draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$stack_base_draft")" == "refs/remotes/origin/mho/parent-feature" ]] \
   || fail "expected stacked child approval scope to use parent PR branch, got $(jq -r '.approved_scope.base_ref' "$stack_base_draft")"
-echo "ok 36 - stacked child without upstream uses closest open parent PR branch as approval base"
+echo "ok 38 - stacked child without upstream uses closest open parent PR branch as approval base"
 
 IFS='|' read -r ASYNC_WORK_REPO ASYNC_WORK_BIN ASYNC_WORK_ORIGIN <<<"$(make_repo async-work-package)"
 FAKE_BIN="$ASYNC_WORK_BIN"
@@ -904,7 +976,7 @@ async_work_block=$(run_helper "$ASYNC_WORK_REPO" check)
   || fail "expected unrelated async work-package path to be blocked: $async_work_block"
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "outside the reviewed async work package"
 expect_contains "$(jq -r '.reason' <<<"$async_work_block")" "src/unrelated.sh"
-echo "ok 37 - async work package can cover expected future files while blocking common-token path collisions"
+echo "ok 39 - async work package can cover expected future files while blocking common-token path collisions"
 
 IFS='|' read -r INTENT_REPO INTENT_BIN INTENT_ORIGIN <<<"$(make_repo semantic-check-alignment)"
 FAKE_BIN="$INTENT_BIN"
@@ -950,4 +1022,4 @@ intent_push_rc=$?
 set -e
 [[ "$intent_push_rc" != "0" ]] || fail "expected pg push to reject semantic mismatch"
 expect_contains "$intent_push" "$(jq -r '.reason' <<<"$intent_check")"
-echo "ok 38 - pg check and pg push both surface semantic intent mismatches"
+echo "ok 40 - pg check and pg push both surface semantic intent mismatches"
