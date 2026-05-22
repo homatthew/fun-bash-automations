@@ -33,16 +33,25 @@ eval "$(jq -r '
   @sh "LOG=\(.log // "/tmp/fba-notify.log")",
   @sh "STATE_FILE=\(.state_file // "")",
   @sh "STATE_ID=\(.state_id // "")",
-  @sh "STICKY_AFTER_CLICK=\(.sticky_after_click // "0")"
+  @sh "STICKY_AFTER_CLICK=\(.sticky_after_click // "0")",
+  @sh "ALERT_TIMEOUT=\(.alert_timeout // "")"
 ' "$SPEC")"
 
 nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true
 }
 
+alert_timeout() {
+  local value="${ALERT_TIMEOUT:-${NOTIFY_ALERT_TIMEOUT_SECONDS:-14400}}"
+  case "$value" in
+    ''|*[!0-9]*|0) printf '14400' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 extra_args=()
 if [ "$STYLE" = "alert" ]; then
-  extra_args+=(--actions "$ACTION_LABEL" --timeout 0)
+  extra_args+=(--actions "$ACTION_LABEL" --timeout "$(alert_timeout)")
 else
   extra_args+=(--timeout 60)
 fi

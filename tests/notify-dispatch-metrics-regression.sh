@@ -32,6 +32,7 @@ mkdir -p "$FAKE_BIN"
 
 cat > "$FAKE_BIN/alerter" <<'SH'
 #!/usr/bin/env bash
+printf 'alerter %s\n' "$*" >> "$NOTIFY_TEST_CALLS"
 printf '{"activationType":"actionClicked"}\n'
 SH
 chmod +x "$FAKE_BIN/alerter"
@@ -88,6 +89,7 @@ PATH="$FAKE_BIN:$PATH" \
 
 [[ -s "$METRICS_DEFAULT" ]] || fail "expected default metrics log"
 [[ -s "$CALLS_DEFAULT" ]] || fail "expected default open call"
+grep -q -- 'alerter .*--timeout 14400' "$CALLS_DEFAULT" || fail "expected default bounded alert timeout: $(cat "$CALLS_DEFAULT")"
 
 jq -e '
   .event == "notification_click_open"
@@ -139,7 +141,7 @@ jq -e '
 grep -q '^open -b com.microsoft.VSCode ' "$CALLS_SYNC" || fail "expected sync recovery VS Code bundle open call"
 grep -q '^osascript .*com.microsoft.VSCode' "$CALLS_SYNC" || fail "expected sync recovery app activation call"
 grep -q '^open vscode://' "$CALLS_SYNC" || fail "expected sync recovery open vscode call"
-first_sync_call="$(head -n 1 "$CALLS_SYNC")"
+first_sync_call="$(grep '^open ' "$CALLS_SYNC" | head -n 1)"
 [[ "$first_sync_call" == open\ -b\ com.microsoft.VSCode* ]] || fail "expected folder-first recovery to open VS Code workspace first: $(cat "$CALLS_SYNC")"
 find "$FOCUS_REQUESTS" -name '*.json' -print -quit | grep -q . || fail "expected folder-first recovery to write focus request"
 
