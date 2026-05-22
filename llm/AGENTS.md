@@ -8,13 +8,19 @@ workflows across Claude, Codex, and future harnesses.
 - Keep history linear in `fun-bash-automations` on branch `mh-netflix`.
 - Do not create, reopen, or mark ready PRs from `fun-bash-automations`
   `mh-netflix` to `main`; `mh-netflix` is the delivery branch for this repo.
+- `fun-bash-automations` and `dotfiles` do not use push-gate. For these two
+  owner-maintained repos, after the user explicitly asks to push or invokes an
+  explicit finish workflow, push directly with normal `git push` to the current
+  delivery branch. Do not run `pg prepare`, ask the user to run `pg`, or use
+  `pg push` for these two repos.
 - Do not push unless explicitly asked.
 - Explicit finish-workflow invocations such as `/go`, `/commit-push-pr`,
   `/push-review`, and `/stacked-pr` count as an explicit ask for the
   corresponding delivery actions.
 - Treat that as a hard workflow rule even if a shell path or harness would
   technically allow `git push`.
-- Use `push-gate` before any push operation that requires approval.
+- Use `push-gate` before any push operation that requires approval, except for
+  the two direct-push repos named above.
 - **Never bypass push-gate.** Do not suggest, run, or document
   `PG_SKIP_EDIT=1`, `PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`,
   `PG_ALLOW_INFERENCE=1` (that escape hatch is for humans with no

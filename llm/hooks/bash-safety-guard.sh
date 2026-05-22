@@ -8,6 +8,52 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
+GUARD_WORKDIR=$(echo "$INPUT" | jq -r '.tool_input.workdir // .tool_input.cwd // .cwd // empty')
+if [[ -z "$GUARD_WORKDIR" || "$GUARD_WORKDIR" == "null" ]]; then
+  GUARD_WORKDIR=$(python3 - "$COMMAND" <<'PY'
+import shlex
+import sys
+
+command = sys.argv[1]
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+for segment in segments:
+    if not segment or segment[0] != "git":
+        continue
+    idx = 1
+    workdir = ""
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-C" and idx + 1 < len(segment):
+            workdir = segment[idx + 1]
+            idx += 2
+            continue
+        if token == "push":
+            if workdir:
+                print(workdir)
+            sys.exit(0)
+        idx += 1
+sys.exit(0)
+PY
+  )
+fi
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # Do NOT source push-gate.sh here — a syntax error in that file would take
 # down the Bash tool entirely. Call it as a subprocess below (guard-check)
@@ -25,18 +71,55 @@ deny() {
 }
 
 # --- Helpers ---
+git_context() {
+  if [[ -n "$GUARD_WORKDIR" && -d "$GUARD_WORKDIR" ]]; then
+    git -C "$GUARD_WORKDIR" "$@"
+  else
+    git "$@"
+  fi
+}
+
 has_wrong_netflix_gh_host() {
   echo "$COMMAND" | grep -qE "(^|[;&|[:space:]])(export[[:space:]]+)?GH_HOST=['\"]?github\\.netflix\\.net['\"]?([[:space:];&|]|$)"
 }
 
 is_fun_bash_automations_repo() {
   local root remote
-  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  root=$(git_context rev-parse --show-toplevel 2>/dev/null || true)
   if [ "$(basename "$root")" = "fun-bash-automations" ]; then
     return 0
   fi
-  remote=$(git config --get remote.origin.url 2>/dev/null || true)
+  remote=$(git_context config --get remote.origin.url 2>/dev/null || true)
   [[ "$remote" == *"fun-bash-automations"* ]]
+}
+
+is_dotfiles_repo() {
+  local root remote
+  root=$(git_context rev-parse --show-toplevel 2>/dev/null || true)
+  if [ "$(basename "$root")" = "dotfiles" ]; then
+    return 0
+  fi
+  remote=$(git_context config --get remote.origin.url 2>/dev/null || true)
+  [[ "$remote" == *"dotfiles"* ]]
+}
+
+is_git_push_command() {
+  echo "$COMMAND" | grep -qE '(^|[;&|][[:space:]]*)git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+push([[:space:]]|$)'
+}
+
+is_direct_delivery_push() {
+  is_git_push_command || return 1
+  if is_dotfiles_repo; then
+    return 0
+  fi
+  if is_fun_bash_automations_repo; then
+    echo "$COMMAND" | grep -qE '(^|[[:space:]:/])(main|master)([[:space:]]|$)|HEAD:(main|master)|refs/heads/(main|master)' && return 1
+    local branch
+    branch=$(git_context branch --show-current 2>/dev/null || true)
+    [[ "$branch" == "mh-netflix" || "$COMMAND" == *"mh-netflix"* ]]
+    return
+  fi
+  return 1
 }
 
 ssh_lease_file() {
@@ -538,6 +621,9 @@ check_git_force() {
 # push-gate.sh as a subprocess so a bug there can't take down this hook.
 check_push_guard() {
   local result allowed reason rc
+  if is_direct_delivery_push; then
+    return
+  fi
   result=$(bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$result" ]; then

@@ -12,6 +12,16 @@ canonical instruction entrypoint.
 - Portable Codex config template: `codex/config.toml`
 - Portable Codex auth template: `codex/auth.json`
 
+## Repository Delivery Policy
+
+- This repository does not use push-gate.
+- After the user explicitly asks to push or invokes an explicit finish workflow,
+  agents should push directly with normal `git push` to `mh-netflix`.
+- Do not run `pg prepare`, ask the user to run `pg`, or use `pg push` for this
+  repository.
+- Do not create, reopen, or mark ready PRs from `mh-netflix` to `main`;
+  `mh-netflix` is the delivery branch.
+
 ## Compatibility Adapters
 
 - `CLAUDE.md` at repo root is a compatibility shim for Claude.
