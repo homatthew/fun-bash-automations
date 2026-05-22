@@ -750,16 +750,20 @@ low_prepare_path=$(extract_path "$low_prepare_output" "^Prepared brief written:"
 [[ "$(jq -r '.async_iteration.max_pushes' "$low_prepare_path")" == "5" ]] \
   || fail "expected low-stakes prepare to default max_pushes to 5"
 low_draft_output=$(run_helper "$LOW_REPO" draft-approve)
+low_script=$(extract_path "$low_draft_output" "^Approval script:")
 low_draft_file=$(extract_path "$low_draft_output" "^JSON draft file:")
 [[ "$(jq -r '.async_iteration.enabled' "$low_draft_file")" == "true" ]] \
   || fail "expected low-stakes draft to carry async"
 [[ "$(jq -r '.async_iteration.scope.branch_name' "$low_draft_file")" == "mho/low-stakes" ]] \
   || fail "expected low-stakes draft to scope branch"
-echo "ok 29 - low-stakes prepare creates reviewed short async lease draft"
+expect_contains "$(cat "$low_script")" "review-diff --base"
+expect_contains "$(cat "$low_script")" "-C \"\$REPO_ROOT\""
+echo "ok 29 - low-stakes prepare creates reviewed short async lease draft with automatic diff review"
 
 yes_draft_output=$(run_helper "$LOW_REPO" --yes)
 yes_script=$(extract_path "$yes_draft_output" "^Approval script:")
 yes_output=$(EDITOR=true bash "$yes_script" 2>&1 || true)
+expect_contains "$yes_output" "Skipping Diffview review: non-interactive shell."
 expect_contains "$yes_output" "Proceed: yes (--yes, after editor review)"
 expect_contains "$yes_output" "pg approve requires an interactive terminal"
 [[ "$yes_output" != *"Proceed? [Y/n]"* ]] || fail "expected --yes to skip final prompt"

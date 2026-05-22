@@ -4765,6 +4765,24 @@ read -r -d '' CONTEXT_BLOCK <<'CTXEOF' || true
 $context_block
 CTXEOF
 
+REPO_ROOT="\$(jq -r '.repo_root // ""' "\$DRAFT_FILE")"
+REVIEW_BASE="\$(jq -r '.local_review.diff.base // .approved_scope.base_ref // .base_ref_snapshot // ""' "\$DRAFT_FILE")"
+REVIEW_HEAD="\$(jq -r '.local_review.diff.head // .approved_anchor // "HEAD"' "\$DRAFT_FILE")"
+
+# Paved path review: normal pg approval opens the exact pending-push diff first,
+# then continues into the editable approval YAML. review-diff remains available
+# as a direct command, but users should not need a separate manual step.
+if [[ -t 0 || -t 1 ]]; then
+  if [[ -z "\$REPO_ROOT" || "\$REPO_ROOT" == "null" || -z "\$REVIEW_BASE" || "\$REVIEW_BASE" == "null" || -z "\$REVIEW_HEAD" || "\$REVIEW_HEAD" == "null" ]]; then
+    echo "Unable to resolve review diff from approval draft — aborting."
+    exit 1
+  fi
+  echo "Opening Diffview review for pending push."
+  "\$HELPER" -C "\$REPO_ROOT" review-diff --base "\$REVIEW_BASE" --head "\$REVIEW_HEAD"
+else
+  echo "Skipping Diffview review: non-interactive shell."
+fi
+
 # Edit-before-approve: convert the draft JSON to YAML, open \$EDITOR on the
 # YAML (easier to edit: comments, multi-line strings, no strict quoting),
 # then round-trip back to JSON and validate.

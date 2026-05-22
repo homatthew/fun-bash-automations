@@ -55,16 +55,19 @@ If you find yourself about to type any of those, STOP.
 
 ```
 1. pg prepare --what ... --why ... --approach ...
-2. pg [-C <path>] [--yes]           ← human in their terminal: review + approve
+2. pg [-C <path>] [--yes]           ← human in their terminal: Diffview review + YAML approve
 3. pg push --assert-flow "..."      ← agent: push under the active lease
 4. pg leases                        ← (optional) list active leases
 ```
 
-Useful local review helpers:
+Local review behavior:
 
-- `pg review-diff` opens the exact approved `base..HEAD` comparison in
-  Neovim Diffview. It is for human pre-push review only; it does not mutate
-  leases or approvals.
+- Normal `pg` approval opens the exact pending-push `base..HEAD` comparison in
+  Neovim Diffview before the approval YAML. Quit Diffview to continue into the
+  editable YAML and final approval prompt.
+- `pg review-diff` opens that same comparison directly when you want to inspect
+  or debug the diff outside the approval flow. It does not mutate leases or
+  approvals.
 - `pg review-comments --json` reads exported local review comments for the
   current head when a review artifact exists. Treat stale comments as context,
   not as approval.
@@ -75,6 +78,7 @@ Useful local review helpers:
 
 **Step 1** runs a single flow:
 - LLM interviews the commits → fills `what / why / approach / scope / risks`
+- Neovim Diffview opens on the exact pending-push diff; user reviews and quits
 - vim opens on `/tmp/pg-approve-<repo>-<branch>.yaml`
 - user edits or leaves the LLM-filled values, `:wq`
 - script renders preview, prompts `Proceed? [y/N]`

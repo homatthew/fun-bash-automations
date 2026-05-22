@@ -64,9 +64,9 @@ Tell the user:
 
 > Run in your terminal: `pg -C <absolute-repo-path>`
 
-Their editor opens on the YAML draft with your prepared brief. They
-review, edit if needed, and confirm. On approval, the lease is written
-and a macOS notification fires.
+Their terminal opens the exact pending-push diff in Neovim Diffview, then opens
+the YAML draft with your prepared brief. They review, edit if needed, and
+confirm. On approval, the lease is written and a macOS notification fires.
 
 ### 4c. Self-validate and push (agent)
 
