@@ -42,6 +42,14 @@ nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true
 }
 
+alert_timeout() {
+  local value="${NOTIFY_ALERT_TIMEOUT_SECONDS:-14400}"
+  case "$value" in
+    ''|*[!0-9]*|0) printf '14400' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 home_dir() {
   [ -n "${HOME:-}" ] && { printf '%s' "$HOME"; return; }
   dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}'
@@ -228,7 +236,7 @@ while :; do
   state_is_current || break
   notify_started_ms="$(notify_now_ms 2>/dev/null || printf 0)"
   resp=$(alerter --title "$TITLE" --subtitle "$display_subtitle" --message "$summary" \
-    --ignore-dnd --actions Show --timeout 0 \
+    --ignore-dnd --actions Show --timeout "$(alert_timeout)" \
     ${GROUP:+--group "$GROUP"} \
     ${SENDER:+--sender "$SENDER"} --json 2>&1 || true)
   act=$(printf '%s' "$resp" | jq -r '.activationType // ""' 2>/dev/null || true)

@@ -176,6 +176,7 @@ notify_editor_scheme() {
 }
 
 NOTIFY_LOG="${NOTIFY_LOG:-/tmp/fba-notify.log}"
+NOTIFY_ALERT_TIMEOUT_DEFAULT=14400
 RUNNING_ICON="⏳"
 DONE_ICON="🏁"
 INPUT_ICON="❓"
@@ -189,6 +190,14 @@ fi
 
 nlog() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >> "$NOTIFY_LOG" 2>/dev/null || true
+}
+
+notify_alert_timeout() {
+  local value="${NOTIFY_ALERT_TIMEOUT_SECONDS:-$NOTIFY_ALERT_TIMEOUT_DEFAULT}"
+  case "$value" in
+    ''|*[!0-9]*|0) printf '%s' "$NOTIFY_ALERT_TIMEOUT_DEFAULT" ;;
+    *) printf '%s' "$value" ;;
+  esac
 }
 
 notify_state_file() {
@@ -466,12 +475,13 @@ dispatch_alerter() {
   local state_file="${11:-}"
   local state_id="${12:-}"
   local sticky_after_click="${13:-0}"
-  local dispatcher spec label
+  local alert_timeout dispatcher spec label
   dispatcher="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/notify-dispatch.sh"
   if [ ! -x "$dispatcher" ]; then
     nlog "notify dispatcher missing: $dispatcher"
     return 1
   fi
+  alert_timeout="$(notify_alert_timeout)"
   spec=$(mktemp -t fba-notify-dispatch 2>/dev/null) || return 1
   jq -n \
     --arg title "$title" \
@@ -488,7 +498,8 @@ dispatch_alerter() {
     --arg state_file "$state_file" \
     --arg state_id "$state_id" \
     --arg sticky_after_click "$sticky_after_click" \
-    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, action_label:$action_label, sound:$sound, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, sticky_after_click:$sticky_after_click}' \
+    --arg alert_timeout "$alert_timeout" \
+    '{title:$title, subtitle:$subtitle, message:$message, group:$group, sender:$sender, open_url:$open_url, style:$style, action_label:$action_label, sound:$sound, cwd:$cwd, log:$log, state_file:$state_file, state_id:$state_id, sticky_after_click:$sticky_after_click, alert_timeout:$alert_timeout}' \
     > "$spec"
   label="com.matthewho.fba.notify.${RUNTIME:-agent}.$$.$RANDOM"
   if launchctl submit -l "$label" -o /tmp/fba-notify-dispatch.out -e /tmp/fba-notify-dispatch.err -- /bin/bash "$dispatcher" "$spec" >/dev/null 2>&1; then
@@ -636,16 +647,18 @@ backend_alerter() {
   local state_file="${10:-}"
   local state_id="${11:-}"
   local sticky_after_click="${12:-0}"
-  # Alert style is persistent. alerter only renders a sticky alert when
-  # --actions is supplied; --timeout 0 means no auto-close.
+  local alert_timeout
+  alert_timeout="$(notify_alert_timeout)"
+  # Alert style uses --actions so the notification remains click-targetable
+  # for a long bounded TTL. Avoid --timeout 0 because alerter waits forever.
   local extra_args=()
   if [ "$style" = "alert" ]; then
-    extra_args+=(--actions "$action_label" --timeout 0)
+    extra_args+=(--actions "$action_label" --timeout "$alert_timeout")
   else
     extra_args+=(--timeout 60)
   fi
   [ -n "$sound" ] && extra_args+=(--sound "$sound")
-  nlog "alerter invoke: title=$title subtitle=$subtitle style=$style action=$action_label sound=${sound:-<none>} msg_len=${#message} sender=${sender:-<none>} open=${open_url:-<none>}"
+  nlog "alerter invoke: title=$title subtitle=$subtitle style=$style action=$action_label timeout=$alert_timeout sound=${sound:-<none>} msg_len=${#message} sender=${sender:-<none>} open=${open_url:-<none>}"
   if dispatch_alerter "$title" "$subtitle" "$message" "$group" "$sender" "$open_url" "$style" "${MAIN_REPO_PATH:-$CWD}" "$action_label" "$sound" "$state_file" "$state_id" "$sticky_after_click"; then
     return
   fi
@@ -951,8 +964,8 @@ if [ "${NOTIFY_MACOS_DRY_RUN:-0}" = "1" ]; then
   _dry_sound="Pop"
   [ "$DISPLAY_STATE" = "input" ] && _dry_action="Respond"
   [ "$DISPLAY_STATE" = "running" ] && _dry_sound=""
-  printf 'macos backend=%s state=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s sound=%s open=%s\n' \
-    "$_backend" "$DISPLAY_STATE" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
+  printf 'macos backend=%s state=%s title=%s subtitle=%s message=%s group=%s sender=%s style=alert action=%s timeout=%s sound=%s open=%s\n' \
+    "$_backend" "$DISPLAY_STATE" "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$MACOS_GROUP" "${SENDER_BUNDLE:-<none>}" "$_dry_action" "$(notify_alert_timeout)" "${_dry_sound:-<none>}" "${_preview_url:-<none>}" >&2
   cleanup_and_exit
 fi
 
@@ -975,7 +988,7 @@ SOUND="Pop"
 STICKY_AFTER_CLICK="0"
 [ "$DISPLAY_STATE" = "running" ] && STICKY_AFTER_CLICK="1"
 [ "$DISPLAY_STATE" = "input" ] && STICKY_AFTER_CLICK="1"
-nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL sound=${SOUND:-<none>}"
+nlog "event=$EVENT state=$DISPLAY_STATE backend=$_chosen_backend repo=$REPO subtitle=$SUBTITLE style=$ALERT_STYLE action=$ACTION_LABEL timeout=$(notify_alert_timeout) sound=${SOUND:-<none>}"
 case "$_chosen_backend" in
   ghostty)
     if ! backend_ghostty "$DISPLAY_TITLE" "$SUBTITLE" "$MESSAGE" "$SOUND"; then
