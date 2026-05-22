@@ -82,6 +82,15 @@ async with AtlasClient(app_id="your-analysis-name") as client:
 
 ## Notebook → Gist
 
+- Keep gists minimal. Prefer `01_...md` plus `02_...ipynb`; do not include loose SVG/PNG/script/cache files unless the user explicitly asks for them.
+- Use contiguous ordered filenames (`01_...`, `02_...`, `03_...`) because local gist upload hooks reject gaps.
+- For `.ipynb` graph images, do **not** use markdown links to `gh image` / `user-attachments` URLs. Those links can break in GitHub Enterprise Gist notebook rendering.
+- Do **not** rely on markdown notebook attachments for Gist rendering. They can be valid `.ipynb` but still render as broken images in GHE Gists.
+- Put graphs in notebook `display_data` outputs with inline `image/svg+xml` when possible. This keeps notebooks small, crisp, self-contained, and below Gist truncation thresholds. Verify the remote Gist API reports `truncated=false`.
+- Use `gh image` for images embedded in markdown reports, not for notebook graph cells.
+- If `gh gist edit` fails while replacing a large/truncated notebook, patch through the Gist API with a JSON payload containing `files[filename].content`.
+- Always verify the remote notebook content after upload: expected number of image outputs, no `user-attachments` URLs, no `attachment:` refs, and `truncated=false`.
+
 ```python
 # Create
 result = subprocess.run(
