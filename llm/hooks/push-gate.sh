@@ -2831,6 +2831,12 @@ pg_shell_join() {
   printf '%s' "$out"
 }
 
+pg_vim_quote() {
+  local s="$1"
+  s="${s//\'/\'\'}"
+  printf "'%s'" "$s"
+}
+
 # Resolve the MAIN repo path even when we're inside a worktree. Worktrees
 # report their own toplevel via rev-parse, but share the main repo's common
 # .git directory — dirname of that is the main repo root.
@@ -3077,6 +3083,127 @@ pg_default_base_ref_snapshot() {
     return 0
   fi
   echo ""
+}
+
+pg_pending_push_base_ref() {
+  local branch_name="$1" fallback="$2" remote
+  remote=$(pg_default_remote "$branch_name" 2>/dev/null || true)
+  if [[ -n "$remote" ]] && git show-ref --verify --quiet "refs/remotes/$remote/$branch_name"; then
+    echo "refs/remotes/$remote/$branch_name"
+    return 0
+  fi
+  if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+    echo "refs/remotes/origin/$branch_name"
+    return 0
+  fi
+  if git show-ref --verify --quiet "refs/remotes/upstream/$branch_name"; then
+    echo "refs/remotes/upstream/$branch_name"
+    return 0
+  fi
+  echo "$fallback"
+}
+
+pg_remote_ref_parts() {
+  local ref="$1" rest
+  case "$ref" in
+    refs/remotes/*/*)
+      rest="${ref#refs/remotes/}"
+      printf '%s\t%s\n' "${rest%%/*}" "${rest#*/}"
+      return 0
+      ;;
+    */*)
+      if git show-ref --verify --quiet "refs/remotes/$ref"; then
+        printf '%s\t%s\n' "${ref%%/*}" "${ref#*/}"
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+pg_fetch_remote_tracking_ref() {
+  local ref="$1" parts remote branch
+  parts=$(pg_remote_ref_parts "$ref" 2>/dev/null || true)
+  [[ -n "$parts" ]] || return 2
+  IFS=$'\t' read -r remote branch <<<"$parts"
+  [[ -n "$remote" && -n "$branch" ]] || return 2
+  git fetch --quiet "$remote" "+refs/heads/$branch:refs/remotes/$remote/$branch"
+}
+
+pg_validate_review_base_json() {
+  local label="$1" base_ref="$2" head="$3"
+  local before="" after="" fetch_status="not-fetchable" allowed="true" reason="" fetch_rc=0
+  before=$(git rev-parse --verify "${base_ref}^{commit}" 2>/dev/null || true)
+  if [[ -z "$before" ]]; then
+    jq -n --arg label "$label" --arg base "$base_ref" \
+      '{label:$label, base:$base, allowed:false, reason:("Review " + $label + " base does not exist: " + $base), fetch:"missing"}'
+    return 0
+  fi
+  if pg_remote_ref_parts "$base_ref" >/dev/null 2>&1; then
+    if pg_fetch_remote_tracking_ref "$base_ref"; then
+      fetch_status="fetched"
+    else
+      fetch_rc=$?
+      jq -n --arg label "$label" --arg base "$base_ref" --argjson rc "$fetch_rc" \
+        '{label:$label, base:$base, allowed:false, reason:("Unable to fetch review " + $label + " base before opening Diffview: " + $base), fetch:"failed", fetch_rc:$rc}'
+      return 0
+    fi
+  fi
+  after=$(git rev-parse --verify "${base_ref}^{commit}" 2>/dev/null || true)
+  if [[ -z "$after" ]]; then
+    jq -n --arg label "$label" --arg base "$base_ref" \
+      '{label:$label, base:$base, allowed:false, reason:("Review " + $label + " base disappeared after fetch: " + $base), fetch:"missing-after-fetch"}'
+    return 0
+  fi
+  if ! git merge-base --is-ancestor "$after" "$head" 2>/dev/null; then
+    allowed="false"
+    if [[ "$before" != "$after" ]]; then
+      reason="Review $label base moved after fetch and HEAD is not rebased onto it: $base_ref. Run: git fetch && git rebase $base_ref"
+    else
+      reason="Review $label base is not an ancestor of HEAD: $base_ref. Rebase or pass the intended --base before opening Diffview."
+    fi
+  fi
+  jq -n \
+    --arg label "$label" \
+    --arg base "$base_ref" \
+    --arg before "$before" \
+    --arg after "$after" \
+    --arg fetch "$fetch_status" \
+    --argjson allowed "$allowed" \
+    --arg reason "$reason" \
+    '{
+      label: $label,
+      base: $base,
+      before: $before,
+      after: $after,
+      changed_after_fetch: ($before != $after),
+      fetch: $fetch,
+      allowed: $allowed,
+      reason: (if $reason == "" then null else $reason end)
+    }'
+}
+
+pg_validate_review_bases() {
+  local head="$1" pending_base="$2" full_base="$3" pending_json full_json allowed reason
+  pending_json=$(pg_validate_review_base_json "pending-push" "$pending_base" "$head")
+  full_json=$(jq '.label = "full-review"' <<<"$pending_json")
+  if [[ -n "$full_base" && "$full_base" != "$pending_base" ]]; then
+    full_json=$(pg_validate_review_base_json "full-review" "$full_base" "$head")
+  fi
+  allowed=$(jq -n --argjson pending "$pending_json" --argjson full "$full_json" '$pending.allowed and $full.allowed')
+  reason=$(jq -n --argjson pending "$pending_json" --argjson full "$full_json" -r '
+    [$pending, $full]
+    | map(select(.allowed != true) | .reason)
+    | map(select(. != null and . != ""))
+    | unique
+    | join("\n")
+  ')
+  jq -n \
+    --argjson pending "$pending_json" \
+    --argjson full "$full_json" \
+    --argjson allowed "$allowed" \
+    --arg reason "$reason" \
+    '{allowed:$allowed, reason:(if $reason == "" then null else $reason end), pending_push:$pending, full_review:$full}'
 }
 
 pg_resolve_pr_base_ref() {
@@ -5264,23 +5391,30 @@ pg_cmd_check() {
 
 pg_review_diff_json() {
   local branch="${1:-}" explicit_base="${2:-}" explicit_head="${3:-HEAD}"
-  local branch_ref lease_path lease_json base_ref head branch_name
-  local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file
+  local branch_ref lease_path lease_json full_base_ref base_ref head branch_name
+  local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file validation
   branch_ref=$(pg_branch_ref "$branch")
   branch_name=$(pg_branch_display "$branch_ref")
   lease_path=$(pg_lease_path_for_ref "$branch_ref")
   lease_json=""
   [[ -f "$lease_path" ]] && lease_json=$(cat "$lease_path")
+  if [[ -n "$lease_json" ]]; then
+    full_base_ref=$(jq -r '.approved_scope.base_ref // .base_ref_snapshot // empty' <<<"$lease_json")
+  else
+    full_base_ref=$(pg_default_base_ref_snapshot)
+  fi
   if [[ -n "$explicit_base" ]]; then
     base_ref="$explicit_base"
-  elif [[ -n "$lease_json" ]]; then
-    base_ref=$(jq -r '.approved_scope.base_ref // .base_ref_snapshot // empty' <<<"$lease_json")
   else
-    base_ref=$(pg_default_base_ref_snapshot)
+    base_ref=$(pg_pending_push_base_ref "$branch_name" "$full_base_ref")
   fi
   [[ -n "$base_ref" ]] || { pg_fail "Unable to resolve review diff base. Run pg prepare and pg first, or pass --base."; return 1; }
-  git rev-parse --verify "$base_ref" >/dev/null 2>&1 || { pg_fail "Review diff base does not exist: $base_ref"; return 1; }
   head=$(git rev-parse --verify "${explicit_head}^{commit}" 2>/dev/null) || { pg_fail "Review diff head does not exist: $explicit_head"; return 1; }
+  validation=$(pg_validate_review_bases "$head" "$base_ref" "${full_base_ref:-$base_ref}")
+  if [[ "$(jq -r '.allowed' <<<"$validation")" != "true" ]]; then
+    pg_fail "$(jq -r '.reason' <<<"$validation")"
+    return 1
+  fi
   commits=$(git rev-list --count "$base_ref..$head" 2>/dev/null || echo 0)
   files=$(git diff --name-only "$base_ref..$head" 2>/dev/null | wc -l | tr -d ' ')
   added=$(git diff --numstat "$base_ref..$head" 2>/dev/null | awk '{a += ($1 == "-" ? 0 : $1)} END {print a + 0}')
@@ -5297,6 +5431,7 @@ pg_review_diff_json() {
     --arg branch "$branch_name" \
     --arg branch_ref "$branch_ref" \
     --arg base "$base_ref" \
+    --arg full_base "${full_base_ref:-$base_ref}" \
     --arg head "$head" \
     --arg range "$diff_range" \
     --arg shortstat "$shortstat" \
@@ -5306,14 +5441,22 @@ pg_review_diff_json() {
     --argjson deleted "$deleted" \
     --arg comments_file "$comments_file" \
     --arg stale_comments_file "$stale_comments_file" \
+    --argjson validation "$validation" \
     '{
       repo: $repo,
       repo_name: $repo_name,
       branch: $branch,
       branch_ref: $branch_ref,
+      label: "pending-push",
       base: $base,
       head: $head,
       range: $range,
+      full_review: {
+        label: "full-review",
+        base: $full_base,
+        head: $head,
+        range: ($full_base + ".." + $head)
+      },
       stats: {
         commits: $commits,
         files: $files,
@@ -5321,6 +5464,7 @@ pg_review_diff_json() {
         deleted_lines: $deleted,
         shortstat: $shortstat
       },
+      base_freshness: $validation,
       comments_file: $comments_file,
       latest_comments_file: $stale_comments_file
     }'
@@ -5328,16 +5472,17 @@ pg_review_diff_json() {
 
 pg_review_command_json() {
   local info="$1" no_tmux="$2"
-  local repo base head comments_file nvim_cmd shell_cmd tmux_cmd use_tmux
+  local repo base head comments_file script_file nvim_cmd shell_cmd tmux_cmd use_tmux
   repo=$(jq -r '.repo' <<<"$info")
   base=$(jq -r '.base' <<<"$info")
   head=$(jq -r '.head' <<<"$info")
   comments_file=$(jq -r '.comments_file' <<<"$info")
+  script_file=$(pg_write_review_vimscript "$info")
   nvim_cmd=$(pg_shell_join env \
     "PG_REVIEW_BASE=$base" \
     "PG_REVIEW_HEAD=$head" \
     "PG_REVIEW_COMMENTS_FILE=$comments_file" \
-    nvim -c "DiffviewOpen $base..$head")
+    nvim -S "$script_file" -c "DiffviewOpen $base..$head")
   shell_cmd="cd $(pg_shell_quote "$repo") && $nvim_cmd"
   use_tmux="false"
   tmux_cmd=""
@@ -5349,8 +5494,63 @@ pg_review_command_json() {
     --arg tool "diffview.nvim" \
     --arg command "$shell_cmd" \
     --arg tmux_command "$tmux_cmd" \
+    --arg comments_command ":PgReviewComment <comment text>" \
+    --arg vimscript "$script_file" \
     --argjson use_tmux "$use_tmux" \
-    '{tool:$tool, command:$command, tmux_command:(if $tmux_command == "" then null else $tmux_command end), use_tmux:$use_tmux}'
+    '{tool:$tool, command:$command, tmux_command:(if $tmux_command == "" then null else $tmux_command end), use_tmux:$use_tmux, vimscript:$vimscript, comments_command:$comments_command}'
+}
+
+pg_write_review_vimscript() {
+  local info="$1" repo head comments_file review_dir script_file helper
+  repo=$(jq -r '.repo' <<<"$info")
+  head=$(jq -r '.head' <<<"$info")
+  comments_file=$(jq -r '.comments_file' <<<"$info")
+  review_dir=$(dirname "$comments_file")
+  script_file="$review_dir/review-tools.vim"
+  helper=$(pg_helper_path)
+  mkdir -p "$review_dir"
+  cat >"$script_file" <<EOF
+let g:pg_review_repo = $(pg_vim_quote "$repo")
+let g:pg_review_helper = $(pg_vim_quote "$helper")
+let g:pg_review_head = $(pg_vim_quote "$head")
+let g:pg_review_comments_file = $(pg_vim_quote "$comments_file")
+
+function! PgReviewComment(...) abort
+  if a:0 == 0
+    echoerr 'usage: :PgReviewComment <comment text>'
+    return
+  endif
+  let l:file = expand('%:p')
+  if empty(l:file)
+    let l:file = expand('%')
+  endif
+  let l:prefix = g:pg_review_repo . '/'
+  if stridx(l:file, l:prefix) == 0
+    let l:file = strpart(l:file, strlen(l:prefix))
+  endif
+  let l:cmd = [
+        \ g:pg_review_helper,
+        \ '-C', g:pg_review_repo,
+        \ 'review-comments', 'add',
+        \ '--comments-file', g:pg_review_comments_file,
+        \ '--head', g:pg_review_head,
+        \ '--file', l:file,
+        \ '--line', string(line('.')),
+        \ '--body', join(a:000, ' ')
+        \ ]
+  let l:out = system(l:cmd)
+  if v:shell_error
+    echoerr l:out
+  else
+    echo l:out
+  endif
+endfunction
+
+command! -nargs=+ PgReviewComment call PgReviewComment(<f-args>)
+command! PgReviewCommentsFile echo g:pg_review_comments_file
+nnoremap <leader>gc :PgReviewComment<Space>
+EOF
+  printf '%s\n' "$script_file"
 }
 
 pg_cmd_review_diff() {
@@ -5378,10 +5578,13 @@ pg_cmd_review_diff() {
     "",
     "Repo: " + .repo,
     "Branch: " + .branch,
-    "Base: " + .base,
+    "Diff: pending-push",
+    "Pending-push base: " + .base,
+    "Full-review base: " + .full_review.base,
     "Head: " + .head,
     "Stats: " + .stats.shortstat,
-    "Comments file: " + .comments_file
+    "Comments file: " + .comments_file,
+    "In Diffview: :PgReviewComment <comment text>"
   ' <<<"$info"
   command=$(jq -r '.command' <<<"$command_json")
   tmux_command=$(jq -r '.tmux_command // ""' <<<"$command_json")
@@ -5434,13 +5637,16 @@ pg_review_comments_payload_json() {
   fi
   jq -n --argjson diff "$info" --arg source "$source_file" --slurpfile raw "$source_file" '
     def comments_from($v):
-      if ($v | type) == "array" then $v
+      if ($v | type) == "array" then
+        if all($v[]?; ((.body // .comment // .text // .message // "") | tostring | length) > 0) then $v
+        else ($v | map(comments_from(.)) | add // [])
+        end
       elif (($v.comments // null) | type) == "array" then $v.comments
       elif (($v.annotations // null) | type) == "array" then $v.annotations
       elif (($v.items // null) | type) == "array" then $v.items
+      elif ((($v.body // $v.comment // $v.text // $v.message // "") | tostring | length) > 0) then [$v]
       else [] end;
-    ($raw[0] // {}) as $doc
-    | (comments_from($doc)
+    comments_from($raw)
       | map({
           file: (.file // .path // .filename // ""),
           line: (.line // .start_line // .original_line // null),
@@ -5449,8 +5655,8 @@ pg_review_comments_payload_json() {
           status: (.status // (if (.resolved // false) then "resolved" else "open" end)),
           severity: (.severity // .level // null)
         })
-      | map(select((.body | tostring | length) > 0))) as $comments
-    | ($doc.head // $doc.commit // $doc.review_head // "") as $review_head
+      | map(select((.body | tostring | length) > 0)) as $comments
+    | ([$raw[]? | select(type == "object") | (.head // .commit // .review_head // empty)] | map(select(. != "")) | .[0] // "") as $review_head
     | ($review_head != "" and $review_head != $diff.head) as $stale
     | {
         supported:true,
@@ -5468,7 +5674,15 @@ pg_review_comments_payload_json() {
 }
 
 pg_cmd_review_comments() {
-  local branch="" file="" format="human"
+  local branch="" file="" format="human" mode="list"
+  if [[ "${1:-}" == "add" ]]; then
+    mode="add"
+    shift
+  fi
+  if [[ "$mode" == "add" ]]; then
+    pg_cmd_review_comments_add "$@"
+    return $?
+  fi
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --branch) branch="$2"; shift 2 ;;
@@ -5496,6 +5710,59 @@ pg_cmd_review_comments() {
       (.comments[]? | "- " + .file + ":" + ((.line // "?") | tostring) + " [" + (.status // "open") + "] " + .body)
     end
   ' <<<"$payload"
+}
+
+pg_cmd_review_comments_add() {
+  local branch="" comments_file="" review_head="" path="" line="" end_line="" body="" status="open" severity=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2 ;;
+      --comments-file) comments_file="$2"; shift 2 ;;
+      --head) review_head="$2"; shift 2 ;;
+      --file) path="$2"; shift 2 ;;
+      --line) line="$2"; shift 2 ;;
+      --end-line) end_line="$2"; shift 2 ;;
+      --body) body="$2"; shift 2 ;;
+      --status) status="$2"; shift 2 ;;
+      --severity) severity="$2"; shift 2 ;;
+      *) pg_fail "Unknown review-comments add option: $1"; return 1 ;;
+    esac
+  done
+  [[ -n "$path" ]] || { pg_fail "review-comments add requires --file"; return 1; }
+  [[ -n "$line" && "$line" =~ ^[0-9]+$ ]] || { pg_fail "review-comments add requires numeric --line"; return 1; }
+  [[ -n "$body" ]] || { pg_fail "review-comments add requires --body"; return 1; }
+  if [[ -z "$review_head" ]]; then
+    review_head=$(git rev-parse --verify HEAD 2>/dev/null) || { pg_fail "Unable to resolve HEAD"; return 1; }
+  fi
+  if [[ -z "$comments_file" ]]; then
+    local info
+    info=$(pg_review_diff_json "$branch" "" "$review_head") || return 1
+    comments_file=$(jq -r '.comments_file' <<<"$info")
+  fi
+  [[ -n "$end_line" ]] || end_line="$line"
+  pg_ensure_parent_dir "$comments_file"
+  jq -cn \
+    --arg head "$review_head" \
+    --arg file "$path" \
+    --arg line "$line" \
+    --arg end_line "$end_line" \
+    --arg body "$body" \
+    --arg status "$status" \
+    --arg severity "$severity" \
+    --arg created_at "$(pg_now_utc)" \
+    '{
+      schema_version: 1,
+      head: $head,
+      file: $file,
+      line: ($line | tonumber),
+      end_line: ($end_line | tonumber),
+      body: $body,
+      status: $status,
+      severity: (if $severity == "" then null else $severity end),
+      created_at: $created_at
+    }' >>"$comments_file"
+  cp "$comments_file" "$(dirname "$comments_file")/latest.json"
+  printf 'Recorded review comment: %s:%s\n' "$path" "$line"
 }
 
 pg_review_status_for_draft_json() {
