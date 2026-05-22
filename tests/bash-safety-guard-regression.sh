@@ -25,13 +25,32 @@ run_guard() {
   jq -n --arg command "$command" '{tool_input:{command:$command}}' | bash "$GUARD"
 }
 
+run_guard_in() {
+  local repo="$1"
+  local command="$2"
+  (
+    cd "$repo"
+    jq -n --arg command "$command" '{tool_input:{command:$command}}' | bash "$GUARD"
+  )
+}
+
+run_guard_with_workdir() {
+  local repo="$1"
+  local command="$2"
+  (
+    cd "$TEST_TMP"
+    jq -n --arg command "$command" --arg workdir "$repo" \
+      '{tool_input:{command:$command, workdir:$workdir}}' | bash "$GUARD"
+  )
+}
+
 write_payload() {
   local path="$1"
   local files_json="$2"
   jq -n --argjson files "$files_json" '{files:$files}' >"$path"
 }
 
-echo "1..35"
+echo "1..39"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -195,3 +214,26 @@ echo "ok 34 - fun-bash-automations gh pr view stays allowed"
 other_pr_create_allow=$(run_guard "gh -R homatthew/other-repo pr create --base main --head feature")
 [[ -z "$other_pr_create_allow" ]] || fail "expected non-FBA gh pr create to be allowed by this guard, got: $other_pr_create_allow"
 echo "ok 35 - non-FBA gh pr create is not blocked by FBA-specific rule"
+
+dotfiles_repo="$TEST_TMP/dotfiles"
+git init -q "$dotfiles_repo"
+git -C "$dotfiles_repo" remote add origin https://git.netflix.net/matthewho/dotfiles.git
+dotfiles_push_allow=$(run_guard_with_workdir "$dotfiles_repo" "git push origin HEAD:main")
+[[ -z "$dotfiles_push_allow" ]] || fail "expected dotfiles direct push to be allowed, got: $dotfiles_push_allow"
+echo "ok 36 - dotfiles direct delivery push bypasses push-gate guard"
+
+dotfiles_push_c_allow=$(run_guard "git -C $dotfiles_repo push origin HEAD:main")
+[[ -z "$dotfiles_push_c_allow" ]] || fail "expected dotfiles git -C direct push to be allowed, got: $dotfiles_push_c_allow"
+echo "ok 37 - dotfiles git -C direct delivery push bypasses push-gate guard"
+
+fba_repo="$TEST_TMP/fun-bash-automations"
+git init -q "$fba_repo"
+git -C "$fba_repo" checkout -q -b mh-netflix
+git -C "$fba_repo" remote add origin git@github.com:homatthew/fun-bash-automations.git
+fba_push_allow=$(run_guard_with_workdir "$fba_repo" "git push origin mh-netflix")
+[[ -z "$fba_push_allow" ]] || fail "expected FBA mh-netflix direct push to be allowed, got: $fba_push_allow"
+echo "ok 38 - fun-bash-automations mh-netflix direct push bypasses push-gate guard"
+
+fba_main_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin HEAD:main")
+expect_contains "$fba_main_push_block" "pushing directly to origin/main is not allowed"
+echo "ok 39 - fun-bash-automations main push remains blocked"
