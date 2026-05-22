@@ -4846,7 +4846,7 @@ EOF
     pending_count=$(git rev-list --count "$pending_ref"..HEAD 2>/dev/null || echo 0)
     pending_file_count=$(git diff --name-only "$pending_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')
     pending_shortstat=$(git diff --shortstat "$pending_ref"..HEAD 2>/dev/null | sed 's/^ *//')
-    context_block="# ───────── what you're approving ─────────
+    context_block="# what you're approving
 # review diff: pg review-diff
 #
 # pending push: $pending_ref..HEAD
@@ -4870,7 +4870,7 @@ ${commit_log:-#   (none)}
 # files (showing up to 15 of ${file_count:-0}):
 ${file_stats:-#   (none)}
 #
-# ─────────────────────────────────────────
+# end preview
 #"
   fi
 
