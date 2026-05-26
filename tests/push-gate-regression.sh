@@ -282,7 +282,11 @@ FAKE_BIN="$LONG_BIN"
   for i in $(seq 1 30); do
     printf 'line %s\n' "$i" >"file-$i.txt"
     git add "file-$i.txt"
-    git commit -m "long approval context $i" >/dev/null
+    if [[ "$i" == "1" ]]; then
+      git commit -m 'long approval context `pg prepare`' -m 'Captures literal backtick context' >/dev/null
+    else
+      git commit -m "long approval context $i" >/dev/null
+    fi
   done
 )
 run_helper "$LONG_REPO" prepare \
@@ -318,8 +322,13 @@ expect_file "$draft_script"
 expect_file "$draft_yaml_file"
 expect_file "$draft_file"
 expect_no_trailing_whitespace "$draft_yaml_file"
-[[ "$(yq eval '.description.summary' "$draft_yaml_file")" == "feature start" ]] \
+[[ "$(yq eval '.summary.what' "$draft_yaml_file")" == "feature start" ]] \
   || fail "expected YAML approval draft to parse"
+[[ "$(yq eval '.machine.description.summary' "$draft_yaml_file")" == "feature start" ]] \
+  || fail "expected machine approval draft to retain canonical description"
+[[ "$(yq eval '.review.unit' "$draft_yaml_file")" == "pending_push" ]] \
+  || fail "expected YAML approval draft to label pending-push review unit"
+expect_contains "$(cat "$draft_yaml_file")" "# ---- machine contract below; agents/tools use this ----"
 expect_contains "$(cat "$draft_yaml_file")" "user_intent: |-"
 [[ "$(jq -r 'keys_unsorted[0:4] | join(",")' "$draft_file")" == "schema_version,description,user_intent,agent_assertion_template" ]] \
   || fail "expected human-readable fields at top of lease draft: $(jq -r 'keys_unsorted[0:6] | join(",")' "$draft_file")"
@@ -344,10 +353,10 @@ SUMMARY_WITH_TRAILING_BLANKS="$SUMMARY_WITH_TRAILING_BLANKS" \
   INTENT_WITH_TRAILING_BLANKS="$INTENT_WITH_TRAILING_BLANKS" \
   ASSERT_WITH_TRAILING_BLANKS="$ASSERT_WITH_TRAILING_BLANKS" \
   yq eval '
-    .description.summary = strenv(SUMMARY_WITH_TRAILING_BLANKS)
-    | .brief.what = "stale brief field\n\n"
-    | .user_intent = strenv(INTENT_WITH_TRAILING_BLANKS)
-    | .agent_assertion_template = strenv(ASSERT_WITH_TRAILING_BLANKS)
+    .summary.what = strenv(SUMMARY_WITH_TRAILING_BLANKS)
+    | .machine.brief.what = "stale brief field\n\n"
+    | .machine.user_intent = strenv(INTENT_WITH_TRAILING_BLANKS)
+    | .machine.agent_assertion_template = strenv(ASSERT_WITH_TRAILING_BLANKS)
   ' -i "$draft_yaml_file"
 approval_block=$(printf 'y\n' | EDITOR=true bash "$draft_script" 2>&1 || true)
 expect_contains "$approval_block" "pg approve requires an interactive terminal"
@@ -780,7 +789,77 @@ review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux)
   || fail "expected review-diff to target Diffview.nvim: $review_diff_json"
 expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "DiffviewOpen"
 expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "review-tools.vim"
-expect_contains "$(jq -r '.reviewer.comments_command' <<<"$review_diff_json")" ":PgReviewComment"
+expect_contains "$(jq -r '.reviewer.comments_command' <<<"$review_diff_json")" "Space g c"
+expect_contains "$(jq -r '.reviewer.exit_command' <<<"$review_diff_json")" ":PgReviewDone"
+expect_contains "$(jq -r '.reviewer.layout_command' <<<"$review_diff_json")" "Space r l"
+expect_contains "$(jq -r '.reviewer.unified_diff_command' <<<"$review_diff_json")" "Space r u"
+expect_contains "$(jq -r '.reviewer.ai_review_command' <<<"$review_diff_json")" "Space 9 s"
+expect_contains "$(jq -r '.reviewer.suggested_edit_command' <<<"$review_diff_json")" "Space 9 v"
+[[ "$(jq -r '.diff.review_unit.scope' <<<"$review_diff_json")" == "branch" ]] \
+  || fail "expected review-diff to expose branch review unit: $review_diff_json"
+review_script=$(jq -r '.reviewer.vimscript' <<<"$review_diff_json")
+expect_contains "$(cat "$review_script")" "command! PgReviewDone"
+expect_contains "$(cat "$review_script")" "function! PgReviewAddComment"
+expect_contains "$(cat "$review_script")" "function! PgReviewClarifyComment"
+expect_contains "$(cat "$review_script")" "function! PgReviewSubmitComment"
+expect_contains "$(cat "$review_script")" "function! PgReviewThreadStart"
+expect_contains "$(cat "$review_script")" "function! PgReviewThreadAskCodex"
+expect_contains "$(cat "$review_script")" "function! PgReviewThreadReplyPrompt"
+expect_contains "$(cat "$review_script")" "function! PgReviewThreadAccept"
+expect_contains "$(cat "$review_script")" "function! PgReviewCodexLastMessage"
+expect_contains "$(cat "$review_script")" "--output-last-message"
+expect_contains "$(cat "$review_script")" "PgReviewCodexLastMessage(l:prompt, 'low')"
+expect_contains "$(cat "$review_script")" "PgReviewCodexLastMessage(PgReviewThreadPrompt(), 'low')"
+expect_contains "$(cat "$review_script")" "a accept/save  r reply/refine  e edit/save  q cancel"
+expect_contains "$(cat "$review_script")" "strftime('%Y-%m-%dT%H:%M:%SZ', localtime())"
+if grep -Fq "strftime('%Y-%m-%dT%H:%M:%SZ', localtime(), 1)" "$review_script"; then
+  fail "expected PgReviewThreadNewMessage to avoid unsupported three-arg strftime"
+fi
+expect_contains "$(cat "$review_script")" "function! PgReviewCommentPrompt"
+expect_contains "$(cat "$review_script")" "Window.capture_input(\"Review Comment\""
+expect_contains "$(cat "$review_script")" "Window.capture_input(title"
+expect_contains "$(cat "$review_script")" "model_reasoning_effort=\"' . a:effort . '\""
+expect_contains "$(cat "$review_script")" "AI clarification (fast)"
+expect_contains "$(cat "$review_script")" "Human ask:"
+expect_contains "$(cat "$review_script")" "Requested change:"
+expect_contains "$(cat "$review_script")" "Acceptance criteria:"
+expect_contains "$(cat "$review_script")" "break down exactly what the reviewer is asking for"
+expect_contains "$(cat "$review_script")" "function! PgReviewInstallMaps"
+expect_contains "$(cat "$review_script")" "autocmd BufEnter,WinEnter * call PgReviewInstallMaps()"
+expect_contains "$(cat "$review_script")" "nnoremap <buffer><nowait> q :PgReviewDone<CR>"
+expect_contains "$(cat "$review_script")" "nnoremap <buffer><nowait> <Space>qr :PgReviewDone<CR>"
+if grep -Fqx "nnoremap <buffer><nowait> <Space>q :PgReviewDone<CR>" "$review_script"; then
+  fail "expected Space q to remain unmapped for review exit"
+fi
+expect_contains "$(cat "$review_script")" "nnoremap <buffer><nowait> <Space>gc :call PgReviewCommentPrompt()<CR>"
+expect_contains "$(cat "$review_script")" "nnoremap <buffer><nowait> gc :call PgReviewCommentPrompt()<CR>"
+expect_contains "$(cat "$review_script")" "xnoremap <buffer><nowait> gc :<C-U>call PgReviewCommentPrompt()<CR>"
+expect_contains "$(cat "$review_script")" "nmap <buffer><nowait> <Space>rl g<C-x>"
+expect_contains "$(cat "$review_script")" "function! PgReviewUnifiedDiff"
+expect_contains "$(cat "$review_script")" "nnoremap <buffer><nowait> <Space>ru"
+expect_contains "$(cat "$review_script")" "--review-unit-json"
+expect_contains "$(cat "$review_script")" "function! PgReviewVisualRange"
+expect_contains "$(cat "$review_script")" "command! -range -nargs=+ PgReviewSuggestedEdit"
+expect_contains "$(cat "$review_script")" "xnoremap <buffer><nowait> <Space>gv"
+expect_contains "$(cat "$review_script")" "function! PgReviewCodexSuggestedEditFromVisual"
+expect_contains "$(cat "$review_script")" "xnoremap <buffer><nowait> <Space>9v"
+expect_contains "$(cat "$review_script")" "--dangerously-bypass-approvals-and-sandbox"
+thread_smoke_comments="$TEST_TMP/thread-smoke-comments.json"
+PG_TEST_CODEX_RESPONSE='Human ask: transformed by fake Codex' PATH="$FAKE_BIN:$PATH" nvim --headless -u NONE -S "$review_script" \
+  "+let g:pg_review_comments_file = '$thread_smoke_comments'" \
+  '+call PgReviewThreadNewMessage("reviewer", "rough ask")' \
+  '+call PgReviewThreadStart("low-stakes.txt", 1, "low stakes", "tighten this")' \
+  '+if !exists("g:pg_review_thread") | cquit | endif' \
+  '+call PgReviewThreadReply("make it concrete")' \
+  '+call PgReviewThreadSaveEdited("Final request")' \
+  '+qall'
+thread_smoke_json=$(jq -s '.' "$thread_smoke_comments")
+[[ "$(jq -r '.[0].thread | length' <<<"$thread_smoke_json")" == "5" ]] \
+  || fail "expected headless review thread smoke to persist transcript: $thread_smoke_json"
+[[ "$(jq -r '[.[0].thread[] | select(.role == "codex" and (.body | contains("transformed by fake Codex")))] | length' <<<"$thread_smoke_json")" == "2" ]] \
+  || fail "expected headless review thread smoke to capture Codex last message: $thread_smoke_json"
+[[ "$(jq -r '.[0].body' <<<"$thread_smoke_json")" == *"Final request"* ]] \
+  || fail "expected headless review thread smoke to persist edited final request: $thread_smoke_json"
 review_command=$(run_helper "$LOW_REPO" review-diff --print-command --no-tmux)
 expect_contains "$review_command" "DiffviewOpen"
 expect_contains "$review_command" "PG_REVIEW_COMMENTS_FILE="
@@ -792,6 +871,7 @@ add_comment_output=$(run_helper "$LOW_REPO" review-comments add \
   --head "$(jq -r '.diff.head' <<<"$review_diff_json")" \
   --file "low-stakes.txt" \
   --line 1 \
+  --thread-json '[{"role":"reviewer","body":"too vague"},{"role":"codex","body":"Human ask: tighten wording"}]' \
   --body "tighten wording")
 expect_contains "$add_comment_output" "Recorded review comment: low-stakes.txt:1"
 comments_json=$(run_helper "$LOW_REPO" review-comments --json)
@@ -801,6 +881,43 @@ comments_json=$(run_helper "$LOW_REPO" review-comments --json)
   || fail "expected one unresolved review comment: $comments_json"
 [[ "$(jq -r '.comments[0].file' <<<"$comments_json")" == "low-stakes.txt" ]] \
   || fail "expected normalized review comment file: $comments_json"
+[[ "$(jq -r '.comments[0].type' <<<"$comments_json")" == "comment" ]] \
+  || fail "expected typed review comment: $comments_json"
+[[ "$(jq -r '.comments[0].review_unit.scope' <<<"$comments_json")" == "branch" ]] \
+  || fail "expected branch-scoped review comment: $comments_json"
+[[ "$(jq -r '.comments[0].thread | length' <<<"$comments_json")" == "2" ]] \
+  || fail "expected review comment thread transcript: $comments_json"
+[[ "$(jq -r '.comments[0].thread[1].body' <<<"$comments_json")" == "Human ask: tighten wording" ]] \
+  || fail "expected review comment thread body: $comments_json"
+status_json=$(run_helper "$LOW_REPO" review-comments status --json)
+[[ "$(jq -r '.counts.unresolved' <<<"$status_json")" == "1" ]] \
+  || fail "expected review-comments status to report unresolved comment: $status_json"
+[[ "$(jq -r '.review_units[0].scope' <<<"$status_json")" == "branch" ]] \
+  || fail "expected review-comments status to group by review unit: $status_json"
+suggested_edit_output=$(run_helper "$LOW_REPO" review-comments add \
+  --comments-file "$comments_file" \
+  --head "$(jq -r '.diff.head' <<<"$review_diff_json")" \
+  --file "low-stakes.txt" \
+  --line 1 \
+  --end-line 1 \
+  --type suggested_edit \
+  --selected-text "low stakes" \
+  --suggestion "Use clearer wording")
+expect_contains "$suggested_edit_output" "Recorded review comment: low-stakes.txt:1"
+suggested_comments_json=$(run_helper "$LOW_REPO" review-comments --json)
+[[ "$(jq -r '.comments | map(select(.type == "suggested_edit")) | length' <<<"$suggested_comments_json")" == "1" ]] \
+  || fail "expected suggested_edit review comment: $suggested_comments_json"
+[[ "$(jq -r '.comments[] | select(.type == "suggested_edit") | .selected_text' <<<"$suggested_comments_json")" == "low stakes" ]] \
+  || fail "expected suggested_edit selected text: $suggested_comments_json"
+[[ "$(jq -r '.comments[] | select(.type == "suggested_edit") | .suggestion' <<<"$suggested_comments_json")" == "Use clearer wording" ]] \
+  || fail "expected suggested_edit suggestion: $suggested_comments_json"
+low_common_dir=$(current_common_dir "$LOW_REPO")
+low_lease_path="$low_common_dir/push-gate/leases/refs/heads/mho/low-stakes.json"
+mkdir -p "$(dirname "$low_lease_path")"
+jq '.status = "active" | .updated_at = .created_at' "$low_draft_file" >"$low_lease_path"
+check_comments_json=$(run_helper "$LOW_REPO" check)
+[[ "$(jq -r '.local_review.counts.unresolved' <<<"$check_comments_json")" == "2" ]] \
+  || fail "expected pg check to surface unresolved local review comments: $check_comments_json"
 (
   cd "$LOW_REPO"
   printf 'new head\n' >>low-stakes.txt
@@ -810,7 +927,7 @@ comments_json=$(run_helper "$LOW_REPO" review-comments --json)
 stale_comments_json=$(run_helper "$LOW_REPO" review-comments --json)
 [[ "$(jq -r '.stale' <<<"$stale_comments_json")" == "true" ]] \
   || fail "expected review comments to become stale after HEAD changes: $stale_comments_json"
-[[ "$(jq -r '.counts.stale' <<<"$stale_comments_json")" == "1" ]] \
+[[ "$(jq -r '.counts.stale' <<<"$stale_comments_json")" == "2" ]] \
   || fail "expected stale comment count after HEAD changes: $stale_comments_json"
 echo "ok 32 - review-comments records local comments and marks stale after HEAD changes"
 
@@ -865,6 +982,17 @@ stack_base_json=$(run_helper "$STACK_REPO" review-diff --json --no-tmux)
 unset PG_TEST_PR_LIST_MAP
 [[ "$(jq -r '.diff.base' <<<"$stack_base_json")" == "refs/remotes/origin/mho/parent" ]] \
   || fail "expected stacked branch review to use parent base, not origin/main: $stack_base_json"
+stack_item_json=$(run_helper "$STACK_REPO" review-diff --json --no-tmux \
+  --base "refs/remotes/origin/mho/parent" \
+  --head HEAD \
+  --scope stack_item \
+  --stack demo-stack \
+  --stack-item child-layer)
+[[ "$(jq -r '.diff.review_unit.scope' <<<"$stack_item_json")" == "stack_item" ]] \
+  || fail "expected stack-item review scope: $stack_item_json"
+[[ "$(jq -r '.diff.review_unit.stack_item' <<<"$stack_item_json")" == "child-layer" ]] \
+  || fail "expected stack item id in review metadata: $stack_item_json"
+expect_contains "$(cat "$(jq -r '.reviewer.vimscript' <<<"$stack_item_json")")" "g:pg_review_unit_json"
 echo "ok 34 - review-diff uses stacked parent base when present"
 
 queue_json=$(run_helper "$LOW_REPO" queue --json)
