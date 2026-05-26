@@ -63,14 +63,43 @@ If you find yourself about to type any of those, STOP.
 Local review behavior:
 
 - Normal `pg` approval opens the exact pending-push `base..HEAD` comparison in
-  Neovim Diffview before the approval YAML. Quit Diffview to continue into the
-  editable YAML and final approval prompt.
+  Neovim Diffview before the approval YAML. Press `q`, `Space q r`, or run
+  `:PgReviewDone` to close the whole Diffview review and continue into the
+  editable YAML and final approval prompt. `Space q` is intentionally unmapped
+  so a stray leader key does not close review.
 - `pg review-diff` opens that same comparison directly when you want to inspect
   or debug the diff outside the approval flow. It does not mutate leases or
   approvals.
 - `pg review-comments --json` reads exported local review comments for the
   current head when a review artifact exists. Treat stale comments as context,
   not as approval.
+- `pg review-comments status` summarizes unresolved/resolved/stale local
+  review comments and groups them by branch or stack item when that metadata
+  exists. `pg check` includes the same local-review status so agents cannot
+  miss comments before pushing.
+- Inside Diffview, `Space g c` opens a 99-style local review thread prompt.
+  Write a rough note and save with `:w`; pg asks Codex in fast mode to break
+  down exactly what the reviewer is asking for, even when the note is vague,
+  and records an agent-actionable comment with the interpreted ask, intent,
+  target, requested change, acceptance criteria, ambiguity, and next step.
+  The response panel supports `a` accept/save, `r` reply/refine, `e` edit/save,
+  and `q` cancel; accepted comments include the local thread transcript for
+  agents consuming `pg review-comments --json`. `:PgReviewComment <comment
+  text>` records direct text without the AI clarification step. This is a JSON
+  handoff, not a GitHub-style inline comment thread UI. The review session also
+  maps plain `gc` to the same prompt so Neovim's native comment operator does
+  not try to edit read-only Diffview buffers.
+- Inside Diffview visual mode, `Space 9 v` asks Codex for a suggested edit for
+  the selected lines and records the response as a `suggested_edit` comment.
+  This does not mutate the reviewed buffer; a later agent pass consumes
+  `pg review-comments --json` and makes real edits.
+- Inside Diffview, press `Space r l` to cycle Diffview split layouts such as
+  side-by-side and stacked views. Press `Space r u` to open a unified
+  inline-style `git diff base..head` buffer when you want patch-style review.
+- Inside Diffview, press `Space 9 s` to ask the optional 99/Codex review
+  helper to search the current repo/diff. This is advisory only; durable
+  review handoff goes through `Space g c`, `Space 9 v`, and
+  `pg review-comments --json`.
 - `pg queue` shows prepared briefs and active leases.
 - `pg approve-all -C repo1 -C repo2` sequentially runs normal `pg` approval
   for each repo. It still opens the editor for each approval and is not a
@@ -78,9 +107,10 @@ Local review behavior:
 
 **Step 1** runs a single flow:
 - LLM interviews the commits → fills `what / why / approach / scope / risks`
-- Neovim Diffview opens on the exact pending-push diff; user reviews and quits
+- Neovim Diffview opens on the exact pending-push diff; user reviews and
+  presses `q`, `Space q r`, or runs `:PgReviewDone`
 - vim opens on `/tmp/pg-approve-<repo>-<branch>.yaml`
-- user edits or leaves the LLM-filled values, `:wq`
+- user edits or leaves the human approval memo, `:wq`
 - script renders preview, prompts `Proceed? [y/N]`
 - `y` → lease written at `<repo>/.git/push-gate/leases/refs/heads/<branch>.json`
 - sentinel at `/tmp/pg-approved/<repo>__<branch>` + macOS banner fire
@@ -187,6 +217,15 @@ source of truth.
 
 Trunk approval drafts use this vocabulary:
 
+- Human-facing YAML is split into a top approval memo and a bottom
+  `machine:` contract. The top memo is what the human should read first:
+  summary, review unit, changed-file/stat summaries, local review comment
+  status, and approve/deny guidance. Branch refs, SHAs, anchors, async
+  internals, and materialization details live under `machine:`.
+- For stacks, Diffview review comments are scoped to the stack item being
+  reviewed. Whole-stack text answers "is this direction okay"; item diffs
+  answer "is this layer's patch okay"; pending push answers "what exact bytes
+  move now."
 - `description`: PR-description-style human review text shown first in YAML.
 - `stack_items`: ordered review/push units in the stack.
 - `stack_items[].description`: item-level PR-description-style summary,

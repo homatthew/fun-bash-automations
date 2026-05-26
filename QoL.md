@@ -99,7 +99,7 @@ Press `Ctrl+G` then the second key:
 ### Push-gate (durable push approval)
 | Command | Description |
 |---------|-------------|
-| `pg` | Generate + approve a push lease in current repo (vim on YAML draft) |
+| `pg` | Review exact Diffview diff, then approve a human-first YAML lease draft |
 | `pg -C <path>` | Run pg in another repo without `cd` |
 | `pgr [shortname]` | fzf picker over active-lease repos + `~/repos/*`, then `pg -C` there |
 | `pg leases` | Table of active leases across all repos (SQLite index) |
@@ -107,12 +107,20 @@ Press `Ctrl+G` then the second key:
 | `pg approve-all -C repo1 -C repo2` | Sequentially run normal human approval review for multiple repos |
 | `pg leases --all --json` | Full lease index as JSON |
 | `pg leases reindex` | Scan `~/repos/*/.git/push-gate/leases/*` into the DB |
-| `pg review-diff` | Open the exact approval diff in Neovim Diffview |
+| `pg review-diff` | Open the exact approval diff in Neovim Diffview; `q` or `Space q r` closes the review |
+| `Space g c` | Open AI-assisted local review thread UI that breaks vague notes into agent-actionable asks |
+| `a/r/e/q` | In the review thread panel: accept/save, reply/refine, edit/save, or cancel |
+| `:PgReviewComment TEXT` | Record a direct local cursor-line review comment |
+| `Space r l` | Cycle Diffview split layouts while in the push-gate review |
+| `Space r u` | Open a unified inline-style `git diff base..head` buffer |
+| `Space 9 s` | Ask the optional 99/Codex helper to search the current repo/diff |
+| `Space 9 v` | In visual mode, ask Codex for a suggested edit and store it as a local review comment |
 | `pg review-comments --json` | Export local pre-push review comments for agents |
+| `pg review-comments status` | Show unresolved/resolved/stale local review comment counts |
 | `pg push --assert-flow TEXT` | Guarded push (requires active lease, scope-validated) |
-| `pg check [branch]` | Machine-readable: does current HEAD fit the approved scope? |
+| `pg check [branch]` | Machine-readable: approved scope plus unresolved local review comments |
 
-Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`, `nvim`, `Diffview.nvim`. All installed by dotfiles bootstrap.
+Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
 
 ---
 

@@ -2064,16 +2064,16 @@ pg_write_yaml_draft() {
   local draft="$1" yaml_file="$2" kind="${3:-branch}" context_block="${4:-}"
   {
     if [[ "$kind" == "trunk" ]]; then
-      echo "# pg trunk approval draft - edit description and stack_items[].description."
-      echo "# Machine fields stay below the human review text."
+      echo "# pg trunk approval draft - edit the human review memo first."
+      echo "# Machine contract fields are grouped below the divider."
     else
-      echo "# pg approval draft - edit description first."
-      echo "# Then adjust user_intent, agent_assertion_template, or approved_scope if needed."
+      echo "# pg approval draft - edit the human review memo first."
+      echo "# Machine contract fields are grouped below the divider."
       echo "# Save + quit to continue, :cq or empty file to abort."
     fi
     echo "#"
     [[ -n "$context_block" ]] && printf '%s\n' "$context_block"
-    python3 - "$draft" <<'PY'
+    python3 - "$draft" "$kind" <<'PY'
 import json
 import re
 import sys
@@ -2083,6 +2083,7 @@ WIDTH = 88
 
 with open(sys.argv[1], encoding="utf-8") as fh:
     data = json.load(fh)
+kind = sys.argv[2]
 
 def wrap_line(line):
     line = line.rstrip(" \t\r")
@@ -2123,6 +2124,147 @@ for key in ("user_intent", "agent_assertion_template"):
         data[key] = wrap_text(data[key])
 for item in data.get("stack_items") or []:
     wrap_desc(item.get("description") if isinstance(item, dict) else None)
+
+def compact(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        return value if value else None
+    return value
+
+def description_summary(desc):
+    desc = desc if isinstance(desc, dict) else {}
+    return {
+        "what": compact(desc.get("summary")),
+        "why": compact(desc.get("motivation")),
+        "approach": compact(desc.get("approach")),
+        "scope": compact(desc.get("scope")),
+        "risk": compact(desc.get("risks")),
+        "testing": compact(desc.get("testing")),
+    }
+
+def without_empty(obj):
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            value = without_empty(value)
+            if value is not None:
+                out[key] = value
+        return out
+    if isinstance(obj, list):
+        return [without_empty(v) for v in obj if without_empty(v) is not None]
+    return obj
+
+def review_comment_summary(local_review):
+    local_review = local_review if isinstance(local_review, dict) else {}
+    counts = local_review.get("counts") if isinstance(local_review.get("counts"), dict) else {}
+    return without_empty({
+        "unresolved": counts.get("unresolved", 0),
+        "total": counts.get("total", 0),
+        "stale": local_review.get("stale", False),
+        "command": local_review.get("command") or "pg review-diff",
+    })
+
+def branch_review(data):
+    review_summary = data.get("review_summary") if isinstance(data.get("review_summary"), dict) else {}
+    pending = review_summary.get("pending_push") if isinstance(review_summary.get("pending_push"), dict) else {}
+    full = (
+        review_summary.get("whole_branch_or_pr")
+        if isinstance(review_summary.get("whole_branch_or_pr"), dict)
+        else {}
+    )
+    scope = review_summary.get("semantic_scope") if isinstance(review_summary.get("semantic_scope"), dict) else {}
+    local_review = data.get("local_review") if isinstance(data.get("local_review"), dict) else {}
+    return without_empty({
+        "approving": "pending push",
+        "unit": "pending_push",
+        "pull_request": (
+            f"#{data.get('pr_number')}" if data.get("pr_number") not in (None, "") else None
+        ),
+        "pending_push": pending,
+        "whole_branch_or_pr": full,
+        "semantic_scope": scope,
+        "local_comments": review_comment_summary(local_review),
+    })
+
+def summarize_changed_files(groups):
+    out = []
+    if not isinstance(groups, list):
+        return out
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        paths = group.get("paths") if isinstance(group.get("paths"), list) else []
+        out.append(without_empty({
+            "change": group.get("change"),
+            "count": len(paths),
+            "paths": paths[:12],
+            "truncated": max(0, len(paths) - 12),
+        }))
+    return out
+
+def trunk_review(data):
+    items = []
+    for idx, item in enumerate(data.get("stack_items") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        desc = description_summary(item.get("description"))
+        items.append(without_empty({
+            "id": item.get("id"),
+            "order": idx,
+            "summary": desc.get("what"),
+            "branch_label": item.get("id"),
+            "diff_stats": item.get("shortstat"),
+            "changed_files": summarize_changed_files(item.get("changed_files")),
+        }))
+    async_iteration = data.get("async_iteration") if isinstance(data.get("async_iteration"), dict) else {}
+    return without_empty({
+        "approving": "whole stack, reviewed by stack item",
+        "unit": "whole_stack",
+        "stack": data.get("stack"),
+        "async_iteration": {
+            "enabled": async_iteration.get("enabled", False),
+            "max_pushes": async_iteration.get("max_pushes"),
+            "allow_rewrite": async_iteration.get("allow_rewrite"),
+        },
+        "whole_stack_summary": {
+            "items": len(items),
+            "trunk_tip": (
+                (data.get("materialization") or {}).get("trunk_tip")
+                if isinstance(data.get("materialization"), dict)
+                else None
+            ),
+        },
+        "stack_items": items,
+    })
+
+def human_yaml(data, kind):
+    desc = description_summary(data.get("description"))
+    result = {
+        "decision": {
+            "approve": False,
+            "reason": "",
+        },
+        "summary": desc,
+        "review": trunk_review(data) if kind == "trunk" else branch_review(data),
+        "rules": {
+            "approve_if": [
+                "The summary matches the reviewed diff.",
+                "The changed files and review unit are expected.",
+                "The risk is acceptable for the stated scope.",
+            ],
+            "deny_if": [
+                "The file list or review unit is surprising.",
+                "The diff includes unrelated work.",
+                "Unresolved local review comments should be addressed first.",
+            ],
+        },
+        "machine": data,
+    }
+    return without_empty(result)
+
+data = human_yaml(data, kind)
 
 def quote_key(key):
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(key)):
@@ -2165,6 +2307,9 @@ def emit_value(value, indent=0, key_prefix=None):
             return
         child_indent = indent if key_prefix is None else indent + 2
         for key, child in value.items():
+            if indent == 0 and key_prefix is None and key == "machine":
+                print("")
+                print("# ---- machine contract below; agents/tools use this ----")
             emit_value(child, child_indent, " " * child_indent + quote_key(key) + ": ")
     elif isinstance(value, list):
         if not value:
@@ -2195,6 +2340,87 @@ def emit_value(value, indent=0, key_prefix=None):
 emit_value(data)
 PY
   } >"$yaml_file"
+}
+
+pg_normalize_human_draft_file() {
+  local draft="$1" kind="${2:-branch}" tmp
+  [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/pg-normalized-draft.XXXXXX")
+  if ! python3 - "$draft" "$kind" >"$tmp" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+kind = sys.argv[2]
+
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+
+def clean(value):
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+def first_present(*values):
+    for value in values:
+        value = clean(value)
+        if value not in (None, ""):
+            return value
+    return None
+
+def apply_summary(machine, human):
+    summary = human.get("summary") if isinstance(human.get("summary"), dict) else {}
+    desc = machine.get("description") if isinstance(machine.get("description"), dict) else {}
+    brief = machine.get("brief") if isinstance(machine.get("brief"), dict) else {}
+    desc["summary"] = first_present(summary.get("what"), summary.get("summary"), desc.get("summary"), brief.get("what"))
+    desc["motivation"] = first_present(summary.get("why"), summary.get("motivation"), desc.get("motivation"), brief.get("why"))
+    desc["approach"] = first_present(summary.get("approach"), desc.get("approach"), brief.get("approach"))
+    desc["scope"] = first_present(summary.get("scope"), desc.get("scope"), brief.get("scope"))
+    desc["risks"] = first_present(summary.get("risk"), summary.get("risks"), desc.get("risks"), brief.get("risks"))
+    desc["testing"] = first_present(summary.get("testing"), desc.get("testing"), brief.get("verification"))
+    machine["description"] = desc
+    return machine
+
+def item_human_by_id(human):
+    review = human.get("review") if isinstance(human.get("review"), dict) else {}
+    items = review.get("stack_items") if isinstance(review.get("stack_items"), list) else []
+    by_id = {}
+    for item in items:
+        if isinstance(item, dict) and item.get("id") not in (None, ""):
+            by_id[str(item["id"])] = item
+    return by_id
+
+def apply_stack_item_summaries(machine, human):
+    if kind != "trunk":
+        return machine
+    by_id = item_human_by_id(human)
+    for item in machine.get("stack_items") or []:
+        if not isinstance(item, dict):
+            continue
+        human_item = by_id.get(str(item.get("id")))
+        if not human_item:
+            continue
+        desc = item.get("description") if isinstance(item.get("description"), dict) else {}
+        brief = item.get("brief") if isinstance(item.get("brief"), dict) else {}
+        desc["summary"] = first_present(human_item.get("summary"), desc.get("summary"), brief.get("what"))
+        item["description"] = desc
+    return machine
+
+if isinstance(data, dict) and isinstance(data.get("machine"), dict):
+    machine = data["machine"]
+    machine = apply_summary(machine, data)
+    machine = apply_stack_item_summaries(machine, data)
+    data = machine
+
+json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
+sys.stdout.write("\n")
+PY
+  then
+    rm -f "$tmp"
+    pg_fail "Draft file is not valid JSON: $draft"
+    return 1
+  fi
+  mv "$tmp" "$draft"
 }
 
 pg_cmd_trunk() {
@@ -2313,6 +2539,7 @@ if command -v yq >/dev/null 2>&1; then
   "\$editor" "\$YAML_FILE"
   yq eval '.' "\$YAML_FILE" --output-format=json > "\$DRAFT_FILE.new"
   jq empty "\$DRAFT_FILE.new"
+  "\$HELPER" normalize-draft --draft "\$DRAFT_FILE.new" --kind trunk
   mv "\$DRAFT_FILE.new" "\$DRAFT_FILE"
 else
   "\$editor" "\$DRAFT_FILE"
@@ -2429,6 +2656,23 @@ pg_cmd_yaml_draft() {
   pg_write_yaml_draft "$draft" "$out" "$kind"
 }
 
+pg_cmd_normalize_draft() {
+  local draft="" kind="branch"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) draft="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      *) pg_fail "Unknown normalize-draft option: $1"; return 1 ;;
+    esac
+  done
+  [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  case "$kind" in
+    branch|trunk) ;;
+    *) pg_fail "normalize-draft --kind must be branch or trunk"; return 1 ;;
+  esac
+  pg_normalize_human_draft_file "$draft" "$kind"
+}
+
 pg_cmd_approve_trunk() {
   local draft=""
   local reviewed_in_vscode="false"
@@ -2453,8 +2697,10 @@ pg_cmd_approve_trunk() {
         return 1
       }
       draft="$cleanup_draft"
+      pg_normalize_human_draft_file "$draft" "trunk" || return 1
       ;;
   esac
+  pg_normalize_human_draft_file "$draft" "trunk" || return 1
   normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-trunk-draft.XXXXXX")
   jq '
     def trim_text:
@@ -4872,6 +5118,48 @@ ${file_stats:-#   (none)}
 #
 # end preview
 #"
+    local review_summary_json
+    review_summary_json=$(jq -n \
+      --arg pending_base "$pending_ref" \
+      --arg pending_head "HEAD" \
+      --arg pending_stats "${pending_shortstat:-(no diff)}" \
+      --argjson pending_commits "${pending_count:-0}" \
+      --argjson pending_files "${pending_file_count:-0}" \
+      --arg full_base "$base_ref" \
+      --arg full_head "HEAD" \
+      --arg full_stats "${shortstat:-(no diff)}" \
+      --argjson full_commits "${commit_count:-0}" \
+      --argjson full_files "${file_count:-0}" \
+      --argjson scope "${scope_json:-null}" \
+      '{
+        pending_push: {
+          unit: "pending_push",
+          base: $pending_base,
+          head: $pending_head,
+          commits: $pending_commits,
+          files: $pending_files,
+          stats: $pending_stats
+        },
+        whole_branch_or_pr: {
+          unit: "whole_branch_or_pr",
+          base: $full_base,
+          head: $full_head,
+          commits: $full_commits,
+          files: $full_files,
+          stats: $full_stats
+        },
+        semantic_scope: {
+          unit: "semantic_scope",
+          paths: ($scope.paths // []),
+          subjects: ($scope.subjects // []),
+          max_commits: ($scope.max_commits // null),
+          max_added_lines: ($scope.max_added_lines // null),
+          async_work_package: ($scope.work_package.enabled // false)
+        }
+      }')
+    jq --argjson review_summary "$review_summary_json" \
+      '.review_summary = $review_summary' "$draft_file" >"$draft_file.tmp"
+    mv "$draft_file.tmp" "$draft_file"
   fi
 
   pg_write_yaml_draft "$draft_file" "$yaml_file" "branch" "$context_block"
@@ -4880,16 +5168,18 @@ ${file_stats:-#   (none)}
 #!/bin/bash
 set -euo pipefail
 
-DRAFT_FILE="$draft_file"
-YAML_FILE="$yaml_file"
-HELPER="$script_path"
-ASSUME_YES="$assume_yes"
+DRAFT_FILE=$(pg_shell_quote "$draft_file")
+YAML_FILE=$(pg_shell_quote "$yaml_file")
+HELPER=$(pg_shell_quote "$script_path")
+ASSUME_YES=$(pg_shell_quote "$assume_yes")
 
 # Context block computed at draft-approve time and baked into this
 # script. Shown as comments at the top of the YAML so the user sees
 # exactly what they're approving without having to look it up.
 read -r -d '' CONTEXT_BLOCK <<'CTXEOF' || true
-$context_block
+EOF
+  printf '%s\n' "$context_block" >>"$script_file"
+  cat >>"$script_file" <<EOF
 CTXEOF
 
 REPO_ROOT="\$(jq -r '.repo_root // ""' "\$DRAFT_FILE")"
@@ -4945,6 +5235,12 @@ if true; then
     fi
     if ! jq empty "\$DRAFT_FILE.new" >/dev/null 2>&1; then
       echo "Parsed JSON is not valid — aborting."
+      mv "\$YAML_FILE.bak" "\$YAML_FILE"
+      rm -f "\$DRAFT_FILE.new"
+      exit 1
+    fi
+    if ! "\$HELPER" normalize-draft --draft "\$DRAFT_FILE.new" --kind branch; then
+      echo "Draft normalization failed — restoring previous version, aborting."
       mv "\$YAML_FILE.bak" "\$YAML_FILE"
       rm -f "\$DRAFT_FILE.new"
       exit 1
@@ -5017,6 +5313,7 @@ pg_cmd_approve() {
     esac
   done
   [[ -f "$draft" ]] || pg_fail "Draft file not found: $draft"
+  pg_normalize_human_draft_file "$draft" "branch" || return 1
 
   local normalized_draft
   normalized_draft=$(mktemp "${TMPDIR:-/tmp}/pg-approve-draft.XXXXXX")
@@ -5367,10 +5664,15 @@ pg_cmd_check() {
     changed='[]'; count=0; added=0; subjects='[]'
   fi
 
+  local review_status
+  review_status=$(pg_review_status_for_draft_json "$(pg_branch_display "$branch_ref")" 2>/dev/null \
+    || jq -n '{supported:false, stale:false, source:null, counts:{total:0, unresolved:0, resolved:0, stale:0}, diff:{base:null, head:null}, command:"pg review-diff"}')
+
   echo "$validation" | jq \
     --argjson scope "${scope:-null}" \
     --argjson changed "${changed:-[]}" \
     --argjson subjects "${subjects:-[]}" \
+    --argjson local_review "$review_status" \
     --arg count "$count" \
     --arg added "$added" \
     --arg anchor "$(echo "$lease_json" | jq -r '.approved_anchor // empty')" \
@@ -5386,15 +5688,22 @@ pg_cmd_check() {
         changed_files: $changed,
         subjects: $subjects
       }
+    } + {
+      local_review: $local_review
     }'
 }
 
 pg_review_diff_json() {
-  local branch="${1:-}" explicit_base="${2:-}" explicit_head="${3:-HEAD}"
+  local branch="${1:-}" explicit_base="${2:-}" explicit_head="${3:-HEAD}" review_scope="${4:-branch}" stack_name="${5:-}" stack_item="${6:-}"
   local branch_ref lease_path lease_json full_base_ref base_ref head branch_name
-  local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file validation
+  local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file validation review_key review_label
   branch_ref=$(pg_branch_ref "$branch")
   branch_name=$(pg_branch_display "$branch_ref")
+  case "$review_scope" in
+    branch|"") review_scope="branch"; review_label="pending-push" ;;
+    stack_item) review_label="stack-item" ;;
+    *) pg_fail "Unknown review scope: $review_scope"; return 1 ;;
+  esac
   lease_path=$(pg_lease_path_for_ref "$branch_ref")
   lease_json=""
   [[ -f "$lease_path" ]] && lease_json=$(cat "$lease_path")
@@ -5422,7 +5731,12 @@ pg_review_diff_json() {
   shortstat=$(git diff --shortstat "$base_ref..$head" 2>/dev/null | sed 's/^ *//')
   [[ -n "$shortstat" ]] || shortstat="no diff"
   diff_range="$base_ref..$head"
-  review_dir="$(pg_store_dir)/reviews/$(pg_branch_slug "$branch_name")"
+  review_key="$branch_name"
+  if [[ "$review_scope" == "stack_item" ]]; then
+    [[ -n "$stack_name" && -n "$stack_item" ]] || { pg_fail "stack_item review scope requires --stack and --stack-item"; return 1; }
+    review_key="stack/${stack_name}/${stack_item}"
+  fi
+  review_dir="$(pg_store_dir)/reviews/$(pg_branch_slug "$review_key")"
   comments_file="$review_dir/$head.json"
   stale_comments_file="$review_dir/latest.json"
   jq -n \
@@ -5434,6 +5748,10 @@ pg_review_diff_json() {
     --arg full_base "${full_base_ref:-$base_ref}" \
     --arg head "$head" \
     --arg range "$diff_range" \
+    --arg review_scope "$review_scope" \
+    --arg review_label "$review_label" \
+    --arg stack "$stack_name" \
+    --arg stack_item "$stack_item" \
     --arg shortstat "$shortstat" \
     --argjson commits "$commits" \
     --argjson files "$files" \
@@ -5447,7 +5765,7 @@ pg_review_diff_json() {
       repo_name: $repo_name,
       branch: $branch,
       branch_ref: $branch_ref,
-      label: "pending-push",
+      label: $review_label,
       base: $base,
       head: $head,
       range: $range,
@@ -5456,6 +5774,16 @@ pg_review_diff_json() {
         base: $full_base,
         head: $head,
         range: ($full_base + ".." + $head)
+      },
+      review_unit: {
+        scope: $review_scope,
+        label: $review_label,
+        branch: $branch,
+        branch_ref: $branch_ref,
+        stack: (if $stack == "" then null else $stack end),
+        stack_item: (if $stack_item == "" then null else $stack_item end),
+        base: $base,
+        head: $head
       },
       stats: {
         commits: $commits,
@@ -5494,16 +5822,24 @@ pg_review_command_json() {
     --arg tool "diffview.nvim" \
     --arg command "$shell_cmd" \
     --arg tmux_command "$tmux_cmd" \
-    --arg comments_command ":PgReviewComment <comment text>" \
+    --arg comments_command "Space g c opens AI-assisted review thread UI; a/r/e/q accept/reply/edit/cancel; :PgReviewComment <text> records directly" \
+    --arg exit_command "q, Space q r, or :PgReviewDone" \
+    --arg layout_command "Space r l" \
+    --arg unified_diff_command "Space r u" \
+    --arg ai_review_command "Space 9 s" \
+    --arg suggested_edit_command "visual Space 9 v" \
     --arg vimscript "$script_file" \
     --argjson use_tmux "$use_tmux" \
-    '{tool:$tool, command:$command, tmux_command:(if $tmux_command == "" then null else $tmux_command end), use_tmux:$use_tmux, vimscript:$vimscript, comments_command:$comments_command}'
+    '{tool:$tool, command:$command, tmux_command:(if $tmux_command == "" then null else $tmux_command end), use_tmux:$use_tmux, vimscript:$vimscript, comments_command:$comments_command, exit_command:$exit_command, layout_command:$layout_command, unified_diff_command:$unified_diff_command, ai_review_command:$ai_review_command, suggested_edit_command:$suggested_edit_command}'
 }
 
 pg_write_review_vimscript() {
-  local info="$1" repo head comments_file review_dir script_file helper
+  local info="$1" repo base head branch review_unit comments_file review_dir script_file helper
   repo=$(jq -r '.repo' <<<"$info")
+  base=$(jq -r '.base' <<<"$info")
   head=$(jq -r '.head' <<<"$info")
+  branch=$(jq -r '.branch' <<<"$info")
+  review_unit=$(jq -c '.review_unit' <<<"$info")
   comments_file=$(jq -r '.comments_file' <<<"$info")
   review_dir=$(dirname "$comments_file")
   script_file="$review_dir/review-tools.vim"
@@ -5512,14 +5848,428 @@ pg_write_review_vimscript() {
   cat >"$script_file" <<EOF
 let g:pg_review_repo = $(pg_vim_quote "$repo")
 let g:pg_review_helper = $(pg_vim_quote "$helper")
+let g:pg_review_base = $(pg_vim_quote "$base")
 let g:pg_review_head = $(pg_vim_quote "$head")
+let g:pg_review_branch = $(pg_vim_quote "$branch")
+let g:pg_review_unit_json = $(pg_vim_quote "$review_unit")
 let g:pg_review_comments_file = $(pg_vim_quote "$comments_file")
+
+function! PgReviewAddComment(file, line_number, body, ...) abort
+  if empty(trim(a:body))
+    return
+  endif
+  let l:thread_json = a:0 >= 1 ? a:1 : ''
+  let l:cmd = [
+        \ g:pg_review_helper,
+        \ '-C', g:pg_review_repo,
+        \ 'review-comments', 'add',
+        \ '--comments-file', g:pg_review_comments_file,
+        \ '--branch', g:pg_review_branch,
+        \ '--base', g:pg_review_base,
+        \ '--head', g:pg_review_head,
+        \ '--review-unit-json', g:pg_review_unit_json,
+        \ '--file', a:file,
+        \ '--line', string(a:line_number),
+        \ '--body', a:body
+        \ ]
+  if !empty(l:thread_json)
+    call extend(l:cmd, ['--thread-json', l:thread_json])
+  endif
+  let l:out = system(l:cmd)
+  if v:shell_error
+    echoerr l:out
+  else
+    echo l:out
+  endif
+endfunction
+
+function! PgReviewCodexLastMessage(prompt, effort) abort
+  if !executable('codex')
+    return ''
+  endif
+  let l:tmp = tempname()
+  let l:cmd = [
+        \ 'env',
+        \ 'NOTIFY_SUPPRESS=1',
+        \ 'PG_INTERNAL_CODEX=1',
+        \ 'codex', 'exec',
+        \ '--model', 'gpt-5.5',
+        \ '-c', 'model_reasoning_effort="' . a:effort . '"',
+        \ '--ephemeral',
+        \ '--dangerously-bypass-approvals-and-sandbox',
+        \ '--output-last-message', l:tmp,
+        \ '-'
+        \ ]
+  call system(l:cmd, a:prompt)
+  let l:message = filereadable(l:tmp) ? join(readfile(l:tmp), "\n") : ''
+  call delete(l:tmp)
+  if v:shell_error || empty(trim(l:message))
+    return ''
+  endif
+  return trim(l:message)
+endfunction
+
+function! PgReviewClarifyComment(file, line_number, line_text, body) abort
+  let l:raw = trim(a:body)
+  if empty(l:raw)
+    return ''
+  endif
+  let l:prompt = join([
+        \ 'You are turning a human pre-push review note into an agent-actionable local review comment.',
+        \ 'Your job is to break down exactly what the reviewer is asking for, even when the note is vague, terse, or emotional.',
+        \ 'Use the diff, file, line, and review-unit context to separate the clear request from assumptions and open questions.',
+        \ 'Preserve the reviewer intent without inventing requirements.',
+        \ 'Output only plain text. Keep it concise. Use exactly these headings:',
+        \ 'Human ask:',
+        \ 'Intent:',
+        \ 'Target:',
+        \ 'Requested change:',
+        \ 'Acceptance criteria:',
+        \ 'Ambiguity:',
+        \ 'Suggested next step:',
+        \ '',
+        \ 'Rules:',
+        \ '- Human ask restates the request in concrete implementation terms.',
+        \ '- Acceptance criteria is 1-3 short bullets an agent can verify.',
+        \ '- If the request is vague, infer the likely direction from context, then mark assumptions and missing details under Ambiguity.',
+        \ '- If the request is clear, put "None" under Ambiguity.',
+        \ '- Do not modify files. Do not mention that you are an AI.',
+        \ '',
+        \ 'Repo: ' . g:pg_review_repo,
+        \ 'Review base: ' . g:pg_review_base,
+        \ 'Review head: ' . g:pg_review_head,
+        \ 'Review unit: ' . g:pg_review_unit_json,
+        \ 'File: ' . a:file,
+        \ 'Line: ' . string(a:line_number),
+        \ 'Line text: ' . a:line_text,
+        \ '',
+        \ 'Human note:',
+        \ l:raw
+        \ ], "\n")
+  echo 'Clarifying review comment with Codex fast mode...'
+  let l:out = PgReviewCodexLastMessage(l:prompt, 'low')
+  if empty(l:out)
+    return join(['Human note:', l:raw, '', 'Codex clarification failed; raw note preserved.'], "\n")
+  endif
+  return join(['Human note:', l:raw, '', 'AI clarification (fast):', l:out], "\n")
+endfunction
+
+function! PgReviewSubmitComment(file, line_number, line_text, body) abort
+  call PgReviewAddComment(a:file, a:line_number, PgReviewClarifyComment(a:file, a:line_number, a:line_text, a:body))
+endfunction
+
+function! PgReviewThreadNewMessage(role, body) abort
+  return {'role': a:role, 'body': trim(a:body), 'created_at': strftime('%Y-%m-%dT%H:%M:%SZ', localtime())}
+endfunction
+
+function! PgReviewThreadStart(file, line_number, line_text, body) abort
+  let l:body = trim(a:body)
+  if empty(l:body)
+    return
+  endif
+  let g:pg_review_thread = {
+        \ 'file': a:file,
+        \ 'line': a:line_number,
+        \ 'line_text': a:line_text,
+        \ 'messages': [PgReviewThreadNewMessage('reviewer', l:body)],
+        \ 'latest': ''
+        \ }
+  call PgReviewThreadAskCodex()
+endfunction
+
+function! PgReviewThreadPrompt() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  let l:transcript = []
+  for l:msg in get(l:thread, 'messages', [])
+    call add(l:transcript, get(l:msg, 'role', 'reviewer') . ': ' . get(l:msg, 'body', ''))
+  endfor
+  return join([
+        \ 'You are helping with a local pre-push code review thread.',
+        \ 'Your job is to turn the reviewer conversation into a concrete, agent-actionable review comment.',
+        \ 'The reviewer may be vague, terse, or emotional. Break down exactly what they are asking for without inventing requirements.',
+        \ 'Use the diff, file, line, and review-unit context to separate the clear request from assumptions and open questions.',
+        \ 'Output only plain text. Keep it concise. Use exactly these headings:',
+        \ 'Human ask:',
+        \ 'Intent:',
+        \ 'Target:',
+        \ 'Requested change:',
+        \ 'Acceptance criteria:',
+        \ 'Ambiguity:',
+        \ 'Suggested next step:',
+        \ '',
+        \ 'Rules:',
+        \ '- Human ask restates the request in concrete implementation terms.',
+        \ '- Acceptance criteria is 1-3 short bullets an agent can verify.',
+        \ '- If the request is vague, infer the likely direction from context, then mark assumptions and missing details under Ambiguity.',
+        \ '- If the request is clear, put "None" under Ambiguity.',
+        \ '- Do not modify files. Do not mention that you are an AI.',
+        \ '',
+        \ 'Repo: ' . g:pg_review_repo,
+        \ 'Review base: ' . g:pg_review_base,
+        \ 'Review head: ' . g:pg_review_head,
+        \ 'Review unit: ' . g:pg_review_unit_json,
+        \ 'File: ' . get(l:thread, 'file', ''),
+        \ 'Line: ' . string(get(l:thread, 'line', 0)),
+        \ 'Line text: ' . get(l:thread, 'line_text', ''),
+        \ '',
+        \ 'Thread transcript:',
+        \ join(l:transcript, "\n\n")
+        \ ], "\n")
+endfunction
+
+function! PgReviewThreadAskCodex() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  if empty(l:thread)
+    return
+  endif
+  echo 'Clarifying review thread with Codex fast mode...'
+  let l:out = PgReviewCodexLastMessage(PgReviewThreadPrompt(), 'low')
+  if empty(l:out)
+    let g:pg_review_thread.latest = join([
+          \ 'Codex clarification failed; raw reviewer note preserved.',
+          \ '',
+          \ get(get(l:thread, 'messages', [{}])[-1], 'body', '')
+          \ ], "\n")
+  else
+    let g:pg_review_thread.latest = l:out
+    call add(g:pg_review_thread.messages, PgReviewThreadNewMessage('codex', g:pg_review_thread.latest))
+  endif
+  call PgReviewThreadShow()
+endfunction
+
+function! PgReviewThreadBody() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  let l:turns = []
+  for l:msg in get(l:thread, 'messages', [])
+    call add(l:turns, get(l:msg, 'role', 'reviewer') . ': ' . get(l:msg, 'body', ''))
+  endfor
+  return join([
+        \ 'Review thread final request:',
+        \ get(l:thread, 'latest', ''),
+        \ '',
+        \ 'Thread transcript:',
+        \ join(l:turns, "\n\n")
+        \ ], "\n")
+endfunction
+
+function! PgReviewThreadAccept() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  if empty(l:thread)
+    return
+  endif
+  call PgReviewThreadClosePanel()
+  call PgReviewAddComment(
+        \ get(l:thread, 'file', ''),
+        \ get(l:thread, 'line', 0),
+        \ PgReviewThreadBody(),
+        \ json_encode(get(l:thread, 'messages', [])))
+  unlet! g:pg_review_thread
+endfunction
+
+function! PgReviewThreadReply(body) abort
+  let l:body = trim(a:body)
+  if empty(l:body)
+    call PgReviewThreadShow()
+    return
+  endif
+  call add(g:pg_review_thread.messages, PgReviewThreadNewMessage('reviewer', l:body))
+  call PgReviewThreadAskCodex()
+endfunction
+
+function! PgReviewThreadSaveEdited(body) abort
+  let l:body = trim(a:body)
+  if empty(l:body)
+    call PgReviewThreadShow()
+    return
+  endif
+  let g:pg_review_thread.latest = l:body
+  call add(g:pg_review_thread.messages, PgReviewThreadNewMessage('reviewer_edit', l:body))
+  call PgReviewThreadAccept()
+endfunction
+
+function! PgReviewThreadOpenInput(title, lines, callback) abort
+  if has('nvim')
+    let g:pg_review_input_opened = 0
+    let g:pg_review_input_title = a:title
+    let g:pg_review_input_lines = a:lines
+    let g:pg_review_input_callback = a:callback
+lua <<LUA
+local ok, Window = pcall(require, "99.window")
+if ok and type(Window.capture_input) == "function" then
+  vim.g.pg_review_input_opened = 1
+  local title = vim.g.pg_review_input_title or "Review"
+  local content = vim.g.pg_review_input_lines or { "" }
+  local callback = vim.g.pg_review_input_callback or ""
+  Window.capture_input(title, {
+    keymap = {
+      [":w"] = "submit",
+    },
+    content = content,
+    cb = function(success, response)
+      if not success then
+        vim.fn.PgReviewThreadShow()
+        return
+      end
+      response = vim.trim(response or "")
+      if callback ~= "" then
+        vim.fn[callback](response)
+      end
+    end,
+    on_load = function()
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
+    end,
+  })
+else
+  vim.g.pg_review_input_opened = 0
+end
+LUA
+    if get(g:, 'pg_review_input_opened', 0)
+      return
+    endif
+  endif
+  let l:response = input(a:title . ': ')
+  call call(function(a:callback), [l:response])
+endfunction
+
+function! PgReviewThreadReplyPrompt() abort
+  call PgReviewThreadClosePanel()
+  call PgReviewThreadOpenInput('Review Reply', [''], 'PgReviewThreadReply')
+endfunction
+
+function! PgReviewThreadEditPrompt() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  call PgReviewThreadClosePanel()
+  call PgReviewThreadOpenInput('Edit Final Comment', split(get(l:thread, 'latest', ''), "\n", 1), 'PgReviewThreadSaveEdited')
+endfunction
+
+function! PgReviewThreadClosePanel() abort
+  if has('nvim') && exists('g:pg_review_thread_panel_win')
+lua <<LUA
+local win = tonumber(vim.g.pg_review_thread_panel_win or 0) or 0
+if win ~= 0 and vim.api.nvim_win_is_valid(win) then
+  pcall(vim.api.nvim_win_close, win, true)
+end
+vim.g.pg_review_thread_panel_win = nil
+LUA
+  endif
+endfunction
+
+function! PgReviewThreadShow() abort
+  let l:thread = get(g:, 'pg_review_thread', {})
+  if empty(l:thread)
+    return
+  endif
+  let l:lines = [
+        \ 'Review thread',
+        \ '',
+        \ get(l:thread, 'latest', ''),
+        \ '',
+        \ 'a accept/save  r reply/refine  e edit/save  q cancel'
+        \ ]
+  if has('nvim')
+    call PgReviewThreadClosePanel()
+    let g:pg_review_thread_panel_lines = l:lines
+lua <<LUA
+local lines = vim.g.pg_review_thread_panel_lines or {}
+local width = math.min(100, math.max(50, vim.o.columns - 8))
+local height = math.min(math.max(#lines + 2, 12), math.max(8, vim.o.lines - 6))
+local row = math.max(1, math.floor((vim.o.lines - height) / 2))
+local col = math.max(2, math.floor((vim.o.columns - width) / 2))
+local buf = vim.api.nvim_create_buf(false, true)
+vim.bo[buf].buftype = "nofile"
+vim.bo[buf].bufhidden = "wipe"
+vim.bo[buf].swapfile = false
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+vim.bo[buf].modifiable = false
+local win = vim.api.nvim_open_win(buf, true, {
+  relative = "editor",
+  style = "minimal",
+  border = "rounded",
+  title = " pg review thread ",
+  title_pos = "center",
+  row = row,
+  col = col,
+  width = width,
+  height = height,
+})
+vim.g.pg_review_thread_panel_win = win
+vim.wo[win].wrap = true
+vim.keymap.set("n", "a", function() vim.fn.PgReviewThreadAccept() end, { buffer = buf, nowait = true, silent = true })
+vim.keymap.set("n", "r", function() vim.fn.PgReviewThreadReplyPrompt() end, { buffer = buf, nowait = true, silent = true })
+vim.keymap.set("n", "e", function() vim.fn.PgReviewThreadEditPrompt() end, { buffer = buf, nowait = true, silent = true })
+vim.keymap.set("n", "q", function() vim.fn.PgReviewThreadClosePanel() end, { buffer = buf, nowait = true, silent = true })
+LUA
+    return
+  endif
+  let l:choice = confirm(join(l:lines, "\n"), "&Accept\n&Reply\n&Edit\n&Cancel", 1)
+  if l:choice == 1
+    call PgReviewThreadAccept()
+  elseif l:choice == 2
+    call PgReviewThreadReplyPrompt()
+  elseif l:choice == 3
+    call PgReviewThreadEditPrompt()
+  endif
+endfunction
 
 function! PgReviewComment(...) abort
   if a:0 == 0
     echoerr 'usage: :PgReviewComment <comment text>'
     return
   endif
+  call PgReviewAddComment(PgReviewRelativeFile(), line('.'), join(a:000, ' '))
+endfunction
+
+function! PgReviewCommentPrompt() abort
+  let l:file = PgReviewRelativeFile()
+  let l:line = line('.')
+  if has('nvim')
+    let g:pg_review_prompt_opened = 0
+    let g:pg_review_prompt_file = l:file
+    let g:pg_review_prompt_line = l:line
+    let g:pg_review_prompt_line_text = getline('.')
+lua <<LUA
+local ok, Window = pcall(require, "99.window")
+if ok and type(Window.capture_input) == "function" then
+  vim.g.pg_review_prompt_opened = 1
+  local file = vim.g.pg_review_prompt_file or ""
+  local line = tonumber(vim.g.pg_review_prompt_line or 0) or 0
+  local line_text = vim.g.pg_review_prompt_line_text or ""
+  Window.capture_input("Review Comment", {
+    keymap = {
+      [":w"] = "submit",
+    },
+    content = { "" },
+    cb = function(success, response)
+      if not success then
+        return
+      end
+      response = vim.trim(response or "")
+      if response == "" then
+        return
+      end
+        vim.fn.PgReviewThreadStart(file, line, line_text, response)
+    end,
+    on_load = function()
+      vim.schedule(function()
+        vim.cmd("startinsert")
+      end)
+    end,
+  })
+else
+  vim.g.pg_review_prompt_opened = 0
+end
+LUA
+    if get(g:, 'pg_review_prompt_opened', 0)
+      return
+    endif
+  endif
+  let l:body = input('Review comment: ')
+  call PgReviewThreadStart(l:file, l:line, getline('.'), l:body)
+endfunction
+
+function! PgReviewRelativeFile() abort
   let l:file = expand('%:p')
   if empty(l:file)
     let l:file = expand('%')
@@ -5528,15 +6278,50 @@ function! PgReviewComment(...) abort
   if stridx(l:file, l:prefix) == 0
     let l:file = strpart(l:file, strlen(l:prefix))
   endif
+  return l:file
+endfunction
+
+function! PgReviewVisualRange() abort
+  let l:start = line("'<")
+  let l:end = line("'>")
+  if l:start <= 0 || l:end <= 0
+    let l:start = line('.')
+    let l:end = line('.')
+  endif
+  if l:start > l:end
+    let l:tmp = l:start
+    let l:start = l:end
+    let l:end = l:tmp
+  endif
+  return [l:start, l:end]
+endfunction
+
+function! PgReviewVisualText(start_line, end_line) abort
+  return join(getline(a:start_line, a:end_line), "\n")
+endfunction
+
+function! PgReviewRecordSuggestedEdit(start_line, end_line, selected_text, suggestion) abort
+  if empty(a:suggestion)
+    echoerr 'suggested edit text is required'
+    return
+  endif
+  let l:file = PgReviewRelativeFile()
   let l:cmd = [
         \ g:pg_review_helper,
         \ '-C', g:pg_review_repo,
         \ 'review-comments', 'add',
         \ '--comments-file', g:pg_review_comments_file,
+        \ '--branch', g:pg_review_branch,
+        \ '--base', g:pg_review_base,
         \ '--head', g:pg_review_head,
+        \ '--review-unit-json', g:pg_review_unit_json,
+        \ '--type', 'suggested_edit',
         \ '--file', l:file,
-        \ '--line', string(line('.')),
-        \ '--body', join(a:000, ' ')
+        \ '--line', string(a:start_line),
+        \ '--end-line', string(a:end_line),
+        \ '--selected-text', a:selected_text,
+        \ '--suggestion', a:suggestion,
+        \ '--body', a:suggestion
         \ ]
   let l:out = system(l:cmd)
   if v:shell_error
@@ -5546,28 +6331,118 @@ function! PgReviewComment(...) abort
   endif
 endfunction
 
+function! PgReviewSuggestedEditFromVisual(suggestion) abort
+  let [l:start, l:end] = PgReviewVisualRange()
+  call PgReviewRecordSuggestedEdit(l:start, l:end, PgReviewVisualText(l:start, l:end), a:suggestion)
+endfunction
+
+function! PgReviewCodexSuggestedEditFromVisual() abort
+  if !executable('codex')
+    echoerr 'Space 9 v requires the Codex CLI. Run dotfiles bootstrap or install Codex/99 review dependencies.'
+    return
+  endif
+  let [l:start, l:end] = PgReviewVisualRange()
+  let l:selected = PgReviewVisualText(l:start, l:end)
+  let l:file = PgReviewRelativeFile()
+  let l:prompt = join([
+        \ 'You are reviewing a pending push diff inside Neovim Diffview.',
+        \ 'Return a concrete suggested edit for the selected lines.',
+        \ 'Do not modify files. Do not include markdown fences unless they are part of the replacement.',
+        \ '',
+        \ 'Repo: ' . g:pg_review_repo,
+        \ 'Review base: ' . g:pg_review_base,
+        \ 'Review head: ' . g:pg_review_head,
+        \ 'Review unit: ' . g:pg_review_unit_json,
+        \ 'File: ' . l:file,
+        \ 'Lines: ' . string(l:start) . '-' . string(l:end),
+        \ '',
+        \ 'Selected text:',
+        \ l:selected
+        \ ], "\n")
+  echo 'Asking Codex for a suggested edit...'
+  let l:out = PgReviewCodexLastMessage(l:prompt, 'high')
+  if empty(l:out)
+    echoerr 'Codex returned an empty suggested edit.'
+    return
+  endif
+  call PgReviewRecordSuggestedEdit(l:start, l:end, l:selected, l:out)
+endfunction
+
+function! PgReviewUnifiedDiff() abort
+  let l:range = g:pg_review_base . '..' . g:pg_review_head
+  let l:cmd = [
+        \ 'git',
+        \ '-C', g:pg_review_repo,
+        \ '--no-pager',
+        \ 'diff',
+        \ '--no-ext-diff',
+        \ '--find-renames',
+        \ l:range
+        \ ]
+  let l:lines = systemlist(l:cmd)
+  if v:shell_error
+    echoerr join(l:lines, "\n")
+    return
+  endif
+  botright new
+  setlocal buftype=nofile bufhidden=wipe noswapfile nowrap
+  setlocal filetype=diff
+  call setline(1, ['# pg unified diff: ' . l:range, '# q closes this buffer', ''] + l:lines)
+  setlocal nomodifiable readonly
+  nnoremap <buffer> q :bd!<CR>
+endfunction
+
+function! PgReviewDone() abort
+  silent! DiffviewClose
+  qall
+endfunction
+
 command! -nargs=+ PgReviewComment call PgReviewComment(<f-args>)
+command! -range -nargs=+ PgReviewSuggestedEdit call PgReviewRecordSuggestedEdit(<line1>, <line2>, PgReviewVisualText(<line1>, <line2>), <q-args>)
 command! PgReviewCommentsFile echo g:pg_review_comments_file
-nnoremap <leader>gc :PgReviewComment<Space>
+command! PgReviewDone call PgReviewDone()
+let mapleader = ' '
+
+function! PgReviewInstallMaps() abort
+  nnoremap <buffer><nowait> <Space>gc :call PgReviewCommentPrompt()<CR>
+  nnoremap <buffer><nowait> gc :call PgReviewCommentPrompt()<CR>
+  xnoremap <buffer><nowait> <Space>gc :<C-U>call PgReviewCommentPrompt()<CR>
+  xnoremap <buffer><nowait> gc :<C-U>call PgReviewCommentPrompt()<CR>
+  xnoremap <buffer><nowait> <Space>gv :<C-U>call PgReviewSuggestedEditFromVisual(input('Suggested edit: '))<CR>
+  xnoremap <buffer><nowait> <Space>9v :<C-U>call PgReviewCodexSuggestedEditFromVisual()<CR>
+  nmap <buffer><nowait> <Space>rl g<C-x>
+  nnoremap <buffer><nowait> <Space>ru :call PgReviewUnifiedDiff()<CR>
+  nnoremap <buffer><nowait> q :PgReviewDone<CR>
+  nnoremap <buffer><nowait> <Space>qr :PgReviewDone<CR>
+endfunction
+
+augroup PgReviewMaps
+  autocmd!
+  autocmd BufEnter,WinEnter * call PgReviewInstallMaps()
+augroup END
+call PgReviewInstallMaps()
 EOF
   printf '%s\n' "$script_file"
 }
 
 pg_cmd_review_diff() {
-  local branch="" base="" head="HEAD" format="human" print_command="false" no_tmux="false"
+  local branch="" base="" head="HEAD" format="human" print_command="false" no_tmux="false" review_scope="branch" stack_name="" stack_item=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --branch) branch="$2"; shift 2 ;;
       --base) base="$2"; shift 2 ;;
       --head) head="$2"; shift 2 ;;
+      --scope) review_scope="$2"; shift 2 ;;
+      --stack) stack_name="$2"; shift 2 ;;
+      --stack-item) stack_item="$2"; shift 2 ;;
       --json) format="json"; shift ;;
       --print-command) print_command="true"; shift ;;
       --no-tmux) no_tmux="true"; shift ;;
       *) pg_fail "Unknown review-diff option: $1"; return 1 ;;
     esac
   done
-  local info command_json command tmux_command repo comments_file
-  info=$(pg_review_diff_json "$branch" "$base" "$head") || return 1
+  local info command_json command tmux_command repo comments_file script_file
+  info=$(pg_review_diff_json "$branch" "$base" "$head" "$review_scope" "$stack_name" "$stack_item") || return 1
   command_json=$(pg_review_command_json "$info" "$no_tmux")
   if [[ "$format" == "json" ]]; then
     jq -n --argjson diff "$info" --argjson reviewer "$command_json" '{diff:$diff, reviewer:$reviewer}'
@@ -5578,13 +6453,20 @@ pg_cmd_review_diff() {
     "",
     "Repo: " + .repo,
     "Branch: " + .branch,
-    "Diff: pending-push",
+    "Diff: " + .label,
+    (if (.review_unit.scope // "branch") == "stack_item" then "Stack item: " + (.review_unit.stack // "") + "/" + (.review_unit.stack_item // "") else empty end),
     "Pending-push base: " + .base,
     "Full-review base: " + .full_review.base,
     "Head: " + .head,
     "Stats: " + .stats.shortstat,
     "Comments file: " + .comments_file,
-    "In Diffview: :PgReviewComment <comment text>"
+    "Comment current line: Space g c opens AI-assisted review thread UI",
+    "Review thread actions: a accept/save, r reply/refine, e edit/save, q cancel",
+    "Direct comment: :PgReviewComment <text>",
+    "Cycle split layout: Space r l",
+    "Unified diff buffer: Space r u",
+    "Ask 99/Codex: Space 9 s",
+    "Done reviewing: q, Space q r, or :PgReviewDone"
   ' <<<"$info"
   command=$(jq -r '.command' <<<"$command_json")
   tmux_command=$(jq -r '.tmux_command // ""' <<<"$command_json")
@@ -5608,6 +6490,7 @@ pg_cmd_review_diff() {
   base=$(jq -r '.base' <<<"$info")
   head=$(jq -r '.head' <<<"$info")
   comments_file=$(jq -r '.comments_file' <<<"$info")
+  script_file=$(jq -r '.vimscript' <<<"$command_json")
   mkdir -p "$(dirname "$comments_file")"
   if [[ -n "$tmux_command" ]]; then
     tmux display-popup -E -w 95% -h 90% "$command"
@@ -5618,7 +6501,7 @@ pg_cmd_review_diff() {
       PG_REVIEW_BASE="$base" \
         PG_REVIEW_HEAD="$head" \
         PG_REVIEW_COMMENTS_FILE="$comments_file" \
-        nvim -c "DiffviewOpen $base..$head"
+        nvim -S "$script_file" -c "DiffviewOpen $base..$head"
     )
   fi
 }
@@ -5648,12 +6531,28 @@ pg_review_comments_payload_json() {
       else [] end;
     comments_from($raw)
       | map({
+          type: (.type // (if ((.suggestion // "") | tostring | length) > 0 then "suggested_edit" else "comment" end)),
           file: (.file // .path // .filename // ""),
           line: (.line // .start_line // .original_line // null),
+          start_line: (.start_line // .line // .original_line // null),
           end_line: (.end_line // .line // .start_line // null),
           body: (.body // .comment // .text // .message // ""),
+          suggestion: (.suggestion // null),
+          selected_text: (.selected_text // null),
+          thread: (.thread // null),
           status: (.status // (if (.resolved // false) then "resolved" else "open" end)),
-          severity: (.severity // .level // null)
+          resolved: (.resolved // ((.status // "") == "resolved" or (.status // "") == "closed")),
+          severity: (.severity // .level // null),
+          base: (.base // .review_unit.base // null),
+          head: (.head // .review_unit.head // .review_head // null),
+          review_unit: (.review_unit // {
+            scope: (.scope // "branch"),
+            branch: (.branch // null),
+            stack: (.stack // null),
+            stack_item: (.stack_item // null),
+            base: (.base // null),
+            head: (.head // .review_head // null)
+          })
         })
       | map(select((.body | tostring | length) > 0)) as $comments
     | ([$raw[]? | select(type == "object") | (.head // .commit // .review_head // empty)] | map(select(. != "")) | .[0] // "") as $review_head
@@ -5664,10 +6563,11 @@ pg_review_comments_payload_json() {
         stale:$stale,
         diff:$diff,
         review_head:(if $review_head == "" then null else $review_head end),
-        comments:$comments,
+        comments:($comments | map(. + {stale:$stale})),
         counts:{
           total:($comments | length),
-          unresolved:($comments | map(select((.status // "open") != "resolved" and (.status // "open") != "closed")) | length),
+          unresolved:($comments | map(select((.resolved // false | not) and (.status // "open") != "resolved" and (.status // "open") != "closed")) | length),
+          resolved:($comments | map(select((.resolved // false) or (.status // "open") == "resolved" or (.status // "open") == "closed")) | length),
           stale:(if $stale then ($comments | length) else 0 end)
         }
       }'
@@ -5677,6 +6577,9 @@ pg_cmd_review_comments() {
   local branch="" file="" format="human" mode="list"
   if [[ "${1:-}" == "add" ]]; then
     mode="add"
+    shift
+  elif [[ "${1:-}" == "status" ]]; then
+    mode="status"
     shift
   fi
   if [[ "$mode" == "add" ]]; then
@@ -5694,7 +6597,53 @@ pg_cmd_review_comments() {
   local payload
   payload=$(pg_review_comments_payload_json "$branch" "$file") || return 1
   if [[ "$format" == "json" ]]; then
-    printf '%s\n' "$payload"
+    if [[ "$mode" == "status" ]]; then
+      jq '{
+        supported,
+        source,
+        stale,
+        counts,
+        diff:{base:(.diff.base // null), head:(.diff.head // null)},
+        review_units: (
+          .comments
+          | group_by((.review_unit.scope // "branch") + ":" + (.review_unit.stack // .review_unit.branch // "current") + ":" + (.review_unit.stack_item // ""))
+          | map({
+              key: ((.[0].review_unit.scope // "branch") + ":" + (.[0].review_unit.stack // .[0].review_unit.branch // "current") + ":" + (.[0].review_unit.stack_item // "")),
+              scope: (.[0].review_unit.scope // "branch"),
+              branch: (.[0].review_unit.branch // null),
+              stack: (.[0].review_unit.stack // null),
+              stack_item: (.[0].review_unit.stack_item // null),
+              total: length,
+              unresolved: (map(select((.resolved // false | not) and (.status // "open") != "resolved" and (.status // "open") != "closed")) | length),
+              stale: (map(select(.stale // false)) | length)
+            })
+        )
+      }' <<<"$payload"
+    else
+      printf '%s\n' "$payload"
+    fi
+    return 0
+  fi
+  if [[ "$mode" == "status" ]]; then
+    jq -r '
+      if (.supported | not) then
+        "No local review comments found for current head."
+      else
+        "Local review comment status",
+        "Source: " + .source,
+        (if .stale then "Status: stale for current head" else "Status: current" end),
+        "Unresolved: " + (.counts.unresolved | tostring) + "/" + (.counts.total | tostring),
+        "",
+        (
+          .comments
+          | group_by((.review_unit.scope // "branch") + ":" + (.review_unit.stack // .review_unit.branch // "current") + ":" + (.review_unit.stack_item // ""))
+          | .[]?
+          | "Unit: " + ((.[0].review_unit.scope // "branch") + " " + (.[0].review_unit.stack_item // .[0].review_unit.branch // "current"))
+            + " — " + ((map(select((.resolved // false | not) and (.status // "open") != "resolved" and (.status // "open") != "closed")) | length) | tostring)
+            + "/" + (length | tostring) + " unresolved"
+        )
+      end
+    ' <<<"$payload"
     return 0
   fi
   jq -r '
@@ -5707,32 +6656,70 @@ pg_cmd_review_comments() {
       (if .stale then "Status: stale for current head" else "Status: current" end),
       "Unresolved: " + (.counts.unresolved | tostring) + "/" + (.counts.total | tostring),
       "",
-      (.comments[]? | "- " + .file + ":" + ((.line // "?") | tostring) + " [" + (.status // "open") + "] " + .body)
+      (.comments[]? | "- " + .file + ":" + ((.line // "?") | tostring) + " [" + (.type // "comment") + "/" + (.status // "open") + "] " + .body)
     end
   ' <<<"$payload"
 }
 
 pg_cmd_review_comments_add() {
-  local branch="" comments_file="" review_head="" path="" line="" end_line="" body="" status="open" severity=""
+  local branch="" comments_file="" review_head="" review_base="" review_unit_json="" path="" line="" end_line="" body="" status="open" severity=""
+  local comment_type="comment" selected_text="" suggestion="" thread_json="" scope="branch" stack="" stack_item=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --branch) branch="$2"; shift 2 ;;
       --comments-file) comments_file="$2"; shift 2 ;;
+      --base) review_base="$2"; shift 2 ;;
       --head) review_head="$2"; shift 2 ;;
+      --review-unit-json) review_unit_json="$2"; shift 2 ;;
+      --type) comment_type="$2"; shift 2 ;;
+      --scope) scope="$2"; shift 2 ;;
+      --stack) stack="$2"; shift 2 ;;
+      --stack-item) stack_item="$2"; shift 2 ;;
       --file) path="$2"; shift 2 ;;
       --line) line="$2"; shift 2 ;;
       --end-line) end_line="$2"; shift 2 ;;
       --body) body="$2"; shift 2 ;;
+      --selected-text) selected_text="$2"; shift 2 ;;
+      --suggestion) suggestion="$2"; shift 2 ;;
+      --thread-json) thread_json="$2"; shift 2 ;;
       --status) status="$2"; shift 2 ;;
       --severity) severity="$2"; shift 2 ;;
       *) pg_fail "Unknown review-comments add option: $1"; return 1 ;;
     esac
   done
+  case "$comment_type" in
+    comment|suggested_edit) ;;
+    *) pg_fail "review-comments add --type must be comment or suggested_edit"; return 1 ;;
+  esac
   [[ -n "$path" ]] || { pg_fail "review-comments add requires --file"; return 1; }
   [[ -n "$line" && "$line" =~ ^[0-9]+$ ]] || { pg_fail "review-comments add requires numeric --line"; return 1; }
-  [[ -n "$body" ]] || { pg_fail "review-comments add requires --body"; return 1; }
+  if [[ -z "$body" && -n "$suggestion" ]]; then
+    body="$suggestion"
+  fi
+  [[ -n "$body" ]] || { pg_fail "review-comments add requires --body or --suggestion"; return 1; }
+  if [[ -n "$thread_json" ]]; then
+    jq -e . >/dev/null <<<"$thread_json" || { pg_fail "review-comments add --thread-json must be valid JSON"; return 1; }
+  fi
   if [[ -z "$review_head" ]]; then
     review_head=$(git rev-parse --verify HEAD 2>/dev/null) || { pg_fail "Unable to resolve HEAD"; return 1; }
+  fi
+  if [[ -z "$review_unit_json" || "$review_unit_json" == "null" ]]; then
+    local unit_info
+    unit_info=$(pg_review_diff_json "$branch" "" "$review_head" 2>/dev/null || echo "")
+    if [[ -n "$unit_info" ]]; then
+      review_unit_json=$(jq -c '.review_unit' <<<"$unit_info")
+      [[ -z "$review_base" ]] && review_base=$(jq -r '.base' <<<"$unit_info")
+      [[ -z "$branch" ]] && branch=$(jq -r '.branch' <<<"$unit_info")
+    else
+      review_unit_json=$(jq -cn \
+        --arg scope "$scope" \
+        --arg branch "$branch" \
+        --arg stack "$stack" \
+        --arg stack_item "$stack_item" \
+        --arg base "$review_base" \
+        --arg head "$review_head" \
+        '{scope:$scope, branch:(if $branch == "" then null else $branch end), stack:(if $stack == "" then null else $stack end), stack_item:(if $stack_item == "" then null else $stack_item end), base:(if $base == "" then null else $base end), head:$head}')
+    fi
   fi
   if [[ -z "$comments_file" ]]; then
     local info
@@ -5742,23 +6729,37 @@ pg_cmd_review_comments_add() {
   [[ -n "$end_line" ]] || end_line="$line"
   pg_ensure_parent_dir "$comments_file"
   jq -cn \
+    --arg type "$comment_type" \
     --arg head "$review_head" \
+    --arg base "$review_base" \
     --arg file "$path" \
     --arg line "$line" \
     --arg end_line "$end_line" \
     --arg body "$body" \
+    --arg selected_text "$selected_text" \
+    --arg suggestion "$suggestion" \
+    --arg thread_json "$thread_json" \
     --arg status "$status" \
     --arg severity "$severity" \
+    --argjson review_unit "$review_unit_json" \
     --arg created_at "$(pg_now_utc)" \
     '{
-      schema_version: 1,
+      schema_version: 2,
+      type: $type,
       head: $head,
+      base: (if $base == "" then ($review_unit.base // null) else $base end),
       file: $file,
       line: ($line | tonumber),
+      start_line: ($line | tonumber),
       end_line: ($end_line | tonumber),
       body: $body,
+      selected_text: (if $selected_text == "" then null else $selected_text end),
+      suggestion: (if $suggestion == "" then null else $suggestion end),
+      thread: (if $thread_json == "" then null else ($thread_json | fromjson) end),
       status: $status,
+      resolved: ($status == "resolved" or $status == "closed"),
       severity: (if $severity == "" then null else $severity end),
+      review_unit: $review_unit,
       created_at: $created_at
     }' >>"$comments_file"
   cp "$comments_file" "$(dirname "$comments_file")/latest.json"
@@ -5771,6 +6772,23 @@ pg_review_status_for_draft_json() {
     | jq '{supported, stale:(.stale // false), source:(.source // null), counts, diff:{base:(.diff.base // null), head:(.diff.head // null)}, command:"pg review-diff"}' \
     2>/dev/null \
     || jq -n '{supported:false, stale:false, source:null, counts:{total:0, unresolved:0, stale:0}, diff:{base:null, head:null}, command:"pg review-diff"}'
+}
+
+pg_review_comment_warning() {
+  local branch="${1:-}" status unresolved stale source
+  status=$(pg_review_status_for_draft_json "$branch" 2>/dev/null || jq -n '{supported:false, counts:{unresolved:0, stale:0}}')
+  unresolved=$(jq -r '.counts.unresolved // 0' <<<"$status")
+  stale=$(jq -r '.counts.stale // 0' <<<"$status")
+  source=$(jq -r '.source // ""' <<<"$status")
+  if [[ "$unresolved" =~ ^[0-9]+$ && "$unresolved" -gt 0 ]]; then
+    {
+      printf 'pg review-comments: %s unresolved local review comment(s)' "$unresolved"
+      [[ "$stale" =~ ^[0-9]+$ && "$stale" -gt 0 ]] && printf ' (%s stale)' "$stale"
+      printf '.\n'
+      [[ -n "$source" && "$source" != "null" ]] && printf 'Review comments: %s\n' "$source"
+      printf 'Run: pg review-comments status\n'
+    } >&2
+  fi
 }
 
 pg_cmd_queue() {
@@ -6089,6 +7107,7 @@ pg_cmd_push() {
     return 1
   fi
   [[ "${PG_DEBUG:-0}" == "1" ]] && echo "pg_cmd_push: intent check verdict=$intent_verdict" >&2
+  pg_review_comment_warning "$branch"
 
   pg_write_pending_assertion "$remote" "$branch_ref" "$assert_flow" "$lease_json"
   cleanup_pending() {
@@ -6198,6 +7217,9 @@ pg_main() {
       ;;
     yaml-draft)
       pg_cmd_yaml_draft "$@"
+      ;;
+    normalize-draft)
+      pg_cmd_normalize_draft "$@"
       ;;
     push)
       pg_cmd_push "$@"
@@ -6322,7 +7344,10 @@ Status / inspection:
 Useful inspection:
 
   pg review-diff                   Open exact pending-push diff in Neovim Diffview.
+                                   Space g c starts a local AI review thread.
   pg review-comments [--json]      Print exported local pre-push review comments.
+  pg review-comments status [--json]
+                                   Show unresolved/resolved/stale review comment counts.
   pg check [branch]         Is HEAD within the approved scope? (JSON)
   pg check-trunk --stack S  Is the materialized stack trunk still approved? (JSON)
   pg check-intent [branch]  LLM: does the diff match user_intent? (JSON)
