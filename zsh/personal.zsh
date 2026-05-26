@@ -455,25 +455,114 @@ pgr() {
     push-gate -C "$pick" "${@:2}"
 }
 
-# ssh-gate: Allow Claude to SSH into a specific host for 12 hours.
+_mho_format_epoch_local() {
+    local epoch="$1"
+    local formatted
+    formatted="$(date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)" && {
+        echo "$formatted"
+        return 0
+    }
+    formatted="$(date -d "@$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)" && {
+        echo "$formatted"
+        return 0
+    }
+    echo "$epoch"
+}
+
+# ssh-gate: Allow agents to SSH into specific hosts for a bounded lease.
 # Creates a lease file with the host and expiry timestamp.
-# Usage: ssh-gate <instance-id-or-host>
+# Usage:
+#   ssh-gate [--hours N] <instance-id-or-host>...
+#   ssh-gate [--hours N] --file nodes.txt
 ssh-gate() {
-    if [ -z "$1" ]; then
-        echo "Usage: ssh-gate <instance-id-or-host>"
+    local hours=12
+    local hosts=()
+    local host_file=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --hours)
+                if [ -z "$2" ]; then
+                    echo "Usage: ssh-gate [--hours N] <instance-id-or-host>..."
+                    return 1
+                fi
+                hours="$2"
+                shift 2
+                ;;
+            --file)
+                if [ -z "$2" ]; then
+                    echo "Usage: ssh-gate [--hours N] --file nodes.txt"
+                    return 1
+                fi
+                host_file="$2"
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: ssh-gate [--hours N] <instance-id-or-host>..."
+                echo "       ssh-gate [--hours N] --file nodes.txt"
+                return 0
+                ;;
+            --)
+                shift
+                hosts+=("$@")
+                break
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: ssh-gate [--hours N] <instance-id-or-host>..."
+                return 1
+                ;;
+            *)
+                hosts+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if ! [[ "$hours" =~ '^[0-9]+$' ]] || [ "$hours" -lt 1 ]; then
+        echo "--hours must be a positive integer"
         return 1
     fi
-    local lease_file="/tmp/.claude-ssh-leases"
-    local expiry=$(( $(date +%s) + 43200 ))  # 12 hours
-    # Remove any existing lease for this host, then add new one
-    [ -f "$lease_file" ] && grep -v "^$1 " "$lease_file" > "$lease_file.tmp" && mv "$lease_file.tmp" "$lease_file"
-    echo "$1 $expiry" >> "$lease_file"
-    echo "SSH lease granted for $1 (expires $(date -r $expiry '+%Y-%m-%d %H:%M'))"
+
+    if [ -n "$host_file" ]; then
+        if [ ! -f "$host_file" ]; then
+            echo "Host file not found: $host_file"
+            return 1
+        fi
+        while IFS= read -r host; do
+            host="${host%%#*}"
+            host="$(printf '%s\n' "$host" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            [ -n "$host" ] && hosts+=("$host")
+        done < "$host_file"
+    fi
+
+    if [ "${#hosts[@]}" -eq 0 ]; then
+        echo "Usage: ssh-gate [--hours N] <instance-id-or-host>..."
+        echo "       ssh-gate [--hours N] --file nodes.txt"
+        return 1
+    fi
+
+    local lease_file="${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
+    local expiry=$(( $(date +%s) + hours * 3600 ))
+    local tmp_file="${lease_file}.tmp"
+    local hosts_tmp="${lease_file}.hosts.$$"
+    mkdir -p "$(dirname "$lease_file")"
+    cp /dev/null "$tmp_file"
+    printf '%s\n' "${hosts[@]}" > "$hosts_tmp"
+    if [ -f "$lease_file" ]; then
+        awk 'NR == FNR { skip[$1] = 1; next } !($1 in skip)' "$hosts_tmp" "$lease_file" > "$tmp_file"
+    fi
+    rm -f "$hosts_tmp"
+    mv "$tmp_file" "$lease_file"
+    for host in "${hosts[@]}"; do
+        echo "$host $expiry" >> "$lease_file"
+        echo "SSH lease granted for $host (expires $(_mho_format_epoch_local "$expiry"))"
+    done
 }
 
 # ssh-gate-list: Show active SSH leases.
 ssh-gate-list() {
-    local lease_file="/tmp/.claude-ssh-leases"
+    local lease_file="${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
     if [ ! -f "$lease_file" ]; then
         echo "No active SSH leases"
         return
@@ -495,9 +584,107 @@ ssh-gate-revoke() {
         echo "Usage: ssh-gate-revoke <instance-id-or-host>"
         return 1
     fi
-    local lease_file="/tmp/.claude-ssh-leases"
-    [ -f "$lease_file" ] && grep -v "^$1 " "$lease_file" > "$lease_file.tmp" && mv "$lease_file.tmp" "$lease_file"
+    local lease_file="${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
+    [ -f "$lease_file" ] && awk -v host="$1" '$1 != host' "$lease_file" > "$lease_file.tmp" && mv "$lease_file.tmp" "$lease_file"
     echo "SSH lease revoked for $1"
+}
+
+# ssh-command-gate: Allow one exact sensitive SSH remote command for a host.
+# Host still needs a normal ssh-gate lease. This grants the command hash only.
+# Usage: ssh-command-gate [--hours N] <host> -- <remote-command...>
+ssh-command-gate() {
+    local hours=12
+    local host=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --hours)
+                if [ -z "$2" ]; then
+                    echo "Usage: ssh-command-gate [--hours N] <host> -- <remote-command...>"
+                    return 1
+                fi
+                hours="$2"
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: ssh-command-gate [--hours N] <host> -- <remote-command...>"
+                return 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                echo "Usage: ssh-command-gate [--hours N] <host> -- <remote-command...>"
+                return 1
+                ;;
+            *)
+                if [ -z "$host" ]; then
+                    host="$1"
+                    shift
+                else
+                    break
+                fi
+                ;;
+        esac
+    done
+
+    if ! [[ "$hours" =~ '^[0-9]+$' ]] || [ "$hours" -lt 1 ]; then
+        echo "--hours must be a positive integer"
+        return 1
+    fi
+    if [ -z "$host" ] || [ "$#" -eq 0 ]; then
+        echo "Usage: ssh-command-gate [--hours N] <host> -- <remote-command...>"
+        return 1
+    fi
+
+    local lease_file="${SSH_COMMAND_LEASE_FILE:-/tmp/.claude-ssh-command-leases}"
+    local expiry=$(( $(date +%s) + hours * 3600 ))
+    local canonical_and_hash
+    canonical_and_hash=$(python3 - "$@" <<'PY'
+import hashlib
+import shlex
+import sys
+
+joined = " ".join(sys.argv[1:])
+tokens = shlex.split(joined, posix=True)
+canonical = " ".join(shlex.quote(token) for token in tokens)
+digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+print(f"{digest}\t{canonical}")
+PY
+    ) || return 1
+    local command_hash="${canonical_and_hash%%$'\t'*}"
+    local canonical_command="${canonical_and_hash#*$'\t'}"
+    local tmp_file="${lease_file}.tmp"
+    mkdir -p "$(dirname "$lease_file")"
+    if [ -f "$lease_file" ]; then
+        awk -F '\t' -v hash="$command_hash" -v host="$host" '!(($1 == hash) && ($3 == host))' "$lease_file" > "$tmp_file"
+    else
+        cp /dev/null "$tmp_file"
+    fi
+    mv "$tmp_file" "$lease_file"
+    printf '%s\t%s\t%s\t%s\n' "$command_hash" "$expiry" "$host" "$canonical_command" >> "$lease_file"
+    echo "SSH command lease granted for $host (expires $(_mho_format_epoch_local "$expiry"))"
+    echo "  $canonical_command"
+}
+
+# ssh-command-gate-list: Show active exact-command SSH leases.
+ssh-command-gate-list() {
+    local lease_file="${SSH_COMMAND_LEASE_FILE:-/tmp/.claude-ssh-command-leases}"
+    if [ ! -f "$lease_file" ]; then
+        echo "No active SSH command leases"
+        return
+    fi
+    local now=$(date +%s)
+    echo "Active SSH command leases:"
+    while IFS=$'\t' read -r hash expiry host command; do
+        if [ "$expiry" -gt "$now" ] 2>/dev/null; then
+            local remaining=$(( (expiry - now) / 3600 ))
+            local mins=$(( ((expiry - now) % 3600) / 60 ))
+            echo "  $host  (${remaining}h ${mins}m remaining)  $command"
+        fi
+    done < "$lease_file"
 }
 
 alias claude-safe='/opt/nflx/bin/claude'
