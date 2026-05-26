@@ -161,6 +161,22 @@ lease, and never bypass the failure with an override env.
 - Block pipe-to-shell (`curl | bash`, `wget | sh`)
 - Block `eval`
 - Require explicit SSH lease / approval model for remote access
+- Block interactive SSH from agents; SSH must include an explicit remote
+  command.
+- Block obvious dangerous remote SSH commands such as `sudo`, `su`,
+  `systemctl`, `service`, process kills, broad file mutation commands,
+  `cqlsh`, and shell/code wrappers such as `bash -c` or `python -c`.
+- Block mutating Cassandra `nodetool` verbs over SSH, including `repair`,
+  `compact`, `cleanup`, `scrub`, `drain`, topology changes, `disable*`, and
+  `set*`.
+- Require an exact command lease, in addition to the host lease, for
+  production-sensitive diagnostics such as `nodetool toppartitions`, `jcmd`,
+  `jstack`, `jmap`, remote `tar`, large remote `tail`, full Cassandra log
+  grep, or `find` under `/mnt/data/cassandra`. Use `ssh-command-gate <host>
+  -- <remote-command...>` to grant one exact command hash.
+- Allow lower-risk read-only diagnostics such as `tpstats`,
+  `proxyhistograms`, `tablestats`, `tablehistograms`, `gcstats`, and
+  `compactionstats` with only a valid SSH host lease.
 
 ### Package publishing
 

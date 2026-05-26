@@ -126,6 +126,10 @@ ssh_lease_file() {
   printf '%s\n' "${SSH_LEASE_FILE:-/tmp/.claude-ssh-leases}"
 }
 
+ssh_command_lease_file() {
+  printf '%s\n' "${SSH_COMMAND_LEASE_FILE:-/tmp/.claude-ssh-command-leases}"
+}
+
 extract_ssh_target() {
   python3 - "$COMMAND" <<'PY'
 import re
@@ -275,6 +279,238 @@ sys.exit(1)
 PY
 }
 
+ssh_remote_safety_violation() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+value_options = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
+    "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
+
+danger_commands = {
+    "sudo", "su", "systemctl", "service", "kill", "pkill", "killall",
+    "rm", "mv", "chmod", "chown", "cqlsh",
+}
+remote_wrappers = {
+    ("bash", "-c"), ("sh", "-c"), ("zsh", "-c"),
+    ("python", "-c"), ("python3", "-c"), ("perl", "-e"),
+    ("ruby", "-e"), ("node", "-e"),
+}
+nodetool_deny = {
+    "repair", "compact", "garbagecollect", "cleanup", "scrub",
+    "upgradesstables", "refresh", "rebuild", "rebuild_index",
+    "decommission", "removenode", "assassinate", "move", "bootstrap",
+    "drain", "disablebinary", "disablegossip", "disablehandoff",
+    "stopdaemon", "truncatehints",
+}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def remote_tokens(segment):
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "--":
+            idx += 2
+            return segment[idx:]
+        if token in value_options:
+            idx += 2
+            continue
+        if token.startswith("-o") and len(token) > 2:
+            idx += 1
+            continue
+        if token.startswith("-F") and len(token) > 2:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return segment[idx + 1 :]
+    return []
+
+def flatten_remote(remote):
+    if not remote:
+        return []
+    joined = " ".join(remote)
+    try:
+        return shlex.split(joined, posix=True)
+    except ValueError:
+        return remote
+
+def base(token):
+    return token.rsplit("/", 1)[-1].lower()
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "ssh":
+        continue
+
+    remote = remote_tokens(segment)
+    if not remote:
+        print("interactive ssh without an explicit remote command")
+        sys.exit(0)
+
+    lowered = [base(token) for token in flatten_remote(remote)]
+    for idx, token in enumerate(lowered):
+        if token in danger_commands:
+            print(f"dangerous remote ssh command: {token}")
+            sys.exit(0)
+        if idx + 1 < len(lowered) and (token, lowered[idx + 1]) in remote_wrappers:
+            print(f"remote ssh shell/code wrapper is not allowed: {token} {lowered[idx + 1]}")
+            sys.exit(0)
+        if token == "nodetool" and idx + 1 < len(lowered):
+            verb = lowered[idx + 1]
+            if verb in nodetool_deny or verb.startswith(("disable", "set")):
+                print(f"dangerous remote cassandra nodetool command: nodetool {verb}")
+                sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+ssh_sensitive_remote_command() {
+  python3 - "$COMMAND" <<'PY'
+import hashlib
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+value_options = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
+    "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def remote_tokens(segment):
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "--":
+            idx += 2
+            return segment[idx:]
+        if token in value_options:
+            idx += 2
+            continue
+        if token.startswith("-o") and len(token) > 2:
+            idx += 1
+            continue
+        if token.startswith("-F") and len(token) > 2:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return segment[idx + 1 :]
+    return []
+
+def flatten_remote(remote):
+    if not remote:
+        return []
+    joined = " ".join(remote)
+    try:
+        return shlex.split(joined, posix=True)
+    except ValueError:
+        return remote
+
+def base(token):
+    return token.rsplit("/", 1)[-1].lower()
+
+def canonical(tokens):
+    return " ".join(shlex.quote(token) for token in tokens)
+
+def sensitive_reason(tokens):
+    lowered = [base(token) for token in tokens]
+    for idx, token in enumerate(lowered):
+        if token == "nodetool" and idx + 1 < len(lowered) and lowered[idx + 1] == "toppartitions":
+            return "nodetool toppartitions"
+        if token in {"jcmd", "jstack", "jmap"}:
+            return token
+        if token == "tar":
+            return "remote tar"
+        if token == "find" and any(part.startswith("/mnt/data/cassandra") for part in tokens[idx + 1 :]):
+            return "find under /mnt/data/cassandra"
+        if token == "tail":
+            for part in tokens[idx + 1 :]:
+                if part.isdigit() and int(part) > 5000:
+                    return "large remote tail"
+                if part.startswith("-") and part[1:].isdigit() and int(part[1:]) > 5000:
+                    return "large remote tail"
+        if token == "grep" and any(part.startswith("/mnt/data/cassandra/logs/") for part in tokens[idx + 1 :]):
+            return "grep over cassandra logs"
+    return ""
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "ssh":
+        continue
+    remote = flatten_remote(remote_tokens(segment))
+    if not remote:
+        continue
+    reason = sensitive_reason(remote)
+    if reason:
+        remote_text = canonical(remote)
+        digest = hashlib.sha256(remote_text.encode("utf-8")).hexdigest()
+        print(f"{digest}\t{reason}\t{remote_text}")
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 ssh_uses_unsafe_host_key_options() {
   python3 - "$COMMAND" <<'PY'
 import re
@@ -350,6 +586,19 @@ has_valid_ssh_lease() {
   now=$(date +%s)
   while IFS=' ' read -r host expiry; do
     if [ "$host" = "$target" ] && [ "$expiry" -gt "$now" ] 2>/dev/null; then
+      return 0
+    fi
+  done < "$lease_file"
+  return 1
+}
+
+has_valid_ssh_command_lease() {
+  local target="$1" command_hash="$2" lease_file now hash expiry host rest
+  lease_file=$(ssh_command_lease_file)
+  [ -f "$lease_file" ] && [ -n "$target" ] && [ -n "$command_hash" ] || return 1
+  now=$(date +%s)
+  while IFS=$'\t' read -r hash expiry host rest; do
+    if [ "$hash" = "$command_hash" ] && [ "$host" = "$target" ] && [ "$expiry" -gt "$now" ] 2>/dev/null; then
       return 0
     fi
   done < "$lease_file"
@@ -805,20 +1054,32 @@ check_remote_exec() {
     deny "Blocked: pipe-to-shell (curl|sh) is not allowed."
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)eval\s' &&
     deny "Blocked: eval is not allowed."
+  local ssh_remote_violation
+  ssh_remote_violation=$(ssh_remote_safety_violation 2>/dev/null || true)
+  if [ -n "$ssh_remote_violation" ]; then
+    deny "Blocked: unsafe SSH remote command ($ssh_remote_violation). Use a bounded read-only command or an authorized probe script."
+  fi
   local unsafe_ssh_options
   unsafe_ssh_options=$(ssh_uses_unsafe_host_key_options 2>/dev/null || true)
   if [ -n "$unsafe_ssh_options" ]; then
     deny "Blocked: unsafe SSH host-key option ($unsafe_ssh_options). Use StrictHostKeyChecking=accept-new instead."
   fi
   # Check SSH lease file for approved hosts (12-hour leases via ssh-gate)
-  local SSH_TARGET
+  local SSH_TARGET sensitive_ssh hash reason remote_command
   SSH_TARGET=$(extract_ssh_target)
   if [ -n "$SSH_TARGET" ] || has_ssh_invocation; then
-    if has_valid_ssh_lease "$SSH_TARGET"; then
-      return
-    fi
     if [ -n "$SSH_TARGET" ]; then
-      deny "Blocked: ssh to '$SSH_TARGET' requires a lease. Ask the user to run: ssh-gate $SSH_TARGET"
+      if ! has_valid_ssh_lease "$SSH_TARGET"; then
+        deny "Blocked: ssh to '$SSH_TARGET' requires a lease. Ask the user to run: ssh-gate $SSH_TARGET"
+      fi
+      sensitive_ssh=$(ssh_sensitive_remote_command 2>/dev/null || true)
+      if [ -n "$sensitive_ssh" ]; then
+        IFS=$'\t' read -r hash reason remote_command <<< "$sensitive_ssh"
+        if ! has_valid_ssh_command_lease "$SSH_TARGET" "$hash"; then
+          deny "Blocked: sensitive SSH remote command ($reason) requires an exact command lease for '$SSH_TARGET'. Ask the user to run: ssh-command-gate $SSH_TARGET -- $remote_command"
+        fi
+      fi
+      return
     fi
     deny "Blocked: ssh requires a lease. Ask the user to run: ssh-gate <host>"
   fi

@@ -24,6 +24,7 @@ plugin behavior.
 
 - `ndex-slack-private`
   - Slack MCP from the ODS first-team Claude plugin.
+  - Operational workflow lives in `llm/skills/slack-context/SKILL.md`.
   - Codex uses `bin/launch-slack-mcp` so Keychain Slack token behavior matches
     local agent setup (`slack-user-token` or `claude-slack-user-token`).
   - Prefer `slack-user-token` as the canonical Keychain service name;
