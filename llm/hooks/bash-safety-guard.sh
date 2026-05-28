@@ -187,15 +187,15 @@ for token in args:
     if skip_next:
         skip_next = False
         continue
+    if token in {"--all", "--mirror", "--tags"}:
+        print("__BROAD__")
+        sys.exit(0)
     if token == "--":
         continue
-        if token in {"--all", "--mirror", "--tags"}:
-            print("__BROAD__")
-            sys.exit(0)
-        if token.startswith("-"):
-            if token in {"--repo"}:
-                skip_next = True
-            continue
+    if token.startswith("-"):
+        if token in {"--repo"}:
+            skip_next = True
+        continue
     if remote is None:
         remote = token
     else:
