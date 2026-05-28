@@ -12,11 +12,15 @@ description: "Current push-gate approval policy. ALWAYS invoke BEFORE suggesting
 ## Step 1 — Re-read live policy before anything else
 
 Before suggesting *any* `pg` command, read these files fresh. They are the
-source of truth; memory or prior outputs may be stale.
+source of truth; memory or prior outputs may be stale. Use the projected file
+for the current harness plus the repo source file when available.
 
-- `~/.claude/AGENTS.md` — Core Rules, especially the "Never bypass push-gate"
-  bullet. This is a symlink to `~/repos/fun-bash-automations/llm/AGENTS.md`,
-  so it is always current on disk.
+- `~/.claude/AGENTS.md`, `~/.codex/AGENTS.md`, or
+  `~/repos/fun-bash-automations/llm/AGENTS.md` — Core Rules, especially
+  delivery vs scratch push policy and the "Never bypass push-gate" bullet.
+- `~/.claude/agent-push-policy.json`, `~/.codex/agent-push-policy.json`, or
+  `~/repos/fun-bash-automations/llm/agent-push-policy.json` — machine-readable
+  scratch branch prefixes, remotes, cadence, and direct-push exceptions.
 - `~/repos/fun-bash-automations/llm/command-guard-policy.md` — detailed
   bypass prohibition wording.
 - `~/repos/fun-bash-automations/llm/hooks/push-gate.sh` — authoritative

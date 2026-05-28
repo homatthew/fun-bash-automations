@@ -143,46 +143,72 @@ direct_push_delivery_branch_for_repo() {
 
 git_push_target_branch_from_command() {
   python3 - "$COMMAND" <<'PY'
+import re
 import shlex
 import sys
 
 command = sys.argv[1]
 try:
-    tokens = shlex.split(command)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
 except ValueError:
     sys.exit(0)
 
-git_idx = None
-for i, token in enumerate(tokens):
-    if token == "git":
-        git_idx = i
-        break
-if git_idx is None:
-    sys.exit(0)
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
-idx = git_idx + 1
-while idx < len(tokens):
-    token = tokens[idx]
-    if token == "push":
-        break
-    if token in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"} and idx + 1 < len(tokens):
-        idx += 2
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
         continue
-    if token.startswith("--git-dir=") or token.startswith("--work-tree=") or token.startswith("--namespace=") or token.startswith("--exec-path=") or token.startswith("--super-prefix="):
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
         idx += 1
-        continue
-    if token in {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}:
-        idx += 1
-        continue
+    return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree=") or token.startswith("--namespace=") or token.startswith("--exec-path=") or token.startswith("--super-prefix="):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+push_args = [args for args in (push_args_for_segment(segment) for segment in segments) if args is not None]
+if not push_args:
+    sys.exit(0)
+if len(push_args) > 1:
+    print("__MULTI_PUSH__")
     sys.exit(0)
 
-if idx >= len(tokens) or tokens[idx] != "push":
-    sys.exit(0)
-
-args = tokens[idx + 1:]
+args = push_args[0]
 remote = None
 refspecs = []
 skip_next = False
+is_delete = False
 for token in args:
     if skip_next:
         skip_next = False
@@ -190,6 +216,9 @@ for token in args:
     if token in {"--all", "--mirror", "--tags"}:
         print("__BROAD__")
         sys.exit(0)
+    if token in {"--delete", "-d"}:
+        is_delete = True
+        continue
     if token == "--":
         continue
     if token.startswith("-"):
@@ -204,6 +233,9 @@ for token in args:
 if len(refspecs) > 1:
     print("__MULTI__")
     sys.exit(0)
+if is_delete:
+    print("__DELETE__")
+    sys.exit(0)
 if not refspecs:
     sys.exit(0)
 
@@ -211,7 +243,10 @@ refspec = refspecs[0]
 if refspec.startswith("+"):
     refspec = refspec[1:]
 if ":" in refspec:
-    _source, target = refspec.split(":", 1)
+    source, target = refspec.split(":", 1)
+    if source == "" and target:
+        print("__DELETE__")
+        sys.exit(0)
 else:
     target = refspec
 if target.startswith("refs/heads/"):
@@ -226,7 +261,7 @@ direct_push_exception_matches() {
   delivery_branch=$(direct_push_delivery_branch_for_repo "$repo")
   [[ -n "$delivery_branch" ]] || return 1
   target_branch=$(git_push_target_branch_from_command)
-  [[ "$target_branch" == "__MULTI__" || "$target_branch" == "__BROAD__" ]] && return 1
+  [[ "$target_branch" == "__MULTI__" || "$target_branch" == "__MULTI_PUSH__" || "$target_branch" == "__BROAD__" || "$target_branch" == "__DELETE__" ]] && return 1
   if [[ -n "$target_branch" ]]; then
     [[ "$target_branch" == "$delivery_branch" ]]
     return
@@ -936,12 +971,24 @@ PY
 }
 
 has_scratch_pr_open_command() {
-  local policy_path current_branch prefixes_json
+  local policy_path current_branch prefixes_json policy_valid
   policy_path=$(agent_push_policy_path)
-  [[ -f "$policy_path" ]] || return 1
-  prefixes_json=$(jq -c '.scratch_branches.prefixes // []' "$policy_path" 2>/dev/null) || return 1
+  policy_valid=true
+  if [[ -f "$policy_path" ]]; then
+    prefixes_json=$(jq -c '
+      if (.scratch_branches.enabled == true)
+        and (.scratch_branches.default_for_agents == true)
+        and (.scratch_branches.prefixes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+      then .scratch_branches.prefixes
+      else error("invalid scratch branch policy")
+      end
+    ' "$policy_path" 2>/dev/null) || policy_valid=false
+  else
+    policy_valid=false
+  fi
+  [[ "$policy_valid" == "true" ]] || prefixes_json='[]'
   current_branch=$(git_context branch --show-current 2>/dev/null || true)
-  python3 - "$COMMAND" "$current_branch" "$prefixes_json" <<'PY'
+  python3 - "$COMMAND" "$current_branch" "$prefixes_json" "$policy_valid" <<'PY'
 import json
 import re
 import shlex
@@ -950,6 +997,7 @@ import sys
 command = sys.argv[1]
 current_branch = sys.argv[2]
 prefixes = json.loads(sys.argv[3])
+policy_valid = sys.argv[4] == "true"
 
 try:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -1042,6 +1090,8 @@ for segment in segments:
     args = strip_gh_global_args(segment[1:])
     if len(args) < 2 or args[0] != "pr" or args[1] not in {"create", "ready", "reopen"}:
         continue
+    if not policy_valid:
+        sys.exit(0)
     pr_args = args[2:]
     head = option_value(pr_args, {"--head", "-H"})
     base = option_value(pr_args, {"--base", "-B"})
