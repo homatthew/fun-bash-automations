@@ -365,6 +365,19 @@ agent-refresh() {
 alias llm-refresh=agent-refresh
 alias llm-deploy=fba-deploy
 
+# push-config-upstream: human-only direct push for Matthew's owner-maintained
+# config repos. Agents must not run this helper.
+push-config-upstream() {
+    local helper="$FBA_ROOT/bin/push-config-upstream"
+    if [ ! -x "$helper" ]; then
+        echo "push-config-upstream missing: $helper"
+        return 1
+    fi
+    "$helper" "$@"
+}
+alias push-fba-dotfiles=push-config-upstream
+alias push-llm-config=push-config-upstream
+
 # stack-latest: human-shell alias for agent-stack-refresh. Agents should run
 # ~/.local/bin/agent-stack-refresh directly because aliases may not be loaded.
 if [ -x "$FBA_ROOT/bin/agent-stack-refresh" ]; then

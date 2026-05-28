@@ -3499,6 +3499,49 @@ pg_default_base_ref_snapshot() {
   echo ""
 }
 
+pg_full_review_base_ref_snapshot() {
+  local pr_base stacked_parent upstream remote branch
+  if pg_should_prefer_upstream_base_over_pr; then
+    upstream=$(pg_upstream_ref)
+    if [[ -n "$upstream" ]]; then
+      pg_normalize_upstream_ref "$upstream"
+      return 0
+    fi
+  fi
+  pr_base=$(pg_pr_base_ref_snapshot 2>/dev/null || true)
+  if [[ -n "$pr_base" ]]; then
+    pg_fetch_remote_tracking_ref "$pr_base" >/dev/null 2>&1 || true
+    if git merge-base --is-ancestor "$pr_base" HEAD 2>/dev/null; then
+      echo "$pr_base"
+      return 0
+    fi
+    git merge-base "$pr_base" HEAD 2>/dev/null || echo "$pr_base"
+    return 0
+  fi
+  stacked_parent=$(pg_stacked_parent_base_ref 2>/dev/null || true)
+  if [[ -n "$stacked_parent" ]]; then
+    echo "$stacked_parent"
+    return 0
+  fi
+  upstream=$(pg_upstream_ref 2>/dev/null || true)
+  [[ -n "$upstream" ]] && upstream=$(pg_normalize_upstream_ref "$upstream")
+  if [[ -n "$upstream" ]] && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
+    echo "$upstream"
+    return 0
+  fi
+  branch=$(pg_branch_name 2>/dev/null || true)
+  remote=$(pg_default_remote "$branch" 2>/dev/null || true)
+  if [[ -n "$remote" ]] && git show-ref --verify --quiet "refs/remotes/$remote/main"; then
+    echo "refs/remotes/$remote/main"
+    return 0
+  fi
+  if [[ -n "$remote" ]] && git show-ref --verify --quiet "refs/remotes/$remote/master"; then
+    echo "refs/remotes/$remote/master"
+    return 0
+  fi
+  echo ""
+}
+
 pg_pending_push_base_ref() {
   local branch_name="$1" fallback="$2" remote
   remote=$(pg_default_remote "$branch_name" 2>/dev/null || true)
@@ -5362,13 +5405,17 @@ EOF
   # frames what they're actually approving without making them type it.
   local context_block=""
   if [[ -n "$base_ref" ]] && git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
-    local commit_log file_stats shortstat commit_count file_count pending_ref pending_shortstat pending_count pending_file_count
-    commit_count=$(git rev-list --count "$base_ref"..HEAD 2>/dev/null || echo 0)
-    file_count=$(git diff --name-only "$base_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')
-    commit_log=$(git log "$base_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20 || true)
-    file_stats=$(git diff --stat "$base_ref"..HEAD 2>/dev/null \
+    local commit_log file_stats shortstat commit_count file_count pending_ref pending_shortstat pending_count pending_file_count full_review_ref
+    full_review_ref=$(pg_full_review_base_ref_snapshot 2>/dev/null || true)
+    if [[ -z "$full_review_ref" ]] || ! git rev-parse --verify "$full_review_ref" >/dev/null 2>&1; then
+      full_review_ref="$base_ref"
+    fi
+    commit_count=$(git rev-list --count "$full_review_ref"..HEAD 2>/dev/null || echo 0)
+    file_count=$(git diff --name-only "$full_review_ref"..HEAD 2>/dev/null | wc -l | tr -d ' ')
+    commit_log=$(git log "$full_review_ref"..HEAD --reverse --format='#   %h %s' 2>/dev/null | head -20 || true)
+    file_stats=$(git diff --stat "$full_review_ref"..HEAD 2>/dev/null \
       | sed '$d' | sed 's/^/#   /' | head -15 || true)
-    shortstat=$(git diff --shortstat "$base_ref"..HEAD 2>/dev/null | sed 's/^ *//')
+    shortstat=$(git diff --shortstat "$full_review_ref"..HEAD 2>/dev/null | sed 's/^ *//')
     pending_ref="$base_ref"
     if git show-ref --verify --quiet "refs/remotes/$remote/$branch_name"; then
       pending_ref="refs/remotes/$remote/$branch_name"
@@ -5384,7 +5431,7 @@ EOF
 #   files: ${pending_file_count:-0}
 #   stats: ${pending_shortstat:-(no diff)}
 #
-# full branch/PR diff: $base_ref..HEAD
+# full branch/PR diff: $full_review_ref..HEAD
 #   commits: $commit_count
 #   files: ${file_count:-0}
 #   stats: ${shortstat:-(no diff)}
@@ -5409,7 +5456,7 @@ ${file_stats:-#   (none)}
       --arg pending_stats "${pending_shortstat:-(no diff)}" \
       --argjson pending_commits "${pending_count:-0}" \
       --argjson pending_files "${pending_file_count:-0}" \
-      --arg full_base "$base_ref" \
+      --arg full_base "$full_review_ref" \
       --arg full_head "HEAD" \
       --arg full_stats "${shortstat:-(no diff)}" \
       --argjson full_commits "${commit_count:-0}" \
@@ -5467,19 +5514,46 @@ EOF
 CTXEOF
 
 REPO_ROOT="\$(jq -r '.repo_root // ""' "\$DRAFT_FILE")"
-REVIEW_BASE="\$(jq -r '.local_review.diff.base // .approved_scope.base_ref // .base_ref_snapshot // ""' "\$DRAFT_FILE")"
+PENDING_REVIEW_BASE="\$(jq -r '.local_review.diff.base // .review_summary.pending_push.base // .approved_scope.base_ref // .base_ref_snapshot // ""' "\$DRAFT_FILE")"
+FULL_REVIEW_BASE="\$(jq -r '.local_review.diff.full_review.base // .review_summary.whole_branch_or_pr.base // .approved_scope.base_ref // .base_ref_snapshot // ""' "\$DRAFT_FILE")"
 REVIEW_HEAD="\$(jq -r '.local_review.diff.head // .approved_anchor // "HEAD"' "\$DRAFT_FILE")"
+PENDING_REVIEW_STATS="\$(jq -r '.review_summary.pending_push.stats // .local_review.diff.stats.shortstat // "(no diff)"' "\$DRAFT_FILE")"
+FULL_REVIEW_STATS="\$(jq -r '.review_summary.whole_branch_or_pr.stats // "(no diff)"' "\$DRAFT_FILE")"
+PENDING_REVIEW_COMMITS="\$(jq -r '.review_summary.pending_push.commits // .local_review.diff.stats.commits // 0' "\$DRAFT_FILE")"
+FULL_REVIEW_COMMITS="\$(jq -r '.review_summary.whole_branch_or_pr.commits // 0' "\$DRAFT_FILE")"
+PENDING_REVIEW_FILES="\$(jq -r '.review_summary.pending_push.files // .local_review.diff.stats.files // 0' "\$DRAFT_FILE")"
+FULL_REVIEW_FILES="\$(jq -r '.review_summary.whole_branch_or_pr.files // 0' "\$DRAFT_FILE")"
 
-# Paved path review: normal pg approval opens the exact pending-push diff first,
+# Paved path review: normal pg approval asks which review surface to open,
 # then continues into the editable approval YAML. review-diff remains available
-# as a direct command, but users should not need a separate manual step.
+# as a direct debugging command, but users should not need a separate manual step.
 if [[ -t 0 || -t 1 ]]; then
-  if [[ -z "\$REPO_ROOT" || "\$REPO_ROOT" == "null" || -z "\$REVIEW_BASE" || "\$REVIEW_BASE" == "null" || -z "\$REVIEW_HEAD" || "\$REVIEW_HEAD" == "null" ]]; then
+  if [[ -z "\$REPO_ROOT" || "\$REPO_ROOT" == "null" || -z "\$PENDING_REVIEW_BASE" || "\$PENDING_REVIEW_BASE" == "null" || -z "\$REVIEW_HEAD" || "\$REVIEW_HEAD" == "null" ]]; then
     echo "Unable to resolve review diff from approval draft — aborting."
     exit 1
   fi
-  echo "Opening Diffview review for pending push."
-  "\$HELPER" -C "\$REPO_ROOT" review-diff --base "\$REVIEW_BASE" --head "\$REVIEW_HEAD"
+  REVIEW_SCOPE_CHOICE=""
+  echo "Choose Diffview review scope:"
+  echo "  1) pending push: \$PENDING_REVIEW_BASE..\$REVIEW_HEAD"
+  echo "     commits: \$PENDING_REVIEW_COMMITS  files: \$PENDING_REVIEW_FILES  stats: \$PENDING_REVIEW_STATS"
+  echo "  2) full branch/PR: \$FULL_REVIEW_BASE..\$REVIEW_HEAD"
+  echo "     commits: \$FULL_REVIEW_COMMITS  files: \$FULL_REVIEW_FILES  stats: \$FULL_REVIEW_STATS"
+  echo "  s) skip Diffview and continue to approval YAML"
+  printf "Review scope [1/2/s, default 1]: "
+  read -r REVIEW_SCOPE_CHOICE || REVIEW_SCOPE_CHOICE=""
+  case "\$REVIEW_SCOPE_CHOICE" in
+    2|f|F|full)
+      echo "Opening Diffview review for full branch/PR."
+      "\$HELPER" -C "\$REPO_ROOT" review-diff --scope full --base "\$FULL_REVIEW_BASE" --head "\$REVIEW_HEAD"
+      ;;
+    s|S|skip)
+      echo "Skipping Diffview review by human choice."
+      ;;
+    *)
+      echo "Opening Diffview review for pending push."
+      "\$HELPER" -C "\$REPO_ROOT" review-diff --base "\$PENDING_REVIEW_BASE" --head "\$REVIEW_HEAD"
+      ;;
+  esac
 else
   echo "Skipping Diffview review: non-interactive shell."
 fi
@@ -5981,10 +6055,12 @@ pg_review_diff_json() {
   local branch="${1:-}" explicit_base="${2:-}" explicit_head="${3:-HEAD}" review_scope="${4:-branch}" stack_name="${5:-}" stack_item="${6:-}"
   local branch_ref lease_path lease_json full_base_ref base_ref head branch_name
   local commits files added deleted shortstat diff_range review_dir comments_file stale_comments_file validation review_key review_label
+  local full_review_key full_review_dir full_comments_file full_stale_comments_file
   branch_ref=$(pg_branch_ref "$branch")
   branch_name=$(pg_branch_display "$branch_ref")
   case "$review_scope" in
     branch|"") review_scope="branch"; review_label="pending-push" ;;
+    full) review_label="full-review" ;;
     stack_item) review_label="stack-item" ;;
     *) pg_fail "Unknown review scope: $review_scope"; return 1 ;;
   esac
@@ -5992,12 +6068,23 @@ pg_review_diff_json() {
   lease_json=""
   [[ -f "$lease_path" ]] && lease_json=$(cat "$lease_path")
   if [[ -n "$lease_json" ]]; then
-    full_base_ref=$(jq -r '.approved_scope.base_ref // .base_ref_snapshot // empty' <<<"$lease_json")
+    full_base_ref=$(jq -r '.review_summary.whole_branch_or_pr.base // empty' <<<"$lease_json")
+    if [[ -z "$full_base_ref" || "$full_base_ref" == "null" ]]; then
+      full_base_ref=$(pg_full_review_base_ref_snapshot)
+    fi
+    if [[ -z "$full_base_ref" || "$full_base_ref" == "null" ]]; then
+      full_base_ref=$(jq -r '.approved_scope.base_ref // .base_ref_snapshot // empty' <<<"$lease_json")
+    fi
   else
-    full_base_ref=$(pg_default_base_ref_snapshot)
+    full_base_ref=$(pg_full_review_base_ref_snapshot)
+    if [[ -z "$full_base_ref" ]]; then
+      full_base_ref=$(pg_default_base_ref_snapshot)
+    fi
   fi
   if [[ -n "$explicit_base" ]]; then
     base_ref="$explicit_base"
+  elif [[ "$review_scope" == "full" ]]; then
+    base_ref="$full_base_ref"
   else
     base_ref=$(pg_pending_push_base_ref "$branch_name" "$full_base_ref")
   fi
@@ -6019,10 +6106,16 @@ pg_review_diff_json() {
   if [[ "$review_scope" == "stack_item" ]]; then
     [[ -n "$stack_name" && -n "$stack_item" ]] || { pg_fail "stack_item review scope requires --stack and --stack-item"; return 1; }
     review_key="stack/${stack_name}/${stack_item}"
+  elif [[ "$review_scope" == "full" ]]; then
+    review_key="$branch_name/full-review"
   fi
   review_dir="$(pg_store_dir)/reviews/$(pg_branch_slug "$review_key")"
   comments_file="$review_dir/$head.json"
   stale_comments_file="$review_dir/latest.json"
+  full_review_key="$branch_name/full-review"
+  full_review_dir="$(pg_store_dir)/reviews/$(pg_branch_slug "$full_review_key")"
+  full_comments_file="$full_review_dir/$head.json"
+  full_stale_comments_file="$full_review_dir/latest.json"
   jq -n \
     --arg repo "$(pg_repo_root)" \
     --arg repo_name "$(pg_repo_name)" \
@@ -6043,6 +6136,8 @@ pg_review_diff_json() {
     --argjson deleted "$deleted" \
     --arg comments_file "$comments_file" \
     --arg stale_comments_file "$stale_comments_file" \
+    --arg full_comments_file "$full_comments_file" \
+    --arg full_stale_comments_file "$full_stale_comments_file" \
     --argjson validation "$validation" \
     '{
       repo: $repo,
@@ -6057,7 +6152,19 @@ pg_review_diff_json() {
         label: "full-review",
         base: $full_base,
         head: $head,
-        range: ($full_base + ".." + $head)
+        range: ($full_base + ".." + $head),
+        comments_file: $full_comments_file,
+        latest_comments_file: $full_stale_comments_file,
+        review_unit: {
+          scope: "full",
+          label: "full-review",
+          branch: $branch,
+          branch_ref: $branch_ref,
+          stack: null,
+          stack_item: null,
+          base: $full_base,
+          head: $head
+        }
       },
       review_unit: {
         scope: $review_scope,
@@ -7053,7 +7160,7 @@ pg_cmd_review_comments_add() {
 pg_review_status_for_draft_json() {
   local branch="${1:-}"
   pg_review_comments_payload_json "$branch" "" 2>/dev/null \
-    | jq '{supported, stale:(.stale // false), source:(.source // null), counts, diff:{base:(.diff.base // null), head:(.diff.head // null)}, command:"pg review-diff"}' \
+    | jq '{supported, stale:(.stale // false), source:(.source // null), counts, diff:{base:(.diff.base // null), head:(.diff.head // null), full_review:(.diff.full_review // null), stats:(.diff.stats // null)}, command:"pg review-diff"}' \
     2>/dev/null \
     || jq -n '{supported:false, stale:false, source:null, counts:{total:0, unresolved:0, stale:0}, diff:{base:null, head:null}, command:"pg review-diff"}'
 }
