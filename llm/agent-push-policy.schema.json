@@ -3,7 +3,7 @@
   "$id": "https://github.com/homatthew/fun-bash-automations/llm/agent-push-policy.schema.json",
   "title": "Agent Push Policy",
   "type": "object",
-  "required": ["version", "scratch_branches", "delivery_branches"],
+  "required": ["version", "scratch_branches", "delivery_branches", "direct_push_exceptions"],
   "additionalProperties": false,
   "properties": {
     "version": {
@@ -49,10 +49,10 @@
         },
         "requires_push_gate": { "type": "boolean", "const": false },
         "requires_user_opt_in": { "type": "boolean", "const": false },
-        "must_not_have_open_pr": { "type": "boolean" },
-        "must_not_be_pr_base": { "type": "boolean" },
-        "allow_force_with_lease": { "type": "boolean" },
-        "allow_delete": { "type": "boolean" }
+        "must_not_have_open_pr": { "type": "boolean", "const": true },
+        "must_not_be_pr_base": { "type": "boolean", "const": true },
+        "allow_force_with_lease": { "type": "boolean", "const": false },
+        "allow_delete": { "type": "boolean", "const": false }
       }
     },
     "delivery_branches": {
@@ -63,6 +63,27 @@
         "requires_push_gate": { "type": "boolean", "const": true },
         "pr_eligible": { "type": "boolean", "const": true },
         "notes": { "type": "string" }
+      }
+    },
+    "direct_push_exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "repo",
+          "delivery_branch",
+          "requires_explicit_user_ask",
+          "requires_push_gate",
+          "disallow_pr_to_main"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "repo": { "type": "string", "minLength": 1 },
+          "delivery_branch": { "type": "string", "minLength": 1 },
+          "requires_explicit_user_ask": { "type": "boolean", "const": true },
+          "requires_push_gate": { "type": "boolean", "const": false },
+          "disallow_pr_to_main": { "type": "boolean", "const": true }
+        }
       }
     }
   }

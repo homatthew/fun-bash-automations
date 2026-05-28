@@ -19,6 +19,8 @@ canonical instruction entrypoint.
   agents should push directly with normal `git push` to `mh-netflix`.
 - Do not run `pg prepare`, ask the user to run `pg`, or use `pg push` for this
   repository.
+- That delivery push rule does not apply to configured non-delivery scratch
+  branches; see `llm/AGENTS.md` and `llm/agent-push-policy.json`.
 - Do not create, reopen, or mark ready PRs from `mh-netflix` to `main`;
   `mh-netflix` is the delivery branch.
 

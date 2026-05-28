@@ -8,18 +8,20 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
-GUARD_WORKDIR=$(echo "$INPUT" | jq -r '.tool_input.workdir // .tool_input.cwd // .cwd // empty')
-if [[ -z "$GUARD_WORKDIR" || "$GUARD_WORKDIR" == "null" ]]; then
-  GUARD_WORKDIR=$(python3 - "$COMMAND" <<'PY'
+INPUT_WORKDIR=$(echo "$INPUT" | jq -r '.tool_input.workdir // .tool_input.cwd // .cwd // empty')
+GUARD_WORKDIR=$(python3 - "$COMMAND" "$INPUT_WORKDIR" <<'PY'
+import os
 import shlex
 import sys
 
 command = sys.argv[1]
+input_workdir = "" if sys.argv[2] == "null" else sys.argv[2]
 try:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     tokens = list(lexer)
 except ValueError:
+    print(input_workdir)
     sys.exit(0)
 
 segments = []
@@ -34,7 +36,17 @@ for token in tokens:
 if current:
     segments.append(current)
 
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and "=" in segment[idx] and not segment[idx].startswith("-"):
+        name = segment[idx].split("=", 1)[0]
+        if not name.replace("_", "a").isalnum() or name[:1].isdigit():
+            break
+        idx += 1
+    return segment[idx:]
+
 for segment in segments:
+    segment = strip_env_assignments(segment)
     if not segment or segment[0] != "git":
         continue
     idx = 1
@@ -47,13 +59,19 @@ for segment in segments:
             continue
         if token == "push":
             if workdir:
-                print(workdir)
+                if os.path.isabs(workdir):
+                    print(workdir)
+                elif input_workdir:
+                    print(os.path.normpath(os.path.join(input_workdir, workdir)))
+                else:
+                    print(workdir)
+            else:
+                print(input_workdir)
             sys.exit(0)
         idx += 1
-sys.exit(0)
+print(input_workdir)
 PY
-  )
-fi
+)
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # Do NOT source push-gate.sh here — a syntax error in that file would take
 # down the Bash tool entirely. Call it as a subprocess below (guard-check)
@@ -107,17 +125,126 @@ is_git_push_command() {
   echo "$COMMAND" | grep -qE '(^|[;&|][[:space:]]*)git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+push([[:space:]]|$)'
 }
 
+agent_push_policy_path() {
+  printf '%s\n' "${PG_AGENT_PUSH_POLICY:-$SCRIPT_DIR/../agent-push-policy.json}"
+}
+
+direct_push_delivery_branch_for_repo() {
+  local repo="$1" policy_path
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 1
+  jq -r --arg repo "$repo" '
+    (.direct_push_exceptions // [])
+    | map(select(.repo == $repo))
+    | first
+    | .delivery_branch // empty
+  ' "$policy_path" 2>/dev/null
+}
+
+git_push_target_branch_from_command() {
+  python3 - "$COMMAND" <<'PY'
+import shlex
+import sys
+
+command = sys.argv[1]
+try:
+    tokens = shlex.split(command)
+except ValueError:
+    sys.exit(0)
+
+git_idx = None
+for i, token in enumerate(tokens):
+    if token == "git":
+        git_idx = i
+        break
+if git_idx is None:
+    sys.exit(0)
+
+idx = git_idx + 1
+while idx < len(tokens):
+    token = tokens[idx]
+    if token == "push":
+        break
+    if token in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"} and idx + 1 < len(tokens):
+        idx += 2
+        continue
+    if token.startswith("--git-dir=") or token.startswith("--work-tree=") or token.startswith("--namespace=") or token.startswith("--exec-path=") or token.startswith("--super-prefix="):
+        idx += 1
+        continue
+    if token in {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}:
+        idx += 1
+        continue
+    sys.exit(0)
+
+if idx >= len(tokens) or tokens[idx] != "push":
+    sys.exit(0)
+
+args = tokens[idx + 1:]
+remote = None
+refspecs = []
+skip_next = False
+for token in args:
+    if skip_next:
+        skip_next = False
+        continue
+    if token == "--":
+        continue
+        if token in {"--all", "--mirror", "--tags"}:
+            print("__BROAD__")
+            sys.exit(0)
+        if token.startswith("-"):
+            if token in {"--repo"}:
+                skip_next = True
+            continue
+    if remote is None:
+        remote = token
+    else:
+        refspecs.append(token)
+
+if len(refspecs) > 1:
+    print("__MULTI__")
+    sys.exit(0)
+if not refspecs:
+    sys.exit(0)
+
+refspec = refspecs[0]
+if refspec.startswith("+"):
+    refspec = refspec[1:]
+if ":" in refspec:
+    _source, target = refspec.split(":", 1)
+else:
+    target = refspec
+if target.startswith("refs/heads/"):
+    target = target[len("refs/heads/"):]
+if target and target != "HEAD":
+    print(target)
+PY
+}
+
+direct_push_exception_matches() {
+  local repo="$1" delivery_branch branch target_branch
+  delivery_branch=$(direct_push_delivery_branch_for_repo "$repo")
+  [[ -n "$delivery_branch" ]] || return 1
+  target_branch=$(git_push_target_branch_from_command)
+  [[ "$target_branch" == "__MULTI__" || "$target_branch" == "__BROAD__" ]] && return 1
+  if [[ -n "$target_branch" ]]; then
+    [[ "$target_branch" == "$delivery_branch" ]]
+    return
+  fi
+  branch=$(git_context branch --show-current 2>/dev/null || true)
+  [[ "$branch" == "$delivery_branch" ]]
+}
+
 is_direct_delivery_push() {
   is_git_push_command || return 1
   if is_dotfiles_repo; then
-    return 0
+    direct_push_exception_matches "dotfiles"
+    return $?
   fi
   if is_fun_bash_automations_repo; then
     echo "$COMMAND" | grep -qE '(^|[[:space:]:/])(main|master)([[:space:]]|$)|HEAD:(main|master)|refs/heads/(main|master)' && return 1
-    local branch
-    branch=$(git_context branch --show-current 2>/dev/null || true)
-    [[ "$branch" == "mh-netflix" || "$COMMAND" == *"mh-netflix"* ]]
-    return
+    direct_push_exception_matches "fun-bash-automations"
+    return $?
   fi
   return 1
 }
@@ -808,6 +935,129 @@ sys.exit(1)
 PY
 }
 
+has_scratch_pr_open_command() {
+  local policy_path current_branch prefixes_json
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 1
+  prefixes_json=$(jq -c '.scratch_branches.prefixes // []' "$policy_path" 2>/dev/null) || return 1
+  current_branch=$(git_context branch --show-current 2>/dev/null || true)
+  python3 - "$COMMAND" "$current_branch" "$prefixes_json" <<'PY'
+import json
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+current_branch = sys.argv[2]
+prefixes = json.loads(sys.argv[3])
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def strip_gh_global_args(args):
+    out = []
+    idx = 0
+    value_opts = {"-R", "--repo", "--hostname"}
+    while idx < len(args):
+        token = args[idx]
+        if token in value_opts and idx + 1 < len(args):
+            idx += 2
+            continue
+        if token.startswith("--repo=") or token.startswith("--hostname="):
+            idx += 1
+            continue
+        out.append(token)
+        idx += 1
+    return out
+
+def option_value(args, names):
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token in names and idx + 1 < len(args):
+            return args[idx + 1]
+        for name in names:
+            if token.startswith(name + "="):
+                return token.split("=", 1)[1]
+        idx += 1
+    return None
+
+def positional_args(args):
+    out = []
+    idx = 0
+    value_opts = {"--head", "-H", "--base", "-B", "--title", "-t", "--body", "-b", "--body-file", "-F", "--assignee", "-a", "--reviewer", "-r", "--label", "-l", "--milestone", "-m", "--project", "-p", "--template", "-T"}
+    flag_opts = {"--draft", "--fill", "--fill-first", "--fill-verbose", "--web", "--recover", "--no-maintainer-edit", "--remove-source-branch"}
+    while idx < len(args):
+        token = args[idx]
+        if token == "--":
+            out.extend(args[idx + 1:])
+            break
+        if token in value_opts and idx + 1 < len(args):
+            idx += 2
+            continue
+        if any(token.startswith(name + "=") for name in value_opts if name.startswith("--")):
+            idx += 1
+            continue
+        if token in flag_opts or token.startswith("-"):
+            idx += 1
+            continue
+        out.append(token)
+        idx += 1
+    return out
+
+def is_scratch_ref(ref):
+    if not ref:
+        return False
+    candidates = [ref]
+    if ":" in ref:
+        candidates.append(ref.rsplit(":", 1)[1])
+    return any(candidate.startswith(prefix) for candidate in candidates for prefix in prefixes)
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "gh":
+        continue
+    args = strip_gh_global_args(segment[1:])
+    if len(args) < 2 or args[0] != "pr" or args[1] not in {"create", "ready", "reopen"}:
+        continue
+    pr_args = args[2:]
+    head = option_value(pr_args, {"--head", "-H"})
+    base = option_value(pr_args, {"--base", "-B"})
+    if is_scratch_ref(head) or is_scratch_ref(base):
+        sys.exit(0)
+    if args[1] in {"ready", "reopen"}:
+        for arg in positional_args(pr_args):
+            if is_scratch_ref(arg):
+                sys.exit(0)
+    if head is None and is_scratch_ref(current_branch):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 is_gh_api_gist_create() {
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*gh\s+api([[:space:]]|$)' || return 1
   echo "$COMMAND" | grep -qE "(^|[[:space:]\"'])/?gists([[:space:]\"']|$)" || return 1
@@ -874,7 +1124,11 @@ check_push_guard() {
   if is_direct_delivery_push; then
     return
   fi
-  result=$(bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
+  if [[ -n "$GUARD_WORKDIR" && -d "$GUARD_WORKDIR" ]]; then
+    result=$(cd "$GUARD_WORKDIR" && bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
+  else
+    result=$(bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
+  fi
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$result" ]; then
     # push-gate itself failed — allow the command through (fail-open) so
@@ -1134,6 +1388,12 @@ check_fba_pr_safety() {
   deny "Blocked: fun-bash-automations uses mh-netflix as the delivery branch. Do not create, reopen, or mark ready PRs from mh-netflix to main."
 }
 
+# --- 10bb. Scratch PR Safety ---
+check_scratch_pr_safety() {
+  has_scratch_pr_open_command || return
+  deny "Blocked: scratch branches are not PR-eligible. Promote the commits to a delivery branch and use push-gate."
+}
+
 # --- 10c. GitHub Gist Host Safety ---
 check_gh_gist_host_safety() {
   is_gh_api_gist_create || return
@@ -1189,6 +1449,7 @@ check_package_publish
 check_gh_destructive
 check_gh_host_safety
 check_fba_pr_safety
+check_scratch_pr_safety
 check_gh_gist_host_safety
 check_gh_gist_filename_safety
 check_process_kill

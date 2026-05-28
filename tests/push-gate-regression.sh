@@ -39,6 +39,10 @@ make_fake_gh() {
 set -euo pipefail
 
 if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
+  if [[ "${PG_TEST_GH_FAIL:-0}" == "1" ]]; then
+    echo "simulated gh auth failure" >&2
+    exit 1
+  fi
   repo=""
   head=""
   base=""
@@ -196,6 +200,35 @@ run_guard() {
   (
     cd "$repo"
     jq -n --arg command "$command" '{tool_input:{command:$command}}' | PATH="$FAKE_BIN:$PATH" bash "$GUARD"
+  )
+}
+
+run_guard_from() {
+  local cwd="$1"
+  local command="$2"
+  (
+    cd "$cwd"
+    jq -n --arg command "$command" '{tool_input:{command:$command}}' | PATH="$FAKE_BIN:$PATH" bash "$GUARD"
+  )
+}
+
+run_guard_with_workdir() {
+  local cwd="$1"
+  local command="$2"
+  local workdir="$3"
+  (
+    cd "$cwd"
+    jq -n --arg command "$command" --arg workdir "$workdir" '{tool_input:{command:$command, workdir:$workdir}}' | PATH="$FAKE_BIN:$PATH" bash "$GUARD"
+  )
+}
+
+run_guard_with_policy() {
+  local repo="$1"
+  local command="$2"
+  local policy="$3"
+  (
+    cd "$repo"
+    jq -n --arg command "$command" '{tool_input:{command:$command}}' | PATH="$FAKE_BIN:$PATH" PG_AGENT_PUSH_POLICY="$policy" bash "$GUARD"
   )
 }
 
@@ -539,7 +572,9 @@ upstream_block=$(run_guard "$REPO" "git push upstream HEAD:main")
 expect_contains "$upstream_block" "upstream/main"
 origin_block=$(run_guard "$REPO" "git push origin HEAD:main")
 expect_contains "$origin_block" "origin/main"
-echo "ok 16 - protected main pushes are blocked on origin and upstream"
+origin_block_with_c=$(run_guard_from "$TEST_TMP" "git -C $REPO push origin HEAD:main")
+expect_contains "$origin_block_with_c" "origin/main"
+echo "ok 16 - protected main pushes are blocked on origin and upstream, including git -C"
 
 (
   cd "$REPO"
@@ -563,6 +598,7 @@ FAKE_BIN="$SCRATCH_BIN"
   printf 'scratch\n' >scratch.txt
   git add scratch.txt
   git commit -m "scratch backup" >/dev/null
+  git branch scratch/agent/backup2
 )
 export PG_TEST_PR_JSON='[]'
 export PG_TEST_PR_LIST_MAP=''
@@ -571,8 +607,72 @@ scratch_allow=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
 echo "ok scratch-1 - scratch branch push is allowed without push-gate"
 
 scratch_force=$(run_guard "$SCRATCH_REPO" "git push --force-with-lease origin wip/agent/backup")
-expect_contains "$scratch_force" "does not allow force-with-lease"
+expect_contains "$scratch_force" "does not allow force pushes"
 echo "ok scratch-2 - scratch branch force-with-lease is blocked by policy"
+
+scratch_force_equals=$(run_guard "$SCRATCH_REPO" "git push --force-with-lease=refs/heads/wip/agent/backup origin wip/agent/backup")
+expect_contains "$scratch_force_equals" "does not allow force pushes"
+scratch_plus=$(run_guard "$SCRATCH_REPO" "git push origin +HEAD:wip/agent/backup")
+expect_contains "$scratch_plus" "force refspec"
+scratch_force_cluster_uf=$(run_guard "$SCRATCH_REPO" "git push -uf origin wip/agent/backup")
+expect_contains "$scratch_force_cluster_uf" "force refspec"
+scratch_force_cluster_fu=$(run_guard "$SCRATCH_REPO" "git push -fu origin wip/agent/backup")
+expect_contains "$scratch_force_cluster_fu" "force refspec"
+echo "ok scratch-2b - scratch branch alternate force forms are blocked"
+
+scratch_c_allow=$(run_guard_from "$TEST_TMP" "git -C $SCRATCH_REPO push origin wip/agent/backup")
+[[ -z "$scratch_c_allow" ]] || fail "expected scratch git -C push to be allowed, got: $scratch_c_allow"
+scratch_second_prefix=$(run_guard "$SCRATCH_REPO" "git push origin scratch/agent/backup2")
+[[ -z "$scratch_second_prefix" ]] || fail "expected scratch/agent prefix push to be allowed, got: $scratch_second_prefix"
+echo "ok scratch-2c - scratch git -C and alternate prefix pushes are classified"
+
+scratch_delete=$(run_guard "$SCRATCH_REPO" "git push origin :wip/agent/backup")
+expect_contains "$scratch_delete" "deletion is not allowed"
+scratch_remote=$(run_guard "$SCRATCH_REPO" "git push upstream wip/agent/backup")
+expect_contains "$scratch_remote" "configured scratch remotes"
+echo "ok scratch-2d - scratch delete and wrong remote are blocked"
+
+bad_policy="$TEST_TMP/bad-agent-push-policy.json"
+jq '.scratch_branches.requires_push_gate = true' "$ROOT/llm/agent-push-policy.json" >"$bad_policy"
+scratch_bad_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_policy")
+expect_contains "$scratch_bad_policy" "durable lease"
+bad_type_policy="$TEST_TMP/bad-agent-push-policy-type.json"
+jq '.scratch_branches.remotes = "origin"' "$ROOT/llm/agent-push-policy.json" >"$bad_type_policy"
+scratch_bad_type_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_type_policy")
+expect_contains "$scratch_bad_type_policy" "durable lease"
+echo "ok scratch-2e - contradictory or malformed scratch policy fails closed"
+
+scratch_multi_refspec=$(run_guard "$SCRATCH_REPO" "git push origin wip/agent/backup HEAD:main")
+expect_contains "$scratch_multi_refspec" "multiple-refspec"
+scratch_all_prefix=$(run_guard "$SCRATCH_REPO" "git push --all origin")
+expect_contains "$scratch_all_prefix" "broad git push"
+scratch_all_suffix=$(run_guard "$SCRATCH_REPO" "git push origin --all")
+expect_contains "$scratch_all_suffix" "broad git push"
+scratch_mirror=$(run_guard "$SCRATCH_REPO" "git push --mirror origin")
+expect_contains "$scratch_mirror" "broad git push"
+scratch_tags=$(run_guard "$SCRATCH_REPO" "git push --tags origin")
+expect_contains "$scratch_tags" "broad git push"
+echo "ok scratch-2e2 - multi-refspec and broad scratch pushes are blocked"
+
+export PG_TEST_GH_FAIL=1
+scratch_gh_fail=$(run_guard "$SCRATCH_REPO" "git push origin wip/agent/backup")
+expect_contains "$scratch_gh_fail" "could not verify"
+unset PG_TEST_GH_FAIL
+echo "ok scratch-2f - scratch branch blocks when PR verification fails"
+
+scratch_pr_create=$(run_guard "$SCRATCH_REPO" "gh pr create --title scratch --body scratch")
+expect_contains "$scratch_pr_create" "not PR-eligible"
+scratch_pr_create_head=$(run_guard "$REPO" "gh pr create --head scratch/agent/backup2 --base main --title scratch --body scratch")
+expect_contains "$scratch_pr_create_head" "not PR-eligible"
+scratch_pr_create_base=$(run_guard "$REPO" "gh pr create --head mho/existing-pr --base wip/agent/backup --title scratch --body scratch")
+expect_contains "$scratch_pr_create_base" "not PR-eligible"
+scratch_pr_create_short=$(run_guard "$REPO" "gh pr create -H wip/agent/backup -B main --title scratch --body scratch")
+expect_contains "$scratch_pr_create_short" "not PR-eligible"
+scratch_pr_ready_positional=$(run_guard "$REPO" "gh pr ready wip/agent/backup")
+expect_contains "$scratch_pr_ready_positional" "not PR-eligible"
+scratch_pr_reopen_positional=$(run_guard "$REPO" "gh pr reopen scratch/agent/backup2")
+expect_contains "$scratch_pr_reopen_positional" "not PR-eligible"
+echo "ok scratch-2g - scratch PR creation/readiness is blocked"
 
 export PG_TEST_PR_JSON='[{"number":314,"url":"https://example.test/pr/314"}]'
 export PG_TEST_PR_LIST_MAP=''
@@ -748,6 +848,10 @@ FAKE_BIN="$FBA_BASE_BIN"
   git add delivery.txt
   git commit -m "pending delivery work" >/dev/null
 )
+fba_direct_delivery=$(run_guard "$FBA_BASE_REPO" "git push origin mh-netflix")
+[[ -z "$fba_direct_delivery" ]] || fail "expected fun-bash-automations delivery branch to push directly, got: $fba_direct_delivery"
+fba_main_block=$(run_guard "$FBA_BASE_REPO" "git push origin HEAD:main")
+expect_contains "$fba_main_block" "origin/main"
 export PG_TEST_PR_JSON='[{"number":3,"url":"https://example.test/pr/3","baseRefName":"main"}]'
 fba_base_output=$(run_helper "$FBA_BASE_REPO" draft-approve \
   --intent $'update fun-bash-automations delivery branch\nsame branch\nno rewrite' \
@@ -756,6 +860,34 @@ fba_base_draft=$(extract_path "$fba_base_output" "^JSON draft file:")
 [[ "$(jq -r '.approved_scope.base_ref' "$fba_base_draft")" == "origin/mh-netflix" ]] \
   || fail "expected fun-bash-automations mh-netflix to use upstream base, got $(jq -r '.approved_scope.base_ref' "$fba_base_draft")"
 echo "ok 27 - fun-bash-automations mh-netflix ignores stale PR base and uses tracking branch"
+
+IFS='|' read -r DOTFILES_REPO DOTFILES_BIN DOTFILES_ORIGIN <<<"$(make_repo dotfiles-direct dotfiles)"
+FAKE_BIN="$DOTFILES_BIN"
+(
+  cd "$DOTFILES_REPO"
+  printf 'dotfiles delivery\n' >dotfiles.txt
+  git add dotfiles.txt
+  git commit -m "dotfiles delivery" >/dev/null
+  git checkout -b mho/not-delivery >/dev/null
+  printf 'feature\n' >feature.txt
+  git add feature.txt
+  git commit -m "feature work" >/dev/null
+)
+dotfiles_feature_block=$(run_guard "$DOTFILES_REPO" "git push origin mho/not-delivery")
+expect_contains "$dotfiles_feature_block" "durable lease"
+(
+  cd "$DOTFILES_REPO"
+  git checkout main >/dev/null
+)
+dotfiles_main_explicit_feature_block=$(run_guard "$DOTFILES_REPO" "git push origin mho/not-delivery")
+expect_contains "$dotfiles_main_explicit_feature_block" "durable lease"
+dotfiles_main_allow=$(run_guard "$DOTFILES_REPO" "git push origin main")
+[[ -z "$dotfiles_main_allow" ]] || fail "expected dotfiles delivery branch to push directly, got: $dotfiles_main_allow"
+dotfiles_all_block=$(run_guard "$DOTFILES_REPO" "git push --all origin")
+expect_contains "$dotfiles_all_block" "Blocked:"
+dotfiles_wrong_workdir_block=$(run_guard_with_workdir "$TEST_TMP" "git -C $REPO push origin HEAD:main" "$DOTFILES_REPO")
+expect_contains "$dotfiles_wrong_workdir_block" "origin/main"
+echo "ok 27b - direct-push exceptions are branch-scoped"
 
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"

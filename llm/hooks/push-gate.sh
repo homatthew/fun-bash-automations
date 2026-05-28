@@ -190,11 +190,12 @@ pg_agent_push_policy_json() {
 
 pg_json_array_contains() {
   local json="$1" value="$2"
-  jq -e --arg value "$value" 'index($value) != null' <<<"$json" >/dev/null
+  jq -e --arg value "$value" 'type == "array" and index($value) != null' <<<"$json" >/dev/null
 }
 
 pg_branch_matches_any_prefix() {
   local branch="$1" prefixes_json="$2" prefix
+  jq -e 'type == "array"' <<<"$prefixes_json" >/dev/null || return 1
   while IFS= read -r prefix; do
     [[ -z "$prefix" ]] && continue
     [[ "$branch" == "$prefix"* ]] && return 0
@@ -222,17 +223,44 @@ pg_open_pr_count_for_branch() {
 }
 
 pg_validate_scratch_push() {
-  local policy="$1" remote="$2" target_branch="$3" force_with_lease="$4" is_delete="$5"
-  local scratch enabled default_for_agents prefixes remotes allow_force allow_delete must_not_have_pr must_not_be_base
+  local policy="$1" remote="$2" target_branch="$3" force_push="$4" is_delete="$5"
+  local scratch enabled default_for_agents requires_push_gate requires_user_opt_in prefixes remotes allow_force allow_delete must_not_have_pr must_not_be_base
   local pr_count
 
   scratch=$(jq -c '.scratch_branches // {enabled:false}' <<<"$policy")
+  if ! jq -e '
+    type == "object"
+    and (.enabled | type == "boolean")
+    and (.default_for_agents | type == "boolean")
+    and (.requires_push_gate | type == "boolean")
+    and (.requires_user_opt_in | type == "boolean")
+    and (.must_not_have_open_pr | type == "boolean")
+    and (.must_not_be_pr_base | type == "boolean")
+    and (.allow_force_with_lease | type == "boolean")
+    and (.allow_delete | type == "boolean")
+    and (.prefixes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+    and (.remotes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+  ' <<<"$scratch" >/dev/null; then
+    jq -n '{allowed:false, scratch_candidate:false}'
+    return 0
+  fi
   enabled=$(jq -r '.enabled // false' <<<"$scratch")
   default_for_agents=$(jq -r '.default_for_agents // false' <<<"$scratch")
   [[ "$enabled" == "true" && "$default_for_agents" == "true" ]] || {
     jq -n '{allowed:false, scratch_candidate:false}'
     return 0
   }
+
+  requires_push_gate=$(jq -r 'if has("requires_push_gate") then .requires_push_gate else true end' <<<"$scratch")
+  requires_user_opt_in=$(jq -r 'if has("requires_user_opt_in") then .requires_user_opt_in else true end' <<<"$scratch")
+  must_not_have_pr=$(jq -r 'if has("must_not_have_open_pr") then .must_not_have_open_pr else true end' <<<"$scratch")
+  must_not_be_base=$(jq -r 'if has("must_not_be_pr_base") then .must_not_be_pr_base else true end' <<<"$scratch")
+  allow_force=$(jq -r 'if has("allow_force_with_lease") then .allow_force_with_lease else false end' <<<"$scratch")
+  allow_delete=$(jq -r 'if has("allow_delete") then .allow_delete else false end' <<<"$scratch")
+  if [[ "$requires_push_gate" != "false" || "$requires_user_opt_in" != "false" || "$must_not_have_pr" != "true" || "$must_not_be_base" != "true" || "$allow_force" != "false" || "$allow_delete" != "false" ]]; then
+    jq -n '{allowed:false, scratch_candidate:false}'
+    return 0
+  fi
 
   prefixes=$(jq -c '.prefixes // []' <<<"$scratch")
   remotes=$(jq -c '.remotes // []' <<<"$scratch")
@@ -246,21 +274,18 @@ pg_validate_scratch_push() {
     return 0
   fi
 
-  allow_force=$(jq -r '.allow_force_with_lease // false' <<<"$scratch")
-  if [[ "$force_with_lease" == "true" && "$allow_force" != "true" ]]; then
+  if [[ "$force_push" == "true" ]]; then
     jq -n --arg branch "$target_branch" \
-      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " does not allow force-with-lease pushes by policy.")}'
+      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " does not allow force pushes by policy.")}'
     return 0
   fi
 
-  allow_delete=$(jq -r '.allow_delete // false' <<<"$scratch")
-  if [[ "$is_delete" == "true" && "$allow_delete" != "true" ]]; then
+  if [[ "$is_delete" == "true" ]]; then
     jq -n --arg branch "$target_branch" \
       '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " deletion is not allowed by agent scratch policy.")}'
-    return 0
+      return 0
   fi
 
-  must_not_have_pr=$(jq -r '.must_not_have_open_pr // true' <<<"$scratch")
   if [[ "$must_not_have_pr" == "true" ]]; then
     pr_count=$(pg_open_pr_count_for_branch head "$target_branch") || {
       jq -n --arg branch "$target_branch" \
@@ -274,7 +299,6 @@ pg_validate_scratch_push() {
     fi
   fi
 
-  must_not_be_base=$(jq -r '.must_not_be_pr_base // true' <<<"$scratch")
   if [[ "$must_not_be_base" == "true" ]]; then
     pr_count=$(pg_open_pr_count_for_branch base "$target_branch") || {
       jq -n --arg branch "$target_branch" \
@@ -4126,7 +4150,10 @@ result = {
     "source_ref": None,
     "target_branch": None,
     "force_with_lease": False,
+    "is_force": False,
     "is_delete": False,
+    "is_broad_push": False,
+    "refspec_count": 0,
 }
 try:
     tokens = shlex.split(cmd)
@@ -4140,12 +4167,42 @@ for i, token in enumerate(tokens):
     if token == "git":
         git_idx = i
         break
-if git_idx is None or git_idx + 1 >= len(tokens) or tokens[git_idx + 1] != "push":
+if git_idx is None:
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+global_value_options = {
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix",
+}
+global_no_value_options = {
+    "--bare", "--no-replace-objects", "--no-optional-locks",
+    "--no-pager", "-p", "--paginate", "-P", "--no-pager",
+}
+
+push_idx = git_idx + 1
+while push_idx < len(tokens):
+    token = tokens[push_idx]
+    if token == "push":
+        break
+    if token in global_value_options and push_idx + 1 < len(tokens):
+        push_idx += 2
+        continue
+    if any(token.startswith(opt + "=") for opt in global_value_options if opt.startswith("--")):
+        push_idx += 1
+        continue
+    if token in global_no_value_options:
+        push_idx += 1
+        continue
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+if push_idx >= len(tokens) or tokens[push_idx] != "push":
     print(json.dumps(result))
     raise SystemExit(0)
 
 result["is_push"] = True
-args = tokens[git_idx + 2 :]
+args = tokens[push_idx + 1 :]
 remote = None
 refspecs = []
 skip_next = False
@@ -4157,8 +4214,17 @@ for i, token in enumerate(args):
         refspecs.extend(args[i + 1 :])
         break
     if token.startswith("-"):
-        if token == "--force-with-lease":
+        if token == "--force-with-lease" or token.startswith("--force-with-lease="):
             result["force_with_lease"] = True
+            result["is_force"] = True
+        if token in {"--force", "-f"}:
+            result["is_force"] = True
+        if token in {"--all", "--mirror", "--tags"}:
+            result["is_broad_push"] = True
+        if token.startswith("-") and not token.startswith("--"):
+            short_flags = token[1:]
+            if "f" in short_flags:
+                result["is_force"] = True
         if token in {"--delete", "-d"}:
             result["is_delete"] = True
         if token in {"--repo"}:
@@ -4171,8 +4237,12 @@ for i, token in enumerate(args):
 
 source_ref = None
 target_branch = None
+result["refspec_count"] = len(refspecs)
 if refspecs:
     refspec = refspecs[0]
+    if refspec.startswith("+"):
+      result["is_force"] = True
+      refspec = refspec[1:]
     if ":" in refspec:
       source_ref, target_branch = refspec.split(":", 1)
     else:
@@ -4675,7 +4745,7 @@ pg_validate_branch_lease_state() {
 
 pg_validate_push_guard() {
   local command="$1"
-  local parsed is_push remote source_ref target_branch force_with_lease current_branch lease_branch branch_ref current_head
+  local parsed is_push remote source_ref target_branch force_with_lease is_force is_broad_push refspec_count current_branch lease_branch branch_ref current_head
   local lease_json lease_remote lease_status approved_anchor pending_path pending_json pending_remote pending_head pending_branch_ref
   local branch_upstream scratch_result scratch_allowed scratch_candidate scratch_reason
 
@@ -4693,6 +4763,9 @@ pg_validate_push_guard() {
   source_ref=$(echo "$parsed" | jq -r '.source_ref // empty')
   target_branch=$(echo "$parsed" | jq -r '.target_branch // empty')
   force_with_lease=$(echo "$parsed" | jq -r '.force_with_lease')
+  is_force=$(echo "$parsed" | jq -r '.is_force // false')
+  is_broad_push=$(echo "$parsed" | jq -r '.is_broad_push // false')
+  refspec_count=$(echo "$parsed" | jq -r '.refspec_count // 0')
   local is_delete
   is_delete=$(echo "$parsed" | jq -r '.is_delete')
   [[ -n "$remote" ]] || remote=$(pg_default_remote 2>/dev/null || true)
@@ -4713,6 +4786,21 @@ pg_validate_push_guard() {
     return 0
   fi
 
+  if [[ "$is_broad_push" == "true" ]]; then
+    jq -n '{allowed:false, reason:"Blocked: broad git push modes (--all, --mirror, --tags) are not allowed for agent pushes."}'
+    return 0
+  fi
+
+  if [[ "$refspec_count" -gt 1 ]]; then
+    jq -n '{allowed:false, reason:"Blocked: multiple-refspec git pushes require separate guarded pushes per branch."}'
+    return 0
+  fi
+
+  if [[ "$is_force" == "true" && "$force_with_lease" != "true" ]]; then
+    jq -n '{allowed:false, reason:"Blocked: git push force refspec rewrites remote history. Use --force-with-lease."}'
+    return 0
+  fi
+
   local pushed_commit
   if [[ -n "$source_ref" ]]; then
     pushed_commit=$(git rev-parse --verify "${source_ref}^{commit}" 2>/dev/null || true)
@@ -4730,7 +4818,7 @@ pg_validate_push_guard() {
     return 0
   fi
 
-  scratch_result=$(pg_validate_scratch_push "$(pg_agent_push_policy_json)" "$remote" "$target_branch" "$force_with_lease" "$is_delete")
+  scratch_result=$(pg_validate_scratch_push "$(pg_agent_push_policy_json)" "$remote" "$target_branch" "$is_force" "$is_delete")
   scratch_allowed=$(echo "$scratch_result" | jq -r '.allowed')
   scratch_candidate=$(echo "$scratch_result" | jq -r '.scratch_candidate // false')
   if [[ "$scratch_allowed" == "true" ]]; then
