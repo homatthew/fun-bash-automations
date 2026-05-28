@@ -453,19 +453,24 @@ git clone "$EXISTING_UPDATE_ORIGIN" "$EXISTING_UPDATE_UPDATER" >/dev/null 2>&1
   git add feature.txt
   git commit -m "feature follow-up" >/dev/null
 )
-export PG_TEST_PR_JSON='[{"number":124,"url":"https://example.test/pr/124"}]'
+export PG_TEST_PR_JSON='[{"number":124,"url":"https://example.test/pr/124","baseRefName":"main"}]'
 run_helper "$EXISTING_UPDATE_REPO" prepare \
   --what "feature follow-up" \
   --why "approve an incremental push to an existing PR" \
   --approach "scope approval to the pending branch update" >/dev/null
 existing_update_draft_output=$(run_helper "$EXISTING_UPDATE_REPO" draft-approve)
 existing_update_draft_file=$(extract_path "$existing_update_draft_output" "^JSON draft file:")
+existing_update_full_base=$(git -C "$EXISTING_UPDATE_REPO" merge-base refs/remotes/origin/main HEAD)
 [[ "$(jq -r '.base_ref_snapshot' "$existing_update_draft_file")" == "refs/remotes/origin/mho/existing-pr-update" ]] \
   || fail "expected existing PR update to use upstream branch as base: $(jq -r '.base_ref_snapshot' "$existing_update_draft_file")"
 [[ "$(jq -r '.approved_scope.paths | join(",")' "$existing_update_draft_file")" == "feature.txt" ]] \
   || fail "expected existing PR update scope to include only pending-push files: $(jq -c '.approved_scope.paths' "$existing_update_draft_file")"
 [[ "$(jq -r '.local_review.diff.base' "$existing_update_draft_file")" == "refs/remotes/origin/mho/existing-pr-update" ]] \
   || fail "expected local review base to be pending-push upstream: $(jq -c '.local_review.diff' "$existing_update_draft_file")"
+[[ "$(jq -r '.local_review.diff.full_review.base' "$existing_update_draft_file")" == "$existing_update_full_base" ]] \
+  || fail "expected full PR review base to use GitHub PR merge-base: $(jq -c '.local_review.diff.full_review' "$existing_update_draft_file")"
+[[ "$(jq -r '.review_summary.whole_branch_or_pr.base' "$existing_update_draft_file")" == "$existing_update_full_base" ]] \
+  || fail "expected approval prompt summary to expose full PR base: $(jq -c '.review_summary' "$existing_update_draft_file")"
 unset PG_TEST_PR_JSON
 echo "ok 5a - existing PR update approval uses pending-push base after target branch advances"
 
@@ -1008,6 +1013,10 @@ low_draft_file=$(extract_path "$low_draft_output" "^JSON draft file:")
 [[ "$(jq -r '.async_iteration.scope.branch_name' "$low_draft_file")" == "mho/low-stakes" ]] \
   || fail "expected low-stakes draft to scope branch"
 expect_contains "$(cat "$low_script")" "review-diff --base"
+expect_contains "$(cat "$low_script")" "Choose Diffview review scope:"
+expect_contains "$(cat "$low_script")" "pending push:"
+expect_contains "$(cat "$low_script")" "full branch/PR:"
+expect_contains "$(cat "$low_script")" "review-diff --scope full --base"
 expect_contains "$(cat "$low_script")" "-C \"\$REPO_ROOT\""
 echo "ok 29 - low-stakes prepare creates reviewed short async lease draft with automatic diff review"
 
@@ -1027,6 +1036,11 @@ review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux)
   || fail "expected review-diff to label pending-push diff: $review_diff_json"
 [[ "$(jq -r '.diff.full_review.label' <<<"$review_diff_json")" == "full-review" ]] \
   || fail "expected review-diff to expose separate full-review diff: $review_diff_json"
+full_review_diff_json=$(run_helper "$LOW_REPO" review-diff --json --no-tmux --scope full)
+[[ "$(jq -r '.diff.label' <<<"$full_review_diff_json")" == "full-review" ]] \
+  || fail "expected review-diff full scope to label the opened review: $full_review_diff_json"
+[[ "$(jq -r '.diff.review_unit.scope' <<<"$full_review_diff_json")" == "full" ]] \
+  || fail "expected review-diff full scope metadata: $full_review_diff_json"
 [[ "$(jq -r '.reviewer.tool' <<<"$review_diff_json")" == "diffview.nvim" ]] \
   || fail "expected review-diff to target Diffview.nvim: $review_diff_json"
 expect_contains "$(jq -r '.reviewer.command' <<<"$review_diff_json")" "DiffviewOpen"

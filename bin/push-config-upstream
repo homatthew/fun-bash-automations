@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_repo_root() {
+  local primary="$1"
+  local fallback="$2"
+  local repo_name="$3"
+  local root
+
+  if root="$(git -C "$primary" rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "$root"
+    return 0
+  fi
+
+  if [[ -n "$fallback" ]] && root="$(git -C "$fallback" rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "$root"
+    return 0
+  fi
+
+  echo "Missing $repo_name checkout; tried $primary${fallback:+ and $fallback}" >&2
+  return 1
+}
+
+require_human_config_push() {
+  local command_name="${1:-push-config-upstream}"
+  local current_user="${USER:-$(id -un 2>/dev/null)}"
+
+  if [[ "$current_user" != "matthewho" ]]; then
+    echo "$command_name is only for matthewho's shell."
+    return 1
+  fi
+
+  if [[ ! -t 0 || ! -t 1 || ! -r /dev/tty || ! -w /dev/tty ]]; then
+    echo "$command_name is human-only; run it from your interactive terminal."
+    return 1
+  fi
+}
+
+validate_config_push_repo() {
+  local repo="$1"
+  local repo_name="$2"
+  local branch="$3"
+  local remote="${4:-origin}"
+  local current_branch upstream
+
+  current_branch="$(git -C "$repo" branch --show-current 2>/dev/null)" || return 1
+  if [[ "$current_branch" != "$branch" ]]; then
+    echo "Refusing to push $repo_name: expected branch $branch, got ${current_branch:-detached HEAD}."
+    return 1
+  fi
+
+  git -C "$repo" fetch "$remote" "$branch" || return 1
+  upstream="$remote/$branch"
+
+  if ! git -C "$repo" merge-base --is-ancestor "$upstream" HEAD; then
+    echo "Refusing to push $repo_name: local $branch does not contain $upstream."
+    echo "Pull/rebase first, then rerun push-config-upstream."
+    return 1
+  fi
+}
+
+secret_pattern_matches_added_line() {
+  local content="$1"
+
+  printf '%s\n' "$content" | grep -Eiq -- \
+    '-----BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|github_pat_[0-9A-Za-z_]{20,}|gh[pousr]_[0-9A-Za-z_]{20,}|(^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{24,}|(api[_-]?key|secret|token|password|passwd|client[_-]?secret|private[_-]?key)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_./+=:-]{16,}'
+}
+
+secret_scan_config_repo() {
+  local repo="$1"
+  local repo_name="$2"
+  local upstream="$3"
+  local report_file="$4"
+  local diff_file matches_file file line content
+
+  diff_file="$(mktemp -t config-push-diff.XXXXXX)" || return 1
+  matches_file="$(mktemp -t config-push-secrets.XXXXXX)" || {
+    rm -f "$diff_file"
+    return 1
+  }
+
+  git -C "$repo" diff --no-ext-diff --unified=0 "$upstream..HEAD" > "$diff_file" || {
+    rm -f "$diff_file" "$matches_file"
+    return 1
+  }
+
+  {
+    file=""
+    while IFS= read -r line; do
+      case "$line" in
+        "+++ b/"*)
+          file="${line#+++ b/}"
+          ;;
+        "+"*)
+          [[ "$line" == "+++"* ]] && continue
+          content="${line#+}"
+          if secret_pattern_matches_added_line "$content"; then
+            echo "$repo_name:${file:-unknown file}"
+          fi
+          ;;
+      esac
+    done < "$diff_file"
+  } | sort -u > "$matches_file"
+
+  if [[ -s "$matches_file" ]]; then
+    {
+      echo "Potential sensitive material in added lines. Review these files manually:"
+      sed 's/^/  - /' "$matches_file"
+    } >> "$report_file"
+    rm -f "$diff_file" "$matches_file"
+    return 1
+  fi
+
+  rm -f "$diff_file" "$matches_file"
+}
+
+append_config_repo_review_input() {
+  local output_file="$1"
+  local repo="$2"
+  local repo_name="$3"
+  local branch="$4"
+  local remote="${5:-origin}"
+  local upstream="$remote/$branch"
+  local ahead
+
+  ahead="$(git -C "$repo" rev-list --count "$upstream..HEAD")" || return 1
+
+  {
+    echo
+    echo "## $repo_name"
+    echo "repo: $repo"
+    echo "branch: $branch"
+    echo "upstream: $upstream"
+    echo "ahead_commits: $ahead"
+    echo
+    echo "### status"
+    git -C "$repo" status --short --branch
+    echo
+    echo "### outgoing commits"
+    if [[ "$ahead" = "0" ]]; then
+      echo "(none)"
+    else
+      git -C "$repo" log --oneline "$upstream..HEAD"
+    fi
+    echo
+    echo "### diffstat"
+    if [[ "$ahead" = "0" ]]; then
+      echo "(none)"
+    else
+      git -C "$repo" diff --no-ext-diff --stat "$upstream..HEAD"
+    fi
+    echo
+    echo "### patch"
+    if [[ "$ahead" = "0" ]]; then
+      echo "(none)"
+    else
+      git -C "$repo" diff --no-ext-diff --find-renames "$upstream..HEAD"
+    fi
+  } >> "$output_file"
+}
+
+codex_config_push_review() {
+  local fba_root="$1"
+  local dotfiles_root="$2"
+  local input_file schema_file output_file secret_report status report
+
+  command -v codex >/dev/null 2>&1 || {
+    echo "codex is required for push-config-upstream pre-push review."
+    return 1
+  }
+  command -v jq >/dev/null 2>&1 || {
+    echo "jq is required to parse the Codex pre-push review result."
+    return 1
+  }
+
+  secret_report="$(mktemp -t config-push-secret-report.XXXXXX)" || return 1
+  : > "$secret_report"
+  secret_scan_config_repo "$fba_root" "fun-bash-automations" "origin/mh-netflix" "$secret_report" || {
+    echo
+    echo "Local sensitive-data scan failed before Codex review."
+    cat "$secret_report"
+    rm -f "$secret_report"
+    return 1
+  }
+  secret_scan_config_repo "$dotfiles_root" "dotfiles" "origin/main" "$secret_report" || {
+    echo
+    echo "Local sensitive-data scan failed before Codex review."
+    cat "$secret_report"
+    rm -f "$secret_report"
+    return 1
+  }
+  rm -f "$secret_report"
+
+  input_file="$(mktemp -t config-push-review-input.XXXXXX)" || return 1
+  schema_file="$(mktemp -t config-push-review-schema.XXXXXX)" || {
+    rm -f "$input_file"
+    return 1
+  }
+  output_file="$(mktemp -t config-push-review-output.XXXXXX)" || {
+    rm -f "$input_file" "$schema_file"
+    return 1
+  }
+
+  cat > "$schema_file" <<'JSON'
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "report", "blocking_findings", "warnings"],
+  "properties": {
+    "status": { "type": "string", "enum": ["pass", "fail"] },
+    "report": { "type": "string" },
+    "blocking_findings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
+JSON
+
+  cat > "$input_file" <<'PROMPT'
+You are the required Codex LLM pre-push reviewer for Matthew's owner-maintained config repos.
+
+Review only the supplied outgoing committed diffs and status blocks. Do not ask to run commands.
+
+Return JSON matching the schema. Use:
+- "status": "fail" if you see likely sensitive material, credentials, private keys, tokens, customer/member data, secrets, or a high-confidence important issue that should block pushing.
+- "status": "fail" if the diff obviously breaks shell startup, Codex/Claude runtime config, push-gate guardrails, scratch branch policy, or Neovim startup.
+- "status": "pass" if there are no blockers. Put minor concerns in warnings.
+
+Be concise but specific. Mention file paths and commit subjects when useful. The local wrapper already ran a deterministic added-line secret scan before this LLM review, but you should still look for less obvious sensitive-data risks.
+
+Diff bundle:
+PROMPT
+
+  append_config_repo_review_input "$input_file" "$fba_root" "fun-bash-automations" "mh-netflix" "origin" || {
+    rm -f "$input_file" "$schema_file" "$output_file"
+    return 1
+  }
+  append_config_repo_review_input "$input_file" "$dotfiles_root" "dotfiles" "main" "origin" || {
+    rm -f "$input_file" "$schema_file" "$output_file"
+    return 1
+  }
+
+  echo
+  echo "Running Codex pre-push review for fun-bash-automations and dotfiles..."
+  if ! NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
+    --ephemeral \
+    --sandbox read-only \
+    --ask-for-approval never \
+    -C "$fba_root" \
+    --output-schema "$schema_file" \
+    --output-last-message "$output_file" \
+    - < "$input_file"; then
+    echo "Codex pre-push review failed to run."
+    rm -f "$input_file" "$schema_file" "$output_file"
+    return 1
+  fi
+
+  status="$(jq -r '.status // empty' "$output_file" 2>/dev/null)" || status=""
+  report="$(jq -r '.report // empty' "$output_file" 2>/dev/null)" || report=""
+
+  echo
+  echo "Codex pre-push review report:"
+  if [[ -n "$report" ]]; then
+    echo "$report"
+  else
+    cat "$output_file"
+  fi
+
+  if [[ "$status" != "pass" ]]; then
+    echo
+    echo "Blocked: Codex pre-push review status is ${status:-unparseable}."
+    jq -r '.blocking_findings[]? | "  - " + .' "$output_file" 2>/dev/null
+    rm -f "$input_file" "$schema_file" "$output_file"
+    return 1
+  fi
+
+  jq -r '.warnings[]? | "Warning: " + .' "$output_file" 2>/dev/null
+  rm -f "$input_file" "$schema_file" "$output_file"
+}
+
+confirm_config_push() {
+  local response
+
+  echo
+  printf "Push fun-bash-automations/mh-netflix and dotfiles/main now? [y/N] " > /dev/tty
+  IFS= read -r response < /dev/tty || return 1
+  case "$response" in
+    y|Y|yes|YES)
+      return 0
+      ;;
+    *)
+      echo "Aborted."
+      return 1
+      ;;
+  esac
+}
+
+push_config_repo() {
+  local repo="$1"
+  local repo_name="$2"
+  local branch="$3"
+  local remote="${4:-origin}"
+  local upstream ahead dirty
+
+  validate_config_push_repo "$repo" "$repo_name" "$branch" "$remote" || return $?
+  upstream="$remote/$branch"
+
+  dirty="$(git -C "$repo" status --porcelain)"
+  if [[ -n "$dirty" ]]; then
+    echo
+    echo "$repo_name has uncommitted changes; only committed changes will push:"
+    git -C "$repo" status --short
+  fi
+
+  ahead="$(git -C "$repo" rev-list --count "$upstream..HEAD")" || return 1
+  if [[ "$ahead" = "0" ]]; then
+    echo "$repo_name: nothing to push."
+    return 0
+  fi
+
+  echo
+  echo "$repo_name: pushing $ahead commit(s) to $remote/$branch"
+  git -C "$repo" push "$remote" "HEAD:$branch"
+}
+
+main() {
+  local fba_root dotfiles_root
+
+  require_human_config_push push-config-upstream || return $?
+
+  fba_root="$(config_repo_root "${FBA_ROOT:-$HOME/repos/fun-bash-automations}" "$HOME/repos/fun-bash-automations" "fun-bash-automations")" || return 1
+  dotfiles_root="$(config_repo_root "${DOTFILES_ROOT:-$HOME/repos/dotfiles}" "$HOME/.config/work/dotfiles" "dotfiles")" || return 1
+
+  validate_config_push_repo "$fba_root" "fun-bash-automations" "mh-netflix" "origin" || return $?
+  validate_config_push_repo "$dotfiles_root" "dotfiles" "main" "origin" || return $?
+  codex_config_push_review "$fba_root" "$dotfiles_root" || return $?
+  confirm_config_push || return $?
+
+  push_config_repo "$fba_root" "fun-bash-automations" "mh-netflix" "origin" || return $?
+  push_config_repo "$dotfiles_root" "dotfiles" "main" "origin"
+}
+
+main "$@"
