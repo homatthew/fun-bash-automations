@@ -365,8 +365,8 @@ agent-refresh() {
 alias llm-refresh=agent-refresh
 alias llm-deploy=fba-deploy
 
-# push-config-upstream: human-only direct push for Matthew's owner-maintained
-# config repos. Agents must not run this helper.
+# cfgsync: human-only direct push for Matthew's owner-maintained config repos.
+# Agents must not run this helper.
 push-config-upstream() {
     local helper="$FBA_ROOT/bin/push-config-upstream"
     if [ ! -x "$helper" ]; then
@@ -375,6 +375,7 @@ push-config-upstream() {
     fi
     "$helper" "$@"
 }
+alias cfgsync=push-config-upstream
 alias push-fba-dotfiles=push-config-upstream
 alias push-llm-config=push-config-upstream
 
