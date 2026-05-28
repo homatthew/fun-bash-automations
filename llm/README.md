@@ -34,6 +34,15 @@ harnesses.
 6. Update `llm/command-guard-policy.md` before changing Claude hook guard
    behavior.
 
+## Confidential Boundary
+
+Keep project-specific confidential topology out of this repo: custom field IDs,
+private board/category IDs, internal component mappings, team-owned labels,
+personal deployment branches, private pipeline IDs, Slack channel lore, and
+internal-only examples. Put that material in the private dotfiles overlay at
+`~/repos/dotfiles/config/llm/skills-internal/`, which installers layer after
+the shared FBA skills.
+
 ## Projection Targets
 
 - Claude:
