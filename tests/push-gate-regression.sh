@@ -640,6 +640,10 @@ bad_type_policy="$TEST_TMP/bad-agent-push-policy-type.json"
 jq '.scratch_branches.remotes = "origin"' "$ROOT/llm/agent-push-policy.json" >"$bad_type_policy"
 scratch_bad_type_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_type_policy")
 expect_contains "$scratch_bad_type_policy" "durable lease"
+bad_cadence_policy="$TEST_TMP/bad-agent-push-policy-cadence.json"
+jq 'del(.scratch_branches.commit_push_cadence)' "$ROOT/llm/agent-push-policy.json" >"$bad_cadence_policy"
+scratch_bad_cadence_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_cadence_policy")
+expect_contains "$scratch_bad_cadence_policy" "durable lease"
 echo "ok scratch-2e - contradictory or malformed scratch policy fails closed"
 
 scratch_multi_refspec=$(run_guard "$SCRATCH_REPO" "git push origin wip/agent/backup HEAD:main")

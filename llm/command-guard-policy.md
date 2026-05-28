@@ -82,6 +82,12 @@ push, has no open PR as its head, and is not the base of an open PR. If any of
 those checks fails or cannot be verified, the branch is treated as delivery
 scope and must use push-gate.
 
+The machine-readable cadence is `regular_milestones`: commit and push after a
+coherent checkpoint worth preserving, after verification passes, before
+long-running or interruptible work, and before handoff or context compaction.
+That cadence is for scratch branches only; delivery and PR-eligible branches
+still require the normal explicit finish/push-gate path.
+
 Promoting scratch work means creating or updating a delivery/PR branch from the
 scratch commits. That promotion is subject to push-gate exactly like any other
 delivery push.

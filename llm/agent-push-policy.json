@@ -5,6 +5,15 @@
     "enabled": true,
     "default_for_agents": true,
     "purpose": "Remote backup, resumability, and cross-workspace handoff for agent work that is not PR delivery.",
+    "commit_push_cadence": {
+      "mode": "regular_milestones",
+      "events": [
+        "after_coherent_checkpoint",
+        "after_verification_pass",
+        "before_long_running_or_interruptible_work",
+        "before_handoff_or_context_compaction"
+      ]
+    },
     "prefixes": ["wip/agent/", "scratch/agent/"],
     "remotes": ["origin"],
     "requires_push_gate": false,

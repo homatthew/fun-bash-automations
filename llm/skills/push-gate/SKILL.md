@@ -53,10 +53,12 @@ If you find yourself about to type any of those, STOP.
 
 Scratch branches are a separate, explicit non-delivery branch class configured
 in `llm/agent-push-policy.json`. Agents may commit and push configured scratch
-branches at their discretion for backup/resume/handoff without push-gate. This
-is not a bypass: if a scratch branch has an open PR, is the base of an open PR,
-targets an unconfigured remote, or otherwise fails classification, it becomes
-delivery scope and must use push-gate.
+branches at regular milestones for backup/resume/handoff without push-gate:
+after coherent checkpoints, after verification passes, before long-running or
+interruptible work, and before handoff or context compaction. This is not a
+bypass: if a scratch branch has an open PR, is the base of an open PR, targets
+an unconfigured remote, or otherwise fails classification, it becomes delivery
+scope and must use push-gate.
 
 ## Step 3 — Sanctioned flow
 
