@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/homatthew/fun-bash-automations/llm/agent-push-policy.schema.json",
+  "title": "Agent Push Policy",
+  "type": "object",
+  "required": ["version", "scratch_branches", "delivery_branches"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scratch_branches": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "default_for_agents",
+        "prefixes",
+        "remotes",
+        "requires_push_gate",
+        "requires_user_opt_in",
+        "must_not_have_open_pr",
+        "must_not_be_pr_base",
+        "allow_force_with_lease",
+        "allow_delete"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "default_for_agents": { "type": "boolean" },
+        "purpose": { "type": "string" },
+        "prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "remotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "requires_push_gate": { "type": "boolean", "const": false },
+        "requires_user_opt_in": { "type": "boolean", "const": false },
+        "must_not_have_open_pr": { "type": "boolean" },
+        "must_not_be_pr_base": { "type": "boolean" },
+        "allow_force_with_lease": { "type": "boolean" },
+        "allow_delete": { "type": "boolean" }
+      }
+    },
+    "delivery_branches": {
+      "type": "object",
+      "required": ["requires_push_gate", "pr_eligible"],
+      "additionalProperties": false,
+      "properties": {
+        "requires_push_gate": { "type": "boolean", "const": true },
+        "pr_eligible": { "type": "boolean", "const": true },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

@@ -3,6 +3,8 @@
   "canonical": {
     "repo_agent_doc": "AGENTS.md",
     "shared_agent_doc": "llm/AGENTS.md",
+    "agent_push_policy": "llm/agent-push-policy.json",
+    "agent_push_policy_schema": "llm/agent-push-policy.schema.json",
     "shared_skills_dir": "llm/skills",
     "shared_hooks_dir": "llm/hooks",
     "codex_config_template": "codex/config.toml",
@@ -17,7 +19,9 @@
     "claude": {
       "instructions": {
         "~/.claude/CLAUDE.md": "claude/CLAUDE.md",
-        "~/.claude/AGENTS.md": "llm/AGENTS.md"
+        "~/.claude/AGENTS.md": "llm/AGENTS.md",
+        "~/.claude/agent-push-policy.json": "llm/agent-push-policy.json",
+        "~/.claude/agent-push-policy.schema.json": "llm/agent-push-policy.schema.json"
       },
       "skills_dir": {
         "target": "~/.claude/skills",
@@ -31,7 +35,9 @@
     },
     "codex": {
       "instructions": {
-        "~/.codex/AGENTS.md": "llm/AGENTS.md"
+        "~/.codex/AGENTS.md": "llm/AGENTS.md",
+        "~/.codex/agent-push-policy.json": "llm/agent-push-policy.json",
+        "~/.codex/agent-push-policy.schema.json": "llm/agent-push-policy.schema.json"
       },
       "skills_dir": {
         "target": "~/.codex/skills",

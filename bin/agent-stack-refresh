@@ -99,6 +99,10 @@ Current rules:
     on cross-item what / why / approach.
   - Never bypass push-gate; if approval is needed, prepare first and ask the
     human to run pg / pg trunk in an interactive terminal.
+  - Scratch branches from llm/agent-push-policy.json (for example
+    wip/agent/*) are non-delivery backup/resume branches. Agents may commit
+    and push them directly when classification passes; PR/delivery branches
+    still require push-gate.
 
 Useful commands:
   stack --help

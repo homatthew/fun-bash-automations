@@ -41,6 +41,7 @@ set -euo pipefail
 if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
   repo=""
   head=""
+  base=""
   shift 2
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,6 +53,10 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
         head="$2"
         shift 2
         ;;
+      --base|-B)
+        base="$2"
+        shift 2
+        ;;
       --json|--jq|--state)
         shift 2
         ;;
@@ -61,12 +66,23 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
     esac
   done
   if [[ -n "${PG_TEST_PR_LIST_MAP:-}" ]]; then
+    selector=""
+    legacy_selector=""
+    if [[ -n "$base" ]]; then
+      selector="base:$base"
+      legacy_selector="$base"
+    else
+      selector="head:$head"
+      legacy_selector="$head"
+    fi
     result=$(jq -cn \
       --argjson map "${PG_TEST_PR_LIST_MAP}" \
-      --arg key "${repo}|${head}" \
+      --arg key "${repo}|${selector}" \
+      --arg legacy_key "${repo}|${legacy_selector}" \
       --arg repo "$repo" \
-      --arg head "$head" \
-      '$map[$key] // $map[$repo] // $map[$head] // empty')
+      --arg selector "$selector" \
+      --arg legacy_selector "$legacy_selector" \
+      '$map[$key] // $map[$legacy_key] // $map[$repo] // $map[$selector] // $map[$legacy_selector] // empty')
     if [[ -n "$result" && "$result" != "null" ]]; then
       printf '%s\n' "$result"
       exit 0
@@ -538,6 +554,40 @@ expect_contains "$plain_main_upstream" "tracks upstream/main"
   git branch --set-upstream-to=origin/mho/existing-pr mho/existing-pr >/dev/null
 )
 echo "ok 17 - plain push is blocked when feature branch tracks upstream main"
+
+IFS='|' read -r SCRATCH_REPO SCRATCH_BIN SCRATCH_ORIGIN <<<"$(make_repo scratch)"
+FAKE_BIN="$SCRATCH_BIN"
+(
+  cd "$SCRATCH_REPO"
+  git checkout -b wip/agent/backup >/dev/null
+  printf 'scratch\n' >scratch.txt
+  git add scratch.txt
+  git commit -m "scratch backup" >/dev/null
+)
+export PG_TEST_PR_JSON='[]'
+export PG_TEST_PR_LIST_MAP=''
+scratch_allow=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+[[ -z "$scratch_allow" ]] || fail "expected scratch branch push to be allowed, got: $scratch_allow"
+echo "ok scratch-1 - scratch branch push is allowed without push-gate"
+
+scratch_force=$(run_guard "$SCRATCH_REPO" "git push --force-with-lease origin wip/agent/backup")
+expect_contains "$scratch_force" "does not allow force-with-lease"
+echo "ok scratch-2 - scratch branch force-with-lease is blocked by policy"
+
+export PG_TEST_PR_JSON='[{"number":314,"url":"https://example.test/pr/314"}]'
+export PG_TEST_PR_LIST_MAP=''
+scratch_pr_head=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+expect_contains "$scratch_pr_head" "has an open PR"
+echo "ok scratch-3 - scratch branch with open PR is delivery scope"
+
+export PG_TEST_PR_JSON='[]'
+export PG_TEST_PR_LIST_MAP='{"base:wip/agent/backup":[{"number":315,"url":"https://example.test/pr/315"}]}'
+scratch_pr_base=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+expect_contains "$scratch_pr_base" "base of an open PR"
+echo "ok scratch-4 - scratch branch used as PR base is delivery scope"
+export PG_TEST_PR_JSON='[{"number":123,"url":"https://example.test/pr/123"}]'
+export PG_TEST_PR_LIST_MAP=''
+FAKE_BIN="$EXISTING_FAKE_BIN"
 
 upstream_draft=$(run_helper "$REPO" draft-approve \
   --remote upstream \

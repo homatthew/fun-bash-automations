@@ -6,6 +6,8 @@ harnesses.
 ## Layout
 
 - `AGENTS.md` shared instruction policy
+- `agent-push-policy.json` schema-backed branch classes for delivery vs
+  non-delivery scratch pushes
 - `skills/*/SKILL.md` shared skills
 - `hooks/*.sh` shared hooks (projected to both harnesses)
 - `manifest.json` machine-readable mapping for projection scripts
@@ -37,6 +39,7 @@ harnesses.
 - Claude:
   - `~/.claude/CLAUDE.md` -> `claude/CLAUDE.md`
   - `~/.claude/AGENTS.md` -> `llm/AGENTS.md`
+  - `~/.claude/agent-push-policy*.json` -> `llm/agent-push-policy*.json`
   - `~/.claude/skills/*` -> `llm/skills/*`
   - `~/.claude/hooks/*.sh` -> `llm/hooks/*.sh` + `claude/hooks/*.sh`
 - Codex:
@@ -44,6 +47,7 @@ harnesses.
   - `~/.codex/hooks.json` -> copied from `codex/hooks.json`
   - `~/.codex/hooks/*.sh` -> `llm/hooks/*.sh`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
+  - `~/.codex/agent-push-policy*.json` -> `llm/agent-push-policy*.json`
   - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
 
 Adding a new shared hook: drop a `.sh` into `llm/hooks/`, run `fba-deploy`,

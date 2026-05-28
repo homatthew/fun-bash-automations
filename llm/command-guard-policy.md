@@ -66,6 +66,24 @@ workaround when a push is blocked:
 - Calling `git push` after the hook blocks, expecting the bypass envs above
   to unblock it
 
+### Scratch branch class
+
+`llm/agent-push-policy.json` defines a non-delivery scratch branch class for
+agent remote backup, resumability, and cross-workspace handoff. Scratch branch
+pushes are not a push-gate bypass because push-gate applies to delivery and
+PR-eligible branches; scratch branches are explicitly non-PR work surfaces.
+
+Agents may commit and push matching scratch branches at their discretion. The
+guard allows those pushes only when the target branch matches a configured
+scratch prefix, targets a configured scratch remote, is not a force/delete
+push, has no open PR as its head, and is not the base of an open PR. If any of
+those checks fails or cannot be verified, the branch is treated as delivery
+scope and must use push-gate.
+
+Promoting scratch work means creating or updating a delivery/PR branch from the
+scratch commits. That promotion is subject to push-gate exactly like any other
+delivery push.
+
 When push-gate blocks and no interactive terminal is available, the correct
 response has two parts:
 
