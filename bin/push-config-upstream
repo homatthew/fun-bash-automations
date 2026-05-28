@@ -250,7 +250,6 @@ PROMPT
   if ! NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
     --ephemeral \
     --sandbox read-only \
-    --ask-for-approval never \
     -C "$fba_root" \
     --output-schema "$schema_file" \
     --output-last-message "$output_file" \
