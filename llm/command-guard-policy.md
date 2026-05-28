@@ -33,7 +33,9 @@ Codex, and future harnesses.
 
 ### Push approval
 
-- Require explicit user approval before any push
+- Require explicit user approval before any delivery or PR-eligible push.
+  Non-delivery scratch branch pushes are governed by the scratch branch class
+  below.
 - Block direct pushes to `origin/main`, `origin/master`, `upstream/main`, and
   `upstream/master`
 - Allow feature-branch pushes to `upstream/*` only when the branch has a

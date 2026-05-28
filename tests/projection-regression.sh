@@ -129,6 +129,15 @@ if jq -e '.scratch_branches.default_for_agents == true and (.scratch_branches.pr
 else
   fail "agent push policy projects scratch branch defaults"
 fi
+if jq -e '
+  (.direct_push_exceptions // [])
+  | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix" and .requires_push_gate == false))
+    and (any(.repo == "dotfiles" and .delivery_branch == "main" and .requires_push_gate == false))
+' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
+  pass "agent push policy projects direct-push exceptions"
+else
+  fail "agent push policy projects direct-push exceptions"
+fi
 
 missing_skills=()
 for skill_dir in "$ROOT"/llm/skills/*/; do
