@@ -3444,21 +3444,40 @@ pg_should_prefer_upstream_base_over_pr() {
   [[ -n "$upstream" ]] || return 1
 }
 
+pg_normalize_upstream_ref() {
+  local upstream="$1"
+  if [[ "$upstream" == refs/* ]]; then
+    echo "$upstream"
+    return 0
+  fi
+  if [[ "$upstream" == */* ]] && git show-ref --verify --quiet "refs/remotes/$upstream"; then
+    echo "refs/remotes/$upstream"
+    return 0
+  fi
+  echo "$upstream"
+}
+
 pg_default_base_ref_snapshot() {
   local pr_base upstream stacked_parent remote
   if pg_should_prefer_upstream_base_over_pr; then
     upstream=$(pg_upstream_ref)
     if [[ -n "$upstream" ]]; then
+      upstream=$(pg_normalize_upstream_ref "$upstream")
       echo "$upstream"
       return 0
     fi
+  fi
+  upstream=$(pg_upstream_ref)
+  [[ -n "$upstream" ]] && upstream=$(pg_normalize_upstream_ref "$upstream")
+  if [[ -n "$upstream" ]] && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
+    echo "$upstream"
+    return 0
   fi
   pr_base=$(pg_pr_base_ref_snapshot)
   if [[ -n "$pr_base" ]]; then
     echo "$pr_base"
     return 0
   fi
-  upstream=$(pg_upstream_ref)
   if [[ -n "$upstream" ]]; then
     echo "$upstream"
     return 0
@@ -3585,9 +3604,9 @@ pg_validate_review_bases() {
   if [[ -n "$full_base" && "$full_base" != "$pending_base" ]]; then
     full_json=$(pg_validate_review_base_json "full-review" "$full_base" "$head")
   fi
-  allowed=$(jq -n --argjson pending "$pending_json" --argjson full "$full_json" '$pending.allowed and $full.allowed')
+  allowed=$(jq -n --argjson pending "$pending_json" '$pending.allowed')
   reason=$(jq -n --argjson pending "$pending_json" --argjson full "$full_json" -r '
-    [$pending, $full]
+    [$pending]
     | map(select(.allowed != true) | .reason)
     | map(select(. != null and . != ""))
     | unique

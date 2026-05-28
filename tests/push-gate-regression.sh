@@ -426,6 +426,50 @@ lease_pr=$(jq -r '.pr_number' "$lease_path")
   || fail "expected PR-description-style description to be stored in lease"
 echo "ok 5 - noninteractive approval is blocked; lease fixture installed"
 
+IFS='|' read -r EXISTING_UPDATE_REPO EXISTING_UPDATE_BIN EXISTING_UPDATE_ORIGIN <<<"$(make_repo existing-pr-update)"
+FAKE_BIN="$EXISTING_UPDATE_BIN"
+(
+  cd "$EXISTING_UPDATE_REPO"
+  git checkout -b mho/existing-pr-update >/dev/null
+  printf 'one\n' >feature.txt
+  git add feature.txt
+  git commit -m "feature start" >/dev/null
+  git push -u origin mho/existing-pr-update >/dev/null
+)
+EXISTING_UPDATE_UPDATER="$TEST_TMP/existing-pr-update-updater"
+git clone "$EXISTING_UPDATE_ORIGIN" "$EXISTING_UPDATE_UPDATER" >/dev/null 2>&1
+(
+  cd "$EXISTING_UPDATE_UPDATER"
+  git config user.name "Push Gate Test"
+  git config user.email "push-gate@test"
+  printf 'upstream\n' >>README.md
+  git add README.md
+  git commit -m "advance main" >/dev/null
+  git push origin main >/dev/null
+)
+(
+  cd "$EXISTING_UPDATE_REPO"
+  printf 'two\n' >>feature.txt
+  git add feature.txt
+  git commit -m "feature follow-up" >/dev/null
+)
+export PG_TEST_PR_JSON='[{"number":124,"url":"https://example.test/pr/124"}]'
+run_helper "$EXISTING_UPDATE_REPO" prepare \
+  --what "feature follow-up" \
+  --why "approve an incremental push to an existing PR" \
+  --approach "scope approval to the pending branch update" >/dev/null
+existing_update_draft_output=$(run_helper "$EXISTING_UPDATE_REPO" draft-approve)
+existing_update_draft_file=$(extract_path "$existing_update_draft_output" "^JSON draft file:")
+[[ "$(jq -r '.base_ref_snapshot' "$existing_update_draft_file")" == "refs/remotes/origin/mho/existing-pr-update" ]] \
+  || fail "expected existing PR update to use upstream branch as base: $(jq -r '.base_ref_snapshot' "$existing_update_draft_file")"
+[[ "$(jq -r '.approved_scope.paths | join(",")' "$existing_update_draft_file")" == "feature.txt" ]] \
+  || fail "expected existing PR update scope to include only pending-push files: $(jq -c '.approved_scope.paths' "$existing_update_draft_file")"
+[[ "$(jq -r '.local_review.diff.base' "$existing_update_draft_file")" == "refs/remotes/origin/mho/existing-pr-update" ]] \
+  || fail "expected local review base to be pending-push upstream: $(jq -c '.local_review.diff' "$existing_update_draft_file")"
+unset PG_TEST_PR_JSON
+echo "ok 5a - existing PR update approval uses pending-push base after target branch advances"
+
+export PG_TEST_PR_JSON='[{"number":123,"url":"https://example.test/pr/123"}]'
 raw_output=$(run_guard "$REPO" "git push -u origin mho/existing-pr")
 expect_contains "$raw_output" "pg push"
 echo "ok 6 - raw git push denied without pending assertion"
@@ -867,7 +911,7 @@ fba_base_output=$(run_helper "$FBA_BASE_REPO" draft-approve \
   --intent $'update fun-bash-automations delivery branch\nsame branch\nno rewrite' \
   --assert-flow $'update fun-bash-automations delivery branch\nbranch mh-netflix\nno rewrite')
 fba_base_draft=$(extract_path "$fba_base_output" "^JSON draft file:")
-[[ "$(jq -r '.approved_scope.base_ref' "$fba_base_draft")" == "origin/mh-netflix" ]] \
+[[ "$(jq -r '.approved_scope.base_ref' "$fba_base_draft")" == "refs/remotes/origin/mh-netflix" ]] \
   || fail "expected fun-bash-automations mh-netflix to use upstream base, got $(jq -r '.approved_scope.base_ref' "$fba_base_draft")"
 echo "ok 27 - fun-bash-automations mh-netflix ignores stale PR base and uses tracking branch"
 
