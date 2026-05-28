@@ -122,33 +122,47 @@ assert_file "$TMP_HOME/.claude/AGENTS.md" "~/.claude/AGENTS.md exists"
 [[ -L "$TMP_HOME/.claude/AGENTS.md" ]] && pass "~/.claude/AGENTS.md is symlink" \
   || fail "~/.claude/AGENTS.md is symlink"
 assert_file "$TMP_HOME/.codex/AGENTS.md" "~/.codex/AGENTS.md exists"
-assert_file "$TMP_HOME/.claude/agent-push-policy.json" "~/.claude/agent-push-policy.json exists"
-assert_file "$TMP_HOME/.codex/agent-push-policy.json" "~/.codex/agent-push-policy.json exists"
-if jq -e '.scratch_branches.default_for_agents == true and (.scratch_branches.prefixes | index("wip/agent/") != null)' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
-  pass "agent push policy projects scratch branch defaults"
-else
-  fail "agent push policy projects scratch branch defaults"
-fi
-if jq -e '
-  .scratch_branches.commit_push_cadence.mode == "regular_milestones"
-  and (.scratch_branches.commit_push_cadence.events | index("after_coherent_checkpoint") != null)
-  and (.scratch_branches.commit_push_cadence.events | index("after_verification_pass") != null)
-  and (.scratch_branches.commit_push_cadence.events | index("before_long_running_or_interruptible_work") != null)
-  and (.scratch_branches.commit_push_cadence.events | index("before_handoff_or_context_compaction") != null)
-' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
-  pass "agent push policy projects scratch cadence"
-else
-  fail "agent push policy projects scratch cadence"
-fi
-if jq -e '
-  (.direct_push_exceptions // [])
-  | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix" and .requires_push_gate == false))
-    and (any(.repo == "dotfiles" and .delivery_branch == "main" and .requires_push_gate == false))
-' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
-  pass "agent push policy projects direct-push exceptions"
-else
-  fail "agent push policy projects direct-push exceptions"
-fi
+for harness in claude codex; do
+  policy="$TMP_HOME/.$harness/agent-push-policy.json"
+  schema="$TMP_HOME/.$harness/agent-push-policy.schema.json"
+  assert_file "$policy" "~/.$harness/agent-push-policy.json exists"
+  assert_file "$schema" "~/.$harness/agent-push-policy.schema.json exists"
+  if jq . "$schema" >/dev/null; then
+    pass "$harness agent push policy schema is valid JSON"
+  else
+    fail "$harness agent push policy schema is valid JSON"
+  fi
+  if jq -e '
+    .scratch_branches.enabled == true
+    and .scratch_branches.default_for_agents == true
+    and (.scratch_branches.prefixes | index("wip/agent/") != null)
+    and (.scratch_branches.prefixes | index("scratch/agent/") != null)
+  ' "$policy" >/dev/null; then
+    pass "$harness agent push policy projects scratch branch defaults"
+  else
+    fail "$harness agent push policy projects scratch branch defaults"
+  fi
+  if jq -e '
+    .scratch_branches.commit_push_cadence.mode == "regular_milestones"
+    and (.scratch_branches.commit_push_cadence.events | index("after_coherent_checkpoint") != null)
+    and (.scratch_branches.commit_push_cadence.events | index("after_verification_pass") != null)
+    and (.scratch_branches.commit_push_cadence.events | index("before_long_running_or_interruptible_work") != null)
+    and (.scratch_branches.commit_push_cadence.events | index("before_handoff_or_context_compaction") != null)
+  ' "$policy" >/dev/null; then
+    pass "$harness agent push policy projects scratch cadence"
+  else
+    fail "$harness agent push policy projects scratch cadence"
+  fi
+  if jq -e '
+    (.direct_push_exceptions // [])
+    | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix" and .requires_push_gate == false))
+      and (any(.repo == "dotfiles" and .delivery_branch == "main" and .requires_push_gate == false))
+  ' "$policy" >/dev/null; then
+    pass "$harness agent push policy projects direct-push exceptions"
+  else
+    fail "$harness agent push policy projects direct-push exceptions"
+  fi
+done
 
 missing_skills=()
 for skill_dir in "$ROOT"/llm/skills/*/; do

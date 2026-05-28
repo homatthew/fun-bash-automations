@@ -25,7 +25,8 @@ Codex, and future harnesses.
 
 ### Git history and branch safety
 
-- Block `git push --force`; allow `--force-with-lease`
+- Block `git push --force`; allow `--force-with-lease` only where delivery
+  push-gate policy permits it. Scratch branches never allow force pushes.
 - Block `git reset --hard`
 - Block broad discard commands like `git checkout .`, `git checkout -- .`,
   `git restore .`, `git clean -f`, `git branch -D`

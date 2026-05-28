@@ -627,7 +627,7 @@ scratch_second_prefix=$(run_guard "$SCRATCH_REPO" "git push origin scratch/agent
 echo "ok scratch-2c - scratch git -C and alternate prefix pushes are classified"
 
 scratch_delete=$(run_guard "$SCRATCH_REPO" "git push origin :wip/agent/backup")
-expect_contains "$scratch_delete" "deletion is not allowed"
+expect_contains "$scratch_delete" "deleting remote branches"
 scratch_remote=$(run_guard "$SCRATCH_REPO" "git push upstream wip/agent/backup")
 expect_contains "$scratch_remote" "configured scratch remotes"
 echo "ok scratch-2d - scratch delete and wrong remote are blocked"
@@ -676,6 +676,8 @@ scratch_pr_ready_positional=$(run_guard "$REPO" "gh pr ready wip/agent/backup")
 expect_contains "$scratch_pr_ready_positional" "not PR-eligible"
 scratch_pr_reopen_positional=$(run_guard "$REPO" "gh pr reopen scratch/agent/backup2")
 expect_contains "$scratch_pr_reopen_positional" "not PR-eligible"
+scratch_pr_bad_policy=$(run_guard_with_policy "$REPO" "gh -R other/repo pr create --head wip/agent/backup --base main --title scratch --body scratch" "$bad_type_policy")
+expect_contains "$scratch_pr_bad_policy" "not PR-eligible"
 echo "ok scratch-2g - scratch PR creation/readiness is blocked"
 
 export PG_TEST_PR_JSON='[{"number":314,"url":"https://example.test/pr/314"}]'
@@ -854,6 +856,10 @@ FAKE_BIN="$FBA_BASE_BIN"
 )
 fba_direct_delivery=$(run_guard "$FBA_BASE_REPO" "git push origin mh-netflix")
 [[ -z "$fba_direct_delivery" ]] || fail "expected fun-bash-automations delivery branch to push directly, got: $fba_direct_delivery"
+fba_delete_block=$(run_guard "$FBA_BASE_REPO" "git push origin --delete mh-netflix")
+expect_contains "$fba_delete_block" "deleting remote branches"
+fba_colon_delete_block=$(run_guard "$FBA_BASE_REPO" "git push origin :mh-netflix")
+expect_contains "$fba_colon_delete_block" "deleting remote branches"
 fba_main_block=$(run_guard "$FBA_BASE_REPO" "git push origin HEAD:main")
 expect_contains "$fba_main_block" "origin/main"
 export PG_TEST_PR_JSON='[{"number":3,"url":"https://example.test/pr/3","baseRefName":"main"}]'
@@ -887,6 +893,12 @@ dotfiles_main_explicit_feature_block=$(run_guard "$DOTFILES_REPO" "git push orig
 expect_contains "$dotfiles_main_explicit_feature_block" "durable lease"
 dotfiles_main_allow=$(run_guard "$DOTFILES_REPO" "git push origin main")
 [[ -z "$dotfiles_main_allow" ]] || fail "expected dotfiles delivery branch to push directly, got: $dotfiles_main_allow"
+dotfiles_delete_block=$(run_guard "$DOTFILES_REPO" "git push origin --delete main")
+expect_contains "$dotfiles_delete_block" "deleting remote branches"
+dotfiles_colon_delete_block=$(run_guard "$DOTFILES_REPO" "git push origin :main")
+expect_contains "$dotfiles_colon_delete_block" "deleting remote branches"
+dotfiles_compound_feature_block=$(run_guard "$DOTFILES_REPO" "git status && git push origin mho/not-delivery")
+expect_contains "$dotfiles_compound_feature_block" "durable lease"
 dotfiles_all_block=$(run_guard "$DOTFILES_REPO" "git push --all origin")
 expect_contains "$dotfiles_all_block" "Blocked:"
 dotfiles_wrong_workdir_block=$(run_guard_with_workdir "$TEST_TMP" "git -C $REPO push origin HEAD:main" "$DOTFILES_REPO")

@@ -4148,7 +4148,7 @@ pg_parse_common_flag() {
 pg_parse_push_command() {
   local command="$1"
   python3 - "$command" <<'PY'
-import json, shlex, sys
+import json, re, shlex, sys
 
 cmd = sys.argv[1]
 result = {
@@ -4160,21 +4160,15 @@ result = {
     "is_force": False,
     "is_delete": False,
     "is_broad_push": False,
+    "multiple_pushes": False,
     "refspec_count": 0,
 }
 try:
-    tokens = shlex.split(cmd)
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
 except Exception as exc:
     result["error"] = f"Unable to parse git push command: {exc}"
-    print(json.dumps(result))
-    raise SystemExit(0)
-
-git_idx = None
-for i, token in enumerate(tokens):
-    if token == "git":
-        git_idx = i
-        break
-if git_idx is None:
     print(json.dumps(result))
     raise SystemExit(0)
 
@@ -4184,32 +4178,61 @@ global_value_options = {
 }
 global_no_value_options = {
     "--bare", "--no-replace-objects", "--no-optional-locks",
-    "--no-pager", "-p", "--paginate", "-P", "--no-pager",
+    "--no-pager", "-p", "--paginate", "-P",
 }
 
-push_idx = git_idx + 1
-while push_idx < len(tokens):
-    token = tokens[push_idx]
-    if token == "push":
-        break
-    if token in global_value_options and push_idx + 1 < len(tokens):
-        push_idx += 2
-        continue
-    if any(token.startswith(opt + "=") for opt in global_value_options if opt.startswith("--")):
-        push_idx += 1
-        continue
-    if token in global_no_value_options:
-        push_idx += 1
-        continue
-    print(json.dumps(result))
-    raise SystemExit(0)
+def segments_from_tokens(values):
+    segments = []
+    current = []
+    for token in values:
+        if token in {"&&", "||", ";", "|"}:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
 
-if push_idx >= len(tokens) or tokens[push_idx] != "push":
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    push_idx = 1
+    while push_idx < len(segment):
+        token = segment[push_idx]
+        if token == "push":
+            return segment[push_idx + 1 :]
+        if token in global_value_options and push_idx + 1 < len(segment):
+            push_idx += 2
+            continue
+        if any(token.startswith(opt + "=") for opt in global_value_options if opt.startswith("--")):
+            push_idx += 1
+            continue
+        if token in global_no_value_options:
+            push_idx += 1
+            continue
+        return None
+    return None
+
+push_args = [args for args in (push_args_for_segment(segment) for segment in segments_from_tokens(tokens)) if args is not None]
+if not push_args:
     print(json.dumps(result))
     raise SystemExit(0)
 
 result["is_push"] = True
-args = tokens[push_idx + 1 :]
+if len(push_args) > 1:
+    result["multiple_pushes"] = True
+    print(json.dumps(result))
+    raise SystemExit(0)
+args = push_args[0]
 remote = None
 refspecs = []
 skip_next = False
@@ -4752,11 +4775,16 @@ pg_validate_branch_lease_state() {
 
 pg_validate_push_guard() {
   local command="$1"
-  local parsed is_push remote source_ref target_branch force_with_lease is_force is_broad_push refspec_count current_branch lease_branch branch_ref current_head
+  local parsed parse_error is_push remote source_ref target_branch force_with_lease is_force is_broad_push multiple_pushes refspec_count current_branch lease_branch branch_ref current_head
   local lease_json lease_remote lease_status approved_anchor pending_path pending_json pending_remote pending_head pending_branch_ref
   local branch_upstream scratch_result scratch_allowed scratch_candidate scratch_reason
 
   parsed=$(pg_parse_push_command "$command")
+  parse_error=$(echo "$parsed" | jq -r '.error // empty')
+  if [[ -n "$parse_error" ]]; then
+    jq -n --arg reason "Blocked: $parse_error" '{allowed:false, reason:$reason}'
+    return 0
+  fi
   is_push=$(echo "$parsed" | jq -r '.is_push')
   [[ "$is_push" == "true" ]] || {
     jq -n '{allowed:true}'
@@ -4772,6 +4800,7 @@ pg_validate_push_guard() {
   force_with_lease=$(echo "$parsed" | jq -r '.force_with_lease')
   is_force=$(echo "$parsed" | jq -r '.is_force // false')
   is_broad_push=$(echo "$parsed" | jq -r '.is_broad_push // false')
+  multiple_pushes=$(echo "$parsed" | jq -r '.multiple_pushes // false')
   refspec_count=$(echo "$parsed" | jq -r '.refspec_count // 0')
   local is_delete
   is_delete=$(echo "$parsed" | jq -r '.is_delete')
@@ -4788,18 +4817,28 @@ pg_validate_push_guard() {
   [[ -n "$target_branch" ]] || target_branch="$lease_branch"
   branch_ref=$(pg_branch_ref "$lease_branch")
 
-  if [[ "$remote" =~ ^(origin|upstream)$ && "$target_branch" =~ ^(main|master)$ ]]; then
-    jq -n --arg reason "Blocked: pushing directly to $remote/$target_branch is not allowed." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-
   if [[ "$is_broad_push" == "true" ]]; then
     jq -n '{allowed:false, reason:"Blocked: broad git push modes (--all, --mirror, --tags) are not allowed for agent pushes."}'
     return 0
   fi
 
+  if [[ "$multiple_pushes" == "true" ]]; then
+    jq -n '{allowed:false, reason:"Blocked: compound commands with multiple git push operations require separate guarded pushes."}'
+    return 0
+  fi
+
   if [[ "$refspec_count" -gt 1 ]]; then
     jq -n '{allowed:false, reason:"Blocked: multiple-refspec git pushes require separate guarded pushes per branch."}'
+    return 0
+  fi
+
+  if [[ "$is_delete" == "true" ]]; then
+    jq -n '{allowed:false, reason:"Blocked: deleting remote branches is not allowed for agent pushes."}'
+    return 0
+  fi
+
+  if [[ "$remote" =~ ^(origin|upstream)$ && "$target_branch" =~ ^(main|master)$ ]]; then
+    jq -n --arg reason "Blocked: pushing directly to $remote/$target_branch is not allowed." '{allowed:false, reason:$reason}'
     return 0
   fi
 

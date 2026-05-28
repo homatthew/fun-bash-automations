@@ -27,8 +27,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "default_for_agents": { "type": "boolean" },
+        "enabled": { "type": "boolean", "const": true },
+        "default_for_agents": { "type": "boolean", "const": true },
         "purpose": { "type": "string" },
         "commit_push_cadence": {
           "type": "object",

@@ -14,6 +14,9 @@ workflows across Claude, Codex, and future harnesses.
   delivery branch. Do not run `pg prepare`, ask the user to run `pg`, or use
   `pg push` for these two repos.
 - Do not push delivery or PR-eligible branches unless explicitly asked.
+- For agent-owned non-delivery work, create or use a scratch branch matching
+  `llm/agent-push-policy.json` by default, typically `wip/agent/<topic>` or
+  `scratch/agent/<topic>`.
 - Agents may commit and push scratch branches at their discretion for remote
   backup, resumability, and cross-workspace handoff when the target branch
   matches `llm/agent-push-policy.json`. Scratch branches are not PR-eligible,
