@@ -162,7 +162,7 @@ append_config_repo_review_input() {
 codex_config_push_review() {
   local fba_root="$1"
   local dotfiles_root="$2"
-  local input_file schema_file output_file secret_report status report
+  local input_file schema_file output_file secret_report codex_log status report
 
   command -v codex >/dev/null 2>&1 || {
     echo "codex is required for push-config-upstream pre-push review."
@@ -198,6 +198,10 @@ codex_config_push_review() {
   }
   output_file="$(mktemp -t config-push-review-output.XXXXXX)" || {
     rm -f "$input_file" "$schema_file"
+    return 1
+  }
+  codex_log="$(mktemp -t config-push-review-codex.XXXXXX)" || {
+    rm -f "$input_file" "$schema_file" "$output_file"
     return 1
   }
 
@@ -250,12 +254,15 @@ PROMPT
   if ! NOTIFY_SUPPRESS=1 PG_INTERNAL_CODEX=1 codex exec \
     --ephemeral \
     --sandbox read-only \
+    --color never \
     -C "$fba_root" \
     --output-schema "$schema_file" \
     --output-last-message "$output_file" \
-    - < "$input_file"; then
+    - < "$input_file" >"$codex_log" 2>&1; then
     echo "Codex pre-push review failed to run."
-    rm -f "$input_file" "$schema_file" "$output_file"
+    echo "Codex output tail:"
+    tail -40 "$codex_log" 2>/dev/null || true
+    rm -f "$input_file" "$schema_file" "$output_file" "$codex_log"
     return 1
   fi
 
@@ -274,12 +281,12 @@ PROMPT
     echo
     echo "Blocked: Codex pre-push review status is ${status:-unparseable}."
     jq -r '.blocking_findings[]? | "  - " + .' "$output_file" 2>/dev/null
-    rm -f "$input_file" "$schema_file" "$output_file"
+    rm -f "$input_file" "$schema_file" "$output_file" "$codex_log"
     return 1
   fi
 
   jq -r '.warnings[]? | "Warning: " + .' "$output_file" 2>/dev/null
-  rm -f "$input_file" "$schema_file" "$output_file"
+  rm -f "$input_file" "$schema_file" "$output_file" "$codex_log"
 }
 
 confirm_config_push() {
