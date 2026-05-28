@@ -865,9 +865,10 @@ check_git_force() {
 }
 
 # --- 2. Push Guard ---
-# Blocks ALL git push by default. Pushes require a durable branch lease
-# plus a fresh pending self-assertion created by `pg push`. Invokes
-# push-gate.sh as a subprocess so a bug there can't take down this hook.
+# Blocks delivery git pushes by default. Pushes require either an explicit
+# non-delivery scratch classification from llm/agent-push-policy.json, or a
+# durable branch lease plus fresh pending self-assertion created by `pg push`.
+# Invokes push-gate.sh as a subprocess so a bug there can't take down this hook.
 check_push_guard() {
   local result allowed reason rc
   if is_direct_delivery_push; then

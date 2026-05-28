@@ -13,7 +13,13 @@ workflows across Claude, Codex, and future harnesses.
   explicit finish workflow, push directly with normal `git push` to the current
   delivery branch. Do not run `pg prepare`, ask the user to run `pg`, or use
   `pg push` for these two repos.
-- Do not push unless explicitly asked.
+- Do not push delivery or PR-eligible branches unless explicitly asked.
+- Agents may commit and push scratch branches at their discretion for remote
+  backup, resumability, and cross-workspace handoff when the target branch
+  matches `llm/agent-push-policy.json`. Scratch branches are not PR-eligible,
+  are not subject to push-gate, and must not have an open PR or be the base of
+  an open PR. Promoting scratch work to a delivery/PR branch requires the normal
+  push-gate flow.
 - Explicit finish-workflow invocations such as `/go`, `/commit-push-pr`,
   `/push-review`, and `/stacked-pr` count as an explicit ask for the
   corresponding delivery actions.

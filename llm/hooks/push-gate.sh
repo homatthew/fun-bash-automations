@@ -174,6 +174,124 @@ pg_helper_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
+pg_agent_push_policy_path() {
+  printf '%s\n' "${PG_AGENT_PUSH_POLICY:-$(pg_helper_dir)/../agent-push-policy.json}"
+}
+
+pg_agent_push_policy_json() {
+  local path
+  path=$(pg_agent_push_policy_path)
+  if [[ -f "$path" ]]; then
+    jq -c . "$path" 2>/dev/null || jq -n '{scratch_branches:{enabled:false}}'
+  else
+    jq -n '{scratch_branches:{enabled:false}}'
+  fi
+}
+
+pg_json_array_contains() {
+  local json="$1" value="$2"
+  jq -e --arg value "$value" 'index($value) != null' <<<"$json" >/dev/null
+}
+
+pg_branch_matches_any_prefix() {
+  local branch="$1" prefixes_json="$2" prefix
+  while IFS= read -r prefix; do
+    [[ -z "$prefix" ]] && continue
+    [[ "$branch" == "$prefix"* ]] && return 0
+  done < <(jq -r '.[]' <<<"$prefixes_json")
+  return 1
+}
+
+pg_open_pr_count_for_branch() {
+  local mode="$1" branch="$2" out
+  if ! command -v gh >/dev/null 2>&1; then
+    return 2
+  fi
+  case "$mode" in
+    head)
+      out=$(gh pr list --state open --head "$branch" --json number 2>/dev/null) || return 2
+      ;;
+    base)
+      out=$(gh pr list --state open --base "$branch" --json number 2>/dev/null) || return 2
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  jq -r 'length' <<<"$out" 2>/dev/null || return 2
+}
+
+pg_validate_scratch_push() {
+  local policy="$1" remote="$2" target_branch="$3" force_with_lease="$4" is_delete="$5"
+  local scratch enabled default_for_agents prefixes remotes allow_force allow_delete must_not_have_pr must_not_be_base
+  local pr_count
+
+  scratch=$(jq -c '.scratch_branches // {enabled:false}' <<<"$policy")
+  enabled=$(jq -r '.enabled // false' <<<"$scratch")
+  default_for_agents=$(jq -r '.default_for_agents // false' <<<"$scratch")
+  [[ "$enabled" == "true" && "$default_for_agents" == "true" ]] || {
+    jq -n '{allowed:false, scratch_candidate:false}'
+    return 0
+  }
+
+  prefixes=$(jq -c '.prefixes // []' <<<"$scratch")
+  remotes=$(jq -c '.remotes // []' <<<"$scratch")
+  if ! pg_branch_matches_any_prefix "$target_branch" "$prefixes"; then
+    jq -n '{allowed:false, scratch_candidate:false}'
+    return 0
+  fi
+  if ! pg_json_array_contains "$remotes" "$remote"; then
+    jq -n --arg remote "$remote" --arg branch "$target_branch" \
+      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " may only be pushed to configured scratch remotes, not " + $remote + ".")}'
+    return 0
+  fi
+
+  allow_force=$(jq -r '.allow_force_with_lease // false' <<<"$scratch")
+  if [[ "$force_with_lease" == "true" && "$allow_force" != "true" ]]; then
+    jq -n --arg branch "$target_branch" \
+      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " does not allow force-with-lease pushes by policy.")}'
+    return 0
+  fi
+
+  allow_delete=$(jq -r '.allow_delete // false' <<<"$scratch")
+  if [[ "$is_delete" == "true" && "$allow_delete" != "true" ]]; then
+    jq -n --arg branch "$target_branch" \
+      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " deletion is not allowed by agent scratch policy.")}'
+    return 0
+  fi
+
+  must_not_have_pr=$(jq -r '.must_not_have_open_pr // true' <<<"$scratch")
+  if [[ "$must_not_have_pr" == "true" ]]; then
+    pr_count=$(pg_open_pr_count_for_branch head "$target_branch") || {
+      jq -n --arg branch "$target_branch" \
+        '{allowed:false, scratch_candidate:true, reason:("Blocked: could not verify whether scratch branch " + $branch + " has an open PR. Authenticate gh or use push-gate.")}'
+      return 0
+    }
+    if [[ "$pr_count" -gt 0 ]]; then
+      jq -n --arg branch "$target_branch" \
+        '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " has an open PR and is delivery scope. Use push-gate.")}'
+      return 0
+    fi
+  fi
+
+  must_not_be_base=$(jq -r '.must_not_be_pr_base // true' <<<"$scratch")
+  if [[ "$must_not_be_base" == "true" ]]; then
+    pr_count=$(pg_open_pr_count_for_branch base "$target_branch") || {
+      jq -n --arg branch "$target_branch" \
+        '{allowed:false, scratch_candidate:true, reason:("Blocked: could not verify whether scratch branch " + $branch + " is an open PR base. Authenticate gh or use push-gate.")}'
+      return 0
+    }
+    if [[ "$pr_count" -gt 0 ]]; then
+      jq -n --arg branch "$target_branch" \
+        '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " is the base of an open PR and is delivery scope. Use push-gate.")}'
+      return 0
+    fi
+  fi
+
+  jq -n --arg branch "$target_branch" --arg remote "$remote" \
+    '{allowed:true, scratch_candidate:true, verdict:"scratch-direct", branch:$branch, remote:$remote}'
+}
+
 # ------------------------------------------------------------------------
 # Central lease index (SQLite)
 # ------------------------------------------------------------------------
@@ -4559,7 +4677,7 @@ pg_validate_push_guard() {
   local command="$1"
   local parsed is_push remote source_ref target_branch force_with_lease current_branch lease_branch branch_ref current_head
   local lease_json lease_remote lease_status approved_anchor pending_path pending_json pending_remote pending_head pending_branch_ref
-  local branch_upstream
+  local branch_upstream scratch_result scratch_allowed scratch_candidate scratch_reason
 
   parsed=$(pg_parse_push_command "$command")
   is_push=$(echo "$parsed" | jq -r '.is_push')
@@ -4609,6 +4727,19 @@ pg_validate_push_guard() {
   branch_upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
   if [[ -n "$current_branch" && "$lease_branch" == "$current_branch" && "$branch_upstream" =~ ^(origin|upstream)/(main|master)$ && ! "$current_branch" =~ ^(main|master)$ ]]; then
     jq -n --arg reason "Blocked: branch '$current_branch' tracks $branch_upstream. Re-set upstream first: git branch --set-upstream-to=origin/$current_branch" '{allowed:false, reason:$reason}'
+    return 0
+  fi
+
+  scratch_result=$(pg_validate_scratch_push "$(pg_agent_push_policy_json)" "$remote" "$target_branch" "$force_with_lease" "$is_delete")
+  scratch_allowed=$(echo "$scratch_result" | jq -r '.allowed')
+  scratch_candidate=$(echo "$scratch_result" | jq -r '.scratch_candidate // false')
+  if [[ "$scratch_allowed" == "true" ]]; then
+    echo "$scratch_result"
+    return 0
+  fi
+  if [[ "$scratch_candidate" == "true" ]]; then
+    scratch_reason=$(echo "$scratch_result" | jq -r '.reason')
+    jq -n --arg reason "$scratch_reason" '{allowed:false, reason:$reason}'
     return 0
   fi
 

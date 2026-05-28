@@ -122,6 +122,13 @@ assert_file "$TMP_HOME/.claude/AGENTS.md" "~/.claude/AGENTS.md exists"
 [[ -L "$TMP_HOME/.claude/AGENTS.md" ]] && pass "~/.claude/AGENTS.md is symlink" \
   || fail "~/.claude/AGENTS.md is symlink"
 assert_file "$TMP_HOME/.codex/AGENTS.md" "~/.codex/AGENTS.md exists"
+assert_file "$TMP_HOME/.claude/agent-push-policy.json" "~/.claude/agent-push-policy.json exists"
+assert_file "$TMP_HOME/.codex/agent-push-policy.json" "~/.codex/agent-push-policy.json exists"
+if jq -e '.scratch_branches.default_for_agents == true and (.scratch_branches.prefixes | index("wip/agent/") != null)' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
+  pass "agent push policy projects scratch branch defaults"
+else
+  fail "agent push policy projects scratch branch defaults"
+fi
 
 missing_skills=()
 for skill_dir in "$ROOT"/llm/skills/*/; do

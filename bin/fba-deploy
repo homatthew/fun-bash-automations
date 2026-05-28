@@ -182,6 +182,11 @@ project_shared() {
     if [[ -f "$ROOT/llm/AGENTS.md" ]]; then
         link_path "$ROOT/llm/AGENTS.md" "$home_dir/AGENTS.md"
     fi
+    for policy_file in agent-push-policy.json agent-push-policy.schema.json; do
+        if [[ -f "$ROOT/llm/$policy_file" ]]; then
+            link_path "$ROOT/llm/$policy_file" "$home_dir/$policy_file"
+        fi
+    done
 
     for skill_dir in "$ROOT"/llm/skills/*/; do
         [[ -d "$skill_dir" ]] || continue

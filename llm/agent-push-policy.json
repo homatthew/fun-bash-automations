@@ -1,0 +1,22 @@
+{
+  "$schema": "./agent-push-policy.schema.json",
+  "version": 1,
+  "scratch_branches": {
+    "enabled": true,
+    "default_for_agents": true,
+    "purpose": "Remote backup, resumability, and cross-workspace handoff for agent work that is not PR delivery.",
+    "prefixes": ["wip/agent/", "scratch/agent/"],
+    "remotes": ["origin"],
+    "requires_push_gate": false,
+    "requires_user_opt_in": false,
+    "must_not_have_open_pr": true,
+    "must_not_be_pr_base": true,
+    "allow_force_with_lease": false,
+    "allow_delete": false
+  },
+  "delivery_branches": {
+    "requires_push_gate": true,
+    "pr_eligible": true,
+    "notes": "Any branch with an open PR, intended PR, or PR-base relationship is delivery scope and uses push-gate unless a repo-specific direct-push exception applies."
+  }
+}
