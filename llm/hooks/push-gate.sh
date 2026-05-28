@@ -238,6 +238,13 @@ pg_validate_scratch_push() {
     and (.must_not_be_pr_base | type == "boolean")
     and (.allow_force_with_lease | type == "boolean")
     and (.allow_delete | type == "boolean")
+    and (.commit_push_cadence | type == "object")
+    and (.commit_push_cadence.mode == "regular_milestones")
+    and (.commit_push_cadence.events | type == "array"
+      and (index("after_coherent_checkpoint") != null)
+      and (index("after_verification_pass") != null)
+      and (index("before_long_running_or_interruptible_work") != null)
+      and (index("before_handoff_or_context_compaction") != null))
     and (.prefixes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
     and (.remotes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
   ' <<<"$scratch" >/dev/null; then

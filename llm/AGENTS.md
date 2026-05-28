@@ -20,6 +20,11 @@ workflows across Claude, Codex, and future harnesses.
   are not subject to push-gate, and must not have an open PR or be the base of
   an open PR. Promoting scratch work to a delivery/PR branch requires the normal
   push-gate flow.
+- When working on a scratch branch, commit and push after coherent checkpoints
+  worth preserving, after verification passes, before long-running or
+  interruptible work, and before handoff or context compaction. Keep these
+  commits functional and resumable; do not use this cadence for delivery or
+  PR-eligible branches.
 - Explicit finish-workflow invocations such as `/go`, `/commit-push-pr`,
   `/push-review`, and `/stacked-pr` count as an explicit ask for the
   corresponding delivery actions.

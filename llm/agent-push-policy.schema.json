@@ -15,6 +15,7 @@
       "required": [
         "enabled",
         "default_for_agents",
+        "commit_push_cadence",
         "prefixes",
         "remotes",
         "requires_push_gate",
@@ -29,6 +30,34 @@
         "enabled": { "type": "boolean" },
         "default_for_agents": { "type": "boolean" },
         "purpose": { "type": "string" },
+        "commit_push_cadence": {
+          "type": "object",
+          "required": ["mode", "events"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "const": "regular_milestones" },
+            "events": {
+              "type": "array",
+              "minItems": 4,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "after_coherent_checkpoint",
+                  "after_verification_pass",
+                  "before_long_running_or_interruptible_work",
+                  "before_handoff_or_context_compaction"
+                ]
+              },
+              "allOf": [
+                { "contains": { "const": "after_coherent_checkpoint" } },
+                { "contains": { "const": "after_verification_pass" } },
+                { "contains": { "const": "before_long_running_or_interruptible_work" } },
+                { "contains": { "const": "before_handoff_or_context_compaction" } }
+              ]
+            }
+          }
+        },
         "prefixes": {
           "type": "array",
           "minItems": 1,

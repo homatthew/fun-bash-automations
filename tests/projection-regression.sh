@@ -130,6 +130,17 @@ else
   fail "agent push policy projects scratch branch defaults"
 fi
 if jq -e '
+  .scratch_branches.commit_push_cadence.mode == "regular_milestones"
+  and (.scratch_branches.commit_push_cadence.events | index("after_coherent_checkpoint") != null)
+  and (.scratch_branches.commit_push_cadence.events | index("after_verification_pass") != null)
+  and (.scratch_branches.commit_push_cadence.events | index("before_long_running_or_interruptible_work") != null)
+  and (.scratch_branches.commit_push_cadence.events | index("before_handoff_or_context_compaction") != null)
+' "$TMP_HOME/.claude/agent-push-policy.json" >/dev/null; then
+  pass "agent push policy projects scratch cadence"
+else
+  fail "agent push policy projects scratch cadence"
+fi
+if jq -e '
   (.direct_push_exceptions // [])
   | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix" and .requires_push_gate == false))
     and (any(.repo == "dotfiles" and .delivery_branch == "main" and .requires_push_gate == false))
