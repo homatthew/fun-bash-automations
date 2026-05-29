@@ -216,15 +216,10 @@ if grep -Fq "[tui.model_availability_nux]" "$TMP_HOME/.codex/config.toml"; then
 else
   fail "codex model availability state preserved"
 fi
-if grep -Fq "[marketplaces.ods-datastores-minimal]" "$TMP_HOME/.codex/config.toml" \
-  && grep -Fq 'source = "https://git.netflix.net/matthewho/cde-ods-skills.git"' "$TMP_HOME/.codex/config.toml" \
-  && grep -Fq 'sparse_paths = [".agents/plugins", "codex-plugins/ods-datastores-minimal"]' "$TMP_HOME/.codex/config.toml" \
-  && grep -Fq '[plugins."ods-datastores-minimal@ods-datastores-minimal"]' "$TMP_HOME/.codex/config.toml" \
-  && ! grep -Fq 'ref = ' "$TMP_HOME/.codex/config.toml"; then
-  pass "codex ODS plugin tracks fork latest"
-else
-  fail "codex ODS plugin tracks fork latest"
-fi
+assert_not_contains_file "$TMP_HOME/.codex/config.toml" "ngpmcpgateway.prod.local.dev.netflix.net" \
+  "internal Codex MCP gateways stay out of FBA projection"
+assert_not_contains_file "$TMP_HOME/.codex/config.toml" "cde-ods-skills.git" \
+  "internal Codex plugin marketplaces stay out of FBA projection"
 
 # --- Phase 2: Linux notify.sh smoke ---
 echo ""

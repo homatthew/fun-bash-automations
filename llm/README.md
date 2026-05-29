@@ -39,9 +39,10 @@ harnesses.
 Keep project-specific confidential topology out of this repo: custom field IDs,
 private board/category IDs, internal component mappings, team-owned labels,
 personal deployment branches, private pipeline IDs, Slack channel lore, and
-internal-only examples. Put that material in the private dotfiles overlay at
-`~/repos/dotfiles/config/llm/skills-internal/`, which installers layer after
-the shared FBA skills.
+internal-only examples. Put that material in the private dotfiles overlay under
+`~/repos/dotfiles/config/`, which installers layer after shared FBA assets. For
+LLM skills, use `config/llm/skills-internal/`; for private shell config, use
+`config/zsh/`; for Codex MCPs and plugin marketplaces, use `config/codex/`.
 
 ## Projection Targets
 
