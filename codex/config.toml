@@ -41,37 +41,3 @@ wire_api = "responses"
 [mcp_servers.chrome-devtools]
 command = "npx"
 args = ["chrome-devtools-mcp@latest"]
-
-[mcp_servers.core-tools]
-url = "http://ngpmcpgateway.prod.local.dev.netflix.net:9123/mcp/ngp-mcp-core_tools-gvEcka"
-
-[mcp_servers.netflix-ci-official]
-url = "http://ngpmcpgateway.prod.local.dev.netflix.net:9123/proxy-mcp/ngp-mcp-boost-stable-prod-1BH4v2"
-
-[mcp_servers.nflx-spinnaker]
-command = "npx"
-args = ["-y", "@netflix-internal/mcp-server-spinnaker@latest"]
-
-[mcp_servers.sourcegraph]
-command = "npx"
-args = ["-y", "@netflix-internal/mcp-server-sourcegraph"]
-
-[mcp_servers.sourcegraph.env]
-SOURCEGRAPH_URL = "https://sourcegraph.netflix.net"
-
-[mcp_servers.sourcegraph-official]
-url = "http://ngpmcpgateway.prod.local.dev.netflix.net:9123/proxy-mcp/ngp-mcp-sourcegraph-gzXzII"
-
-[mcp_servers.NECP]
-url = "http://ngpmcpgateway.prod.local.dev.netflix.net:9123/proxy-mcp/necpmcp-prod/mcp"
-
-[mcp_servers.ndex-slack-private]
-command = "__FBA_ROOT__/bin/launch-slack-mcp"
-
-[marketplaces.ods-datastores-minimal]
-source_type = "git"
-source = "https://git.netflix.net/matthewho/cde-ods-skills.git"
-sparse_paths = [".agents/plugins", "codex-plugins/ods-datastores-minimal"]
-
-[plugins."ods-datastores-minimal@ods-datastores-minimal"]
-enabled = true

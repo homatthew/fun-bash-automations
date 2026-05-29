@@ -253,9 +253,13 @@ rm -f ~/.zsh/personal.zsh
 ln -s ~/repos/fun-bash-automations/zsh/personal.zsh ~/.zsh/personal.zsh
 echo "✓ personal.zsh symlinked"
 
-rm -f ~/.zsh/netflix.zsh
-ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
-echo "✓ netflix.zsh symlinked"
+if [ -f ~/repos/dotfiles/config/zsh/netflix.zsh ]; then
+	rm -f ~/.zsh/netflix.zsh
+	ln -s ~/repos/dotfiles/config/zsh/netflix.zsh ~/.zsh/netflix.zsh
+	echo "✓ netflix.zsh symlinked from dotfiles"
+else
+	echo "i netflix.zsh skipped (private dotfiles overlay not found)"
+fi
 
 # ==============================================================================
 # Ghostty Configuration

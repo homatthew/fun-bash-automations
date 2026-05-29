@@ -170,7 +170,6 @@ Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`, `nvim`, `Diffview.nvim
 ├── .zshrc              → ~/.zshrc (symlink)
 ├── .vimrc              → ~/.vimrc (symlink)
 ├── zsh/
-│   ├── personal.zsh    → ~/.zsh/personal.zsh (symlink)
-│   └── netflix.zsh     → ~/.zsh/netflix.zsh (symlink)
+│   └── personal.zsh    → ~/.zsh/personal.zsh (symlink)
 └── setupPermissions.sh  # Run to install everything
 ```
