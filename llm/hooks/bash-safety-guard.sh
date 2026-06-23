@@ -8,7 +8,20 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
-INPUT_WORKDIR=$(echo "$INPUT" | jq -r '.tool_input.workdir // .tool_input.cwd // .cwd // empty')
+INPUT_WORKDIR=$(echo "$INPUT" | jq -r '
+  .tool_input.workdir
+  // .tool_input.cwd
+  // .tool_input.working_dir
+  // .tool_input.arguments.workdir
+  // .tool_input.args.workdir
+  // .tool_input.parameters.workdir
+  // .arguments.workdir
+  // .args.workdir
+  // .parameters.workdir
+  // .workdir
+  // .cwd
+  // empty
+')
 GUARD_WORKDIR=$(python3 - "$COMMAND" "$INPUT_WORKDIR" <<'PY'
 import os
 import shlex
@@ -57,7 +70,7 @@ for segment in segments:
             workdir = segment[idx + 1]
             idx += 2
             continue
-        if token == "push":
+        if token == "push" or token == "commit":
             if workdir:
                 if os.path.isabs(workdir):
                     print(workdir)
@@ -101,6 +114,69 @@ has_wrong_netflix_gh_host() {
   echo "$COMMAND" | grep -qE "(^|[;&|[:space:]])(export[[:space:]]+)?GH_HOST=['\"]?github\\.netflix\\.net['\"]?([[:space:];&|]|$)"
 }
 
+has_wrong_netflix_gh_cli_target() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def bad_repo_value(value):
+    return re.match(r"^(https?://)?(github|git)\.netflix\.net(/|:)", value) is not None
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "gh":
+        continue
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        value = None
+        if token in {"--hostname", "--repo", "-R"} and idx + 1 < len(segment):
+            value = segment[idx + 1]
+            idx += 2
+        elif token.startswith("--hostname=") or token.startswith("--repo="):
+            value = token.split("=", 1)[1]
+            idx += 1
+        else:
+            idx += 1
+            continue
+
+        if token.startswith("--hostname") and value == "github.netflix.net":
+            sys.exit(0)
+        if (token == "--repo" or token == "-R" or token.startswith("--repo=")) and bad_repo_value(value):
+            sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 is_fun_bash_automations_repo() {
   local root remote
   root=$(git_context rev-parse --show-toplevel 2>/dev/null || true)
@@ -139,6 +215,228 @@ direct_push_delivery_branch_for_repo() {
     | first
     | .delivery_branch // empty
   ' "$policy_path" 2>/dev/null
+}
+
+# --- yolo branch class helpers ---
+# Read configured yolo branch prefixes, but only when the class is enabled.
+# A disabled/missing/malformed yolo policy yields no prefixes, so nothing is
+# ever exempted (fail-closed).
+yolo_branch_prefixes() {
+  local policy_path
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 0
+  jq -r '
+    (.yolo_branches // {})
+    | select((.enabled // false) == true)
+    | .prefixes // []
+    | .[]
+  ' "$policy_path" 2>/dev/null
+}
+
+# True when token starts with a configured (enabled) yolo prefix.
+is_yolo_branch_token() {
+  local token="$1" prefix
+  [[ -n "$token" ]] || return 1
+  while IFS= read -r prefix; do
+    [[ -z "$prefix" ]] && continue
+    [[ "$token" == "$prefix"* ]] && return 0
+  done < <(yolo_branch_prefixes)
+  return 1
+}
+
+current_branch_is_yolo() {
+  local branch
+  branch=$(git_context symbolic-ref --quiet --short HEAD 2>/dev/null || git_context branch --show-current 2>/dev/null || true)
+  is_yolo_branch_token "$branch"
+}
+
+has_git_commit_amend_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+global_value_options = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--super-prefix",
+}
+global_no_value_options = {
+    "--bare",
+    "--no-replace-objects",
+    "--no-optional-locks",
+    "--no-pager",
+    "-p",
+    "--paginate",
+    "-P",
+}
+
+
+def commit_args(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "commit":
+            return segment[idx + 1 :]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if any(token.startswith(prefix) for prefix in (
+            "--git-dir=",
+            "--work-tree=",
+            "--namespace=",
+            "--exec-path=",
+            "--super-prefix=",
+        )):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+
+for segment in segments:
+    args = commit_args(segment)
+    if args is not None and "--amend" in args:
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+# Emit each branch name targeted by a force-delete (`git branch -D ...`, or a
+# `-d`/`--delete` combined with `--force`/`-f`, or a bundled short flag like
+# -Df) in COMMAND, one name per line. Empty output means no such delete.
+# Used only to decide whether a `git branch -D` is a pure yolo cleanup.
+git_branch_force_delete_targets() {
+  python3 - "$COMMAND" <<'PY'
+import re, shlex, sys
+
+command = sys.argv[1]
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+def branch_args(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-C":
+            idx += 2
+            continue
+        if token in {"--git-dir", "--work-tree"}:
+            idx += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            idx += 1
+            continue
+        if token == "branch":
+            return segment[idx + 1:]
+        return None
+    return None
+
+
+targets = []
+for segment in segments:
+    args = branch_args(segment)
+    if args is None:
+        continue
+    force = False
+    delete = False
+    names = []
+    for tok in args:
+        if tok == "-D":
+            force = True
+            delete = True
+            continue
+        if tok in {"-d", "--delete"}:
+            delete = True
+            continue
+        if tok in {"--force", "-f"}:
+            force = True
+            continue
+        if tok.startswith("-") and not tok.startswith("--"):
+            short = tok[1:]
+            if "D" in short:
+                force = True
+                delete = True
+            if "d" in short:
+                delete = True
+            if "f" in short:
+                force = True
+            continue
+        if tok.startswith("-"):
+            continue
+        names.append(tok)
+    if delete and force and names:
+        targets.extend(names)
+
+for name in targets:
+    print(name)
+PY
 }
 
 git_push_target_branch_from_command() {
@@ -257,7 +555,7 @@ PY
 }
 
 direct_push_exception_matches() {
-  local repo="$1" delivery_branch branch target_branch
+  local repo="$1" delivery_branch target_branch
   delivery_branch=$(direct_push_delivery_branch_for_repo "$repo")
   [[ -n "$delivery_branch" ]] || return 1
   target_branch=$(git_push_target_branch_from_command)
@@ -266,8 +564,7 @@ direct_push_exception_matches() {
     [[ "$target_branch" == "$delivery_branch" ]]
     return
   fi
-  branch=$(git_context branch --show-current 2>/dev/null || true)
-  [[ "$branch" == "$delivery_branch" ]]
+  return 1
 }
 
 is_direct_delivery_push() {
@@ -977,7 +1274,6 @@ has_scratch_pr_open_command() {
   if [[ -f "$policy_path" ]]; then
     prefixes_json=$(jq -c '
       if (.scratch_branches.enabled == true)
-        and (.scratch_branches.default_for_agents == true)
         and (.scratch_branches.prefixes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
       then .scratch_branches.prefixes
       else error("invalid scratch branch policy")
@@ -1118,6 +1414,10 @@ is_gh_api_gist_create() {
   return 1
 }
 
+is_gh_gist_create() {
+  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*gh\s+gist\s+create([[:space:]]|$)'
+}
+
 check_gist_filename_sequence() {
   local filenames sorted_filenames line expected_index expected_prefix
   filenames=$(gist_upload_filenames)
@@ -1158,8 +1458,24 @@ check_git_force() {
     deny "Blocked: git restore . discards changes broadly."
   echo "$COMMAND" | grep -qE 'git\s+clean\s+.*-f' &&
     deny "Blocked: git clean -f deletes untracked files."
-  echo "$COMMAND" | grep -qE 'git\s+branch\s+-D\s' &&
-    deny "Blocked: git branch -D force-deletes a branch."
+  if echo "$COMMAND" | grep -qE 'git\s+branch\s+-D\s'; then
+    # yolo branches may be force-deleted locally for cleanup of unmerged work.
+    # Exempt only when EVERY deleted branch name is yolo-prefixed; a mixed or
+    # non-yolo delete still blocks. Remote deletes are gated in push-gate, not
+    # here.
+    local _yolo_del_targets _yolo_del_ok _yolo_del_t
+    _yolo_del_targets=$(git_branch_force_delete_targets)
+    _yolo_del_ok=0
+    if [[ -n "$_yolo_del_targets" ]]; then
+      _yolo_del_ok=1
+      while IFS= read -r _yolo_del_t; do
+        [[ -z "$_yolo_del_t" ]] && continue
+        is_yolo_branch_token "$_yolo_del_t" || _yolo_del_ok=0
+      done <<< "$_yolo_del_targets"
+    fi
+    [[ "$_yolo_del_ok" == "1" ]] ||
+      deny "Blocked: git branch -D force-deletes a branch."
+  fi
   echo "$COMMAND" | grep -qE 'git\s+stash\s+(drop|clear)(\s|$)' &&
     deny "Blocked: git stash drop/clear loses stashed work."
 }
@@ -1196,19 +1512,165 @@ check_push_guard() {
 }
 
 # --- 2b. Branch Creation Tracking Guard ---
-# Prevent creating branches that auto-track origin/main or origin/master.
+# Feature branches must not track integration branches or unrelated remote
+# branches. The only allowed tracking relationship is a mirrored branch name:
+# local mho/foo may track origin/mho/foo, but not origin/main or origin/bar.
+remote_tracking_ref_from_token() {
+  local token="$1"
+  case "$token" in
+    refs/remotes/*/*)
+      echo "${token#refs/remotes/}"
+      ;;
+    origin/*|upstream/*)
+      echo "$token"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+remote_tracking_branch_from_token() {
+  local ref
+  ref=$(remote_tracking_ref_from_token "$1") || return 1
+  echo "${ref#*/}"
+}
+
 check_branch_tracking() {
-  if echo "$COMMAND" | grep -qE 'git\s+(checkout\s+-b|switch\s+-c)'; then
-    echo "$COMMAND" | grep -qE -- '--no-track' && return
-    echo "$COMMAND" | grep -qE '(origin|upstream)/(main|master)(\s|$)' &&
-      deny "Blocked: branch would auto-track main. Add --no-track: git checkout -b <branch> origin/main --no-track"
-  fi
+  local current_branch tracking_block
+  current_branch=$(git_context branch --show-current 2>/dev/null || true)
+  tracking_block=$(python3 - "$COMMAND" "$current_branch" <<'PY'
+import re
+import shlex
+import sys
 
-  echo "$COMMAND" | grep -qE 'git\s+branch\s+.*(--set-upstream-to(=|[[:space:]]+)|-u[[:space:]]+)(origin|upstream)/(main|master)([[:space:]]|$)' &&
-    deny "Blocked: feature branches must not track origin/main or upstream/main. Use --set-upstream-to=origin/<branch> instead."
+command = sys.argv[1]
+current_branch = sys.argv[2]
 
-  echo "$COMMAND" | grep -qE 'git\s+branch\s+.*--track[[:space:]]+[^[:space:]]+[[:space:]]+(origin|upstream)/(main|master)([[:space:]]|$)' &&
-    deny "Blocked: branch would track origin/main or upstream/main. Add --no-track and push only through pg/stack."
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+def git_subcommand(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None, []
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-C":
+            idx += 2
+            continue
+        if token in {"--git-dir", "--work-tree"}:
+            idx += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            idx += 1
+            continue
+        return token, segment[idx + 1 :]
+    return None, []
+
+
+def remote_tracking_branch(token):
+    if token.startswith("refs/remotes/"):
+        pieces = token.split("/", 3)
+        if len(pieces) == 4 and pieces[2] in {"origin", "upstream"}:
+            return pieces[3]
+    if token.startswith(("origin/", "upstream/")):
+        return token.split("/", 1)[1]
+    return None
+
+
+def block_message(new_branch, remote_token, setting=False):
+    if setting:
+        return (
+            f"Blocked: branch '{new_branch}' must not track '{remote_token}'. "
+            "Feature branches may only track a mirrored remote branch name."
+        )
+    return (
+        f"Blocked: branch '{new_branch}' would track '{remote_token}'. "
+        "Feature branches may only track a mirrored remote branch name; use --no-track when branching from a base."
+    )
+
+
+def check_new_branch_from_tokens(args, branch_flags):
+    if "--no-track" in args:
+        return None
+    create_idx = -1
+    for idx, token in enumerate(args):
+        if token in branch_flags:
+            create_idx = idx
+    if create_idx < 0 or create_idx + 1 >= len(args):
+        return None
+    new_branch = args[create_idx + 1]
+    for token in args[create_idx + 2 :]:
+        remote_branch = remote_tracking_branch(token)
+        if remote_branch and new_branch != remote_branch:
+            return block_message(new_branch, token)
+    return None
+
+
+for segment in segments:
+    subcmd, args = git_subcommand(segment)
+    if subcmd in {"checkout", "switch"}:
+        message = check_new_branch_from_tokens(args, {"-b", "-c"})
+        if message:
+            print(message)
+            sys.exit(0)
+    elif subcmd == "worktree" and args and args[0] == "add":
+        message = check_new_branch_from_tokens(args[1:], {"-b", "-B"})
+        if message:
+            print(message)
+            sys.exit(0)
+    elif subcmd == "branch":
+        for idx, token in enumerate(args):
+            if token == "--track" and idx + 2 < len(args):
+                new_branch = args[idx + 1]
+                remote_token = args[idx + 2]
+                remote_branch = remote_tracking_branch(remote_token)
+                if remote_branch and new_branch != remote_branch:
+                    print(block_message(new_branch, remote_token))
+                    sys.exit(0)
+            elif token in {"-u", "--set-upstream-to"} and idx + 1 < len(args):
+                remote_token = args[idx + 1]
+                target_branch = args[idx + 2] if idx + 2 < len(args) else current_branch
+                remote_branch = remote_tracking_branch(remote_token)
+                if remote_branch and target_branch != remote_branch:
+                    print(block_message(target_branch, remote_token, setting=True))
+                    sys.exit(0)
+            elif token.startswith("--set-upstream-to="):
+                remote_token = token.split("=", 1)[1]
+                target_branch = args[idx + 1] if idx + 1 < len(args) else current_branch
+                remote_branch = remote_tracking_branch(remote_token)
+                if remote_branch and target_branch != remote_branch:
+                    print(block_message(target_branch, remote_token, setting=True))
+                    sys.exit(0)
+PY
+)
+  [[ -z "$tracking_block" ]] || deny "$tracking_block"
 }
 
 # --- 3. Git Config & Hook Bypass ---
@@ -1297,8 +1759,9 @@ PY
   [[ -n "$git_config_block" ]] && deny "$git_config_block"
   echo "$COMMAND" | grep -qE -- '--no-verify' &&
     deny "Blocked: --no-verify bypasses safety hooks."
-  echo "$COMMAND" | grep -qE -- 'git\s+commit\s+.*--amend' &&
+  if has_git_commit_amend_command && ! current_branch_is_yolo; then
     deny "Blocked: git commit --amend modifies previous commit."
+  fi
   echo "$COMMAND" | grep -qE 'commit\.gpgsign=false' &&
     deny "Blocked: disabling GPG signing is not allowed."
   echo "$COMMAND" | grep -qE '(CHECKSTYLE_SKIP|VERIFY_SKIP|SPOTLESS_SKIP)=' &&
@@ -1428,8 +1891,9 @@ check_gh_destructive() {
 
 # --- 10b. GitHub Host Safety ---
 check_gh_host_safety() {
-  has_wrong_netflix_gh_host || return
-  deny "Blocked: GH_HOST=github.netflix.net is wrong for Netflix GHE. Use GH_HOST=git.netflix.net."
+  if has_wrong_netflix_gh_host || has_wrong_netflix_gh_cli_target; then
+    deny "Blocked: github.netflix.net is the browser URL, not the gh CLI host. Use GH_HOST=git.netflix.net and pass repos as owner/name, e.g. GH_HOST=git.netflix.net gh pr view 123 --repo org/repo."
+  fi
 }
 
 # --- 10ba. fun-bash-automations PR Safety ---
@@ -1446,10 +1910,10 @@ check_scratch_pr_safety() {
 
 # --- 10c. GitHub Gist Host Safety ---
 check_gh_gist_host_safety() {
-  is_gh_api_gist_create || return
+  is_gh_api_gist_create || is_gh_gist_create || return
   has_netflix_gist_hostname && return
 
-  deny "Blocked: gh api gist creation must target Netflix GHE explicitly. Use GH_HOST=git.netflix.net or --hostname git.netflix.net."
+  deny "Blocked: gh gist creation must target Netflix GHE explicitly. Use GH_HOST=git.netflix.net or --hostname git.netflix.net."
 }
 
 # --- 10d. GitHub Gist Filename Safety ---
@@ -1457,25 +1921,7 @@ check_gh_gist_filename_safety() {
   check_gist_filename_sequence
 }
 
-# --- 11. Process Killing ---
-check_process_kill() {
-  # Allow port-targeted kills: lsof -ti :PORT | xargs kill or kill $(lsof -ti :PORT)
-  echo "$COMMAND" | grep -qE 'lsof\s.*-ti\s*:[0-9]+.*\|\s*(xargs\s+)?kill' && return
-  echo "$COMMAND" | grep -qE 'kill\s+\$\(lsof\s.*-ti\s*:' && return
-
-  echo "$COMMAND" | grep -qE 'kill\s+-9' &&
-    deny "Blocked: kill -9 is not allowed."
-  echo "$COMMAND" | grep -qE -- 'kill\s+-(KILL|SIGKILL)' &&
-    deny "Blocked: kill -KILL is not allowed."
-  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)killall\s' &&
-    deny "Blocked: killall is not allowed."
-  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)pkill\s' &&
-    deny "Blocked: pkill is not allowed."
-  echo "$COMMAND" | grep -qE '(^|[;&|]\s*)kill\s+[0-9]' &&
-    deny "Blocked: kill PID is not allowed. Use lsof -ti :PORT | xargs kill for port-targeted kills."
-}
-
-# --- 12. Docker Destructive ---
+# --- 11. Docker Destructive ---
 check_docker_destructive() {
   echo "$COMMAND" | grep -qE 'docker\s+push' &&
     deny "Blocked: docker push is not allowed."
@@ -1483,6 +1929,37 @@ check_docker_destructive() {
     deny "Blocked: docker system prune is not allowed."
   echo "$COMMAND" | grep -qE 'docker\s+rm\s+.*-f' &&
     deny "Blocked: docker rm -f is not allowed."
+}
+
+# --- 13. Private guard extensions ---
+guard_extension_dirs() {
+  local configured="${BASH_SAFETY_GUARD_EXTENSION_DIRS:-}"
+  if [[ -n "$configured" ]]; then
+    printf '%s\n' "$configured" | tr ':' '\n'
+  else
+    printf '%s\n' "$SCRIPT_DIR/bash-safety-guard.d"
+  fi
+}
+
+run_guard_extensions() {
+  local dir ext out rc
+  while IFS= read -r dir; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    for ext in "$dir"/*.sh; do
+      [[ -f "$ext" ]] || continue
+      out=$(printf '%s\n' "$INPUT" | "$ext" 2>&1)
+      rc=$?
+      if [[ "$rc" -ne 0 ]]; then
+        deny "Blocked: safety guard extension $(basename "$ext") failed (rc=$rc): $out"
+      fi
+      [[ -z "$out" ]] && continue
+      if printf '%s\n' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
+        printf '%s\n' "$out"
+        exit 0
+      fi
+      deny "Blocked: safety guard extension $(basename "$ext") returned invalid output: $out"
+    done
+  done < <(guard_extension_dirs)
 }
 
 # --- Run all checks ---
@@ -1502,7 +1979,7 @@ check_fba_pr_safety
 check_scratch_pr_safety
 check_gh_gist_host_safety
 check_gh_gist_filename_safety
-check_process_kill
 check_docker_destructive
+run_guard_extensions
 
 exit 0

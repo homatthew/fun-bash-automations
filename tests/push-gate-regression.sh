@@ -212,6 +212,20 @@ run_guard_from() {
   )
 }
 
+run_guard_remote_scratch() {
+  (
+    export AGENT_WORK_MODE=remote_scratch
+    run_guard "$@"
+  )
+}
+
+run_guard_from_remote_scratch() {
+  (
+    export AGENT_WORK_MODE=remote_scratch
+    run_guard_from "$@"
+  )
+}
+
 run_guard_with_workdir() {
   local cwd="$1"
   local command="$2"
@@ -222,6 +236,16 @@ run_guard_with_workdir() {
   )
 }
 
+run_guard_with_parameters_workdir() {
+  local cwd="$1"
+  local command="$2"
+  local workdir="$3"
+  (
+    cd "$cwd"
+    jq -n --arg command "$command" --arg workdir "$workdir" '{tool_input:{command:$command}, parameters:{workdir:$workdir}}' | PATH="$FAKE_BIN:$PATH" bash "$GUARD"
+  )
+}
+
 run_guard_with_policy() {
   local repo="$1"
   local command="$2"
@@ -229,6 +253,13 @@ run_guard_with_policy() {
   (
     cd "$repo"
     jq -n --arg command "$command" '{tool_input:{command:$command}}' | PATH="$FAKE_BIN:$PATH" PG_AGENT_PUSH_POLICY="$policy" bash "$GUARD"
+  )
+}
+
+run_guard_with_policy_remote_scratch() {
+  (
+    export AGENT_WORK_MODE=remote_scratch
+    run_guard_with_policy "$@"
   )
 }
 
@@ -632,12 +663,27 @@ echo "ok 16 - protected main pushes are blocked on origin and upstream, includin
   git branch --set-upstream-to=upstream/main mho/existing-pr >/dev/null
 )
 plain_main_upstream=$(run_guard "$REPO" "git push")
-expect_contains "$plain_main_upstream" "tracks upstream/main"
+expect_contains "$plain_main_upstream" "bare git push is not allowed"
 (
   cd "$REPO"
   git branch --set-upstream-to=origin/mho/existing-pr mho/existing-pr >/dev/null
 )
-echo "ok 17 - plain push is blocked when feature branch tracks upstream main"
+echo "ok 17 - bare git push is blocked before upstream tracking state matters"
+
+(
+  cd "$REPO"
+  git branch release/main main >/dev/null
+  git push origin release/main >/dev/null
+  git fetch origin release/main >/dev/null 2>&1
+  git branch --set-upstream-to=origin/release/main mho/existing-pr >/dev/null
+)
+plain_release_main_upstream=$(run_guard "$REPO" "git push")
+expect_contains "$plain_release_main_upstream" "bare git push is not allowed"
+(
+  cd "$REPO"
+  git branch --set-upstream-to=origin/mho/existing-pr mho/existing-pr >/dev/null
+)
+echo "ok 18 - bare git push is blocked before release upstream tracking state matters"
 
 IFS='|' read -r SCRATCH_REPO SCRATCH_BIN SCRATCH_ORIGIN <<<"$(make_repo scratch)"
 FAKE_BIN="$SCRATCH_BIN"
@@ -651,64 +697,66 @@ FAKE_BIN="$SCRATCH_BIN"
 )
 export PG_TEST_PR_JSON='[]'
 export PG_TEST_PR_LIST_MAP=''
-scratch_allow=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+scratch_local_block=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+expect_contains "$scratch_local_block" "requires Remote Scratch Mode"
+scratch_allow=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
 [[ -z "$scratch_allow" ]] || fail "expected scratch branch push to be allowed, got: $scratch_allow"
-echo "ok scratch-1 - scratch branch push is allowed without push-gate"
+echo "ok scratch-1 - scratch branch push requires remote scratch mode"
 
-scratch_force=$(run_guard "$SCRATCH_REPO" "git push --force-with-lease origin wip/agent/backup")
+scratch_force=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push --force-with-lease origin wip/agent/backup")
 expect_contains "$scratch_force" "does not allow force pushes"
 echo "ok scratch-2 - scratch branch force-with-lease is blocked by policy"
 
-scratch_force_equals=$(run_guard "$SCRATCH_REPO" "git push --force-with-lease=refs/heads/wip/agent/backup origin wip/agent/backup")
+scratch_force_equals=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push --force-with-lease=refs/heads/wip/agent/backup origin wip/agent/backup")
 expect_contains "$scratch_force_equals" "does not allow force pushes"
-scratch_plus=$(run_guard "$SCRATCH_REPO" "git push origin +HEAD:wip/agent/backup")
+scratch_plus=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin +HEAD:wip/agent/backup")
 expect_contains "$scratch_plus" "force refspec"
-scratch_force_cluster_uf=$(run_guard "$SCRATCH_REPO" "git push -uf origin wip/agent/backup")
+scratch_force_cluster_uf=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push -uf origin wip/agent/backup")
 expect_contains "$scratch_force_cluster_uf" "force refspec"
-scratch_force_cluster_fu=$(run_guard "$SCRATCH_REPO" "git push -fu origin wip/agent/backup")
+scratch_force_cluster_fu=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push -fu origin wip/agent/backup")
 expect_contains "$scratch_force_cluster_fu" "force refspec"
 echo "ok scratch-2b - scratch branch alternate force forms are blocked"
 
-scratch_c_allow=$(run_guard_from "$TEST_TMP" "git -C $SCRATCH_REPO push origin wip/agent/backup")
+scratch_c_allow=$(run_guard_from_remote_scratch "$TEST_TMP" "git -C $SCRATCH_REPO push origin wip/agent/backup")
 [[ -z "$scratch_c_allow" ]] || fail "expected scratch git -C push to be allowed, got: $scratch_c_allow"
-scratch_second_prefix=$(run_guard "$SCRATCH_REPO" "git push origin scratch/agent/backup2")
+scratch_second_prefix=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin scratch/agent/backup2")
 [[ -z "$scratch_second_prefix" ]] || fail "expected scratch/agent prefix push to be allowed, got: $scratch_second_prefix"
 echo "ok scratch-2c - scratch git -C and alternate prefix pushes are classified"
 
-scratch_delete=$(run_guard "$SCRATCH_REPO" "git push origin :wip/agent/backup")
+scratch_delete=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin :wip/agent/backup")
 expect_contains "$scratch_delete" "deleting remote branches"
-scratch_remote=$(run_guard "$SCRATCH_REPO" "git push upstream wip/agent/backup")
+scratch_remote=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push upstream wip/agent/backup")
 expect_contains "$scratch_remote" "configured scratch remotes"
 echo "ok scratch-2d - scratch delete and wrong remote are blocked"
 
 bad_policy="$TEST_TMP/bad-agent-push-policy.json"
 jq '.scratch_branches.requires_push_gate = true' "$ROOT/llm/agent-push-policy.json" >"$bad_policy"
-scratch_bad_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_policy")
+scratch_bad_policy=$(run_guard_with_policy_remote_scratch "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_policy")
 expect_contains "$scratch_bad_policy" "durable lease"
 bad_type_policy="$TEST_TMP/bad-agent-push-policy-type.json"
 jq '.scratch_branches.remotes = "origin"' "$ROOT/llm/agent-push-policy.json" >"$bad_type_policy"
-scratch_bad_type_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_type_policy")
+scratch_bad_type_policy=$(run_guard_with_policy_remote_scratch "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_type_policy")
 expect_contains "$scratch_bad_type_policy" "durable lease"
 bad_cadence_policy="$TEST_TMP/bad-agent-push-policy-cadence.json"
 jq 'del(.scratch_branches.commit_push_cadence)' "$ROOT/llm/agent-push-policy.json" >"$bad_cadence_policy"
-scratch_bad_cadence_policy=$(run_guard_with_policy "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_cadence_policy")
+scratch_bad_cadence_policy=$(run_guard_with_policy_remote_scratch "$SCRATCH_REPO" "git push origin wip/agent/backup" "$bad_cadence_policy")
 expect_contains "$scratch_bad_cadence_policy" "durable lease"
 echo "ok scratch-2e - contradictory or malformed scratch policy fails closed"
 
-scratch_multi_refspec=$(run_guard "$SCRATCH_REPO" "git push origin wip/agent/backup HEAD:main")
+scratch_multi_refspec=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin wip/agent/backup HEAD:main")
 expect_contains "$scratch_multi_refspec" "multiple-refspec"
-scratch_all_prefix=$(run_guard "$SCRATCH_REPO" "git push --all origin")
+scratch_all_prefix=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push --all origin")
 expect_contains "$scratch_all_prefix" "broad git push"
-scratch_all_suffix=$(run_guard "$SCRATCH_REPO" "git push origin --all")
+scratch_all_suffix=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin --all")
 expect_contains "$scratch_all_suffix" "broad git push"
-scratch_mirror=$(run_guard "$SCRATCH_REPO" "git push --mirror origin")
+scratch_mirror=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push --mirror origin")
 expect_contains "$scratch_mirror" "broad git push"
-scratch_tags=$(run_guard "$SCRATCH_REPO" "git push --tags origin")
+scratch_tags=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push --tags origin")
 expect_contains "$scratch_tags" "broad git push"
 echo "ok scratch-2e2 - multi-refspec and broad scratch pushes are blocked"
 
 export PG_TEST_GH_FAIL=1
-scratch_gh_fail=$(run_guard "$SCRATCH_REPO" "git push origin wip/agent/backup")
+scratch_gh_fail=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push origin wip/agent/backup")
 expect_contains "$scratch_gh_fail" "could not verify"
 unset PG_TEST_GH_FAIL
 echo "ok scratch-2f - scratch branch blocks when PR verification fails"
@@ -731,13 +779,13 @@ echo "ok scratch-2g - scratch PR creation/readiness is blocked"
 
 export PG_TEST_PR_JSON='[{"number":314,"url":"https://example.test/pr/314"}]'
 export PG_TEST_PR_LIST_MAP=''
-scratch_pr_head=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+scratch_pr_head=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
 expect_contains "$scratch_pr_head" "has an open PR"
 echo "ok scratch-3 - scratch branch with open PR is delivery scope"
 
 export PG_TEST_PR_JSON='[]'
 export PG_TEST_PR_LIST_MAP='{"base:wip/agent/backup":[{"number":315,"url":"https://example.test/pr/315"}]}'
-scratch_pr_base=$(run_guard "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
+scratch_pr_base=$(run_guard_remote_scratch "$SCRATCH_REPO" "git push -u origin wip/agent/backup")
 expect_contains "$scratch_pr_base" "base of an open PR"
 echo "ok scratch-4 - scratch branch used as PR base is delivery scope"
 export PG_TEST_PR_JSON='[{"number":123,"url":"https://example.test/pr/123"}]'
@@ -905,6 +953,8 @@ FAKE_BIN="$FBA_BASE_BIN"
 )
 fba_direct_delivery=$(run_guard "$FBA_BASE_REPO" "git push origin mh-netflix")
 [[ -z "$fba_direct_delivery" ]] || fail "expected fun-bash-automations delivery branch to push directly, got: $fba_direct_delivery"
+fba_bare_delivery=$(run_guard "$FBA_BASE_REPO" "git push")
+expect_contains "$fba_bare_delivery" "bare git push is not allowed"
 fba_delete_block=$(run_guard "$FBA_BASE_REPO" "git push origin --delete mh-netflix")
 expect_contains "$fba_delete_block" "deleting remote branches"
 fba_colon_delete_block=$(run_guard "$FBA_BASE_REPO" "git push origin :mh-netflix")
@@ -942,6 +992,8 @@ dotfiles_main_explicit_feature_block=$(run_guard "$DOTFILES_REPO" "git push orig
 expect_contains "$dotfiles_main_explicit_feature_block" "durable lease"
 dotfiles_main_allow=$(run_guard "$DOTFILES_REPO" "git push origin main")
 [[ -z "$dotfiles_main_allow" ]] || fail "expected dotfiles delivery branch to push directly, got: $dotfiles_main_allow"
+dotfiles_bare_main_block=$(run_guard "$DOTFILES_REPO" "git push")
+expect_contains "$dotfiles_bare_main_block" "bare git push is not allowed"
 dotfiles_delete_block=$(run_guard "$DOTFILES_REPO" "git push origin --delete main")
 expect_contains "$dotfiles_delete_block" "deleting remote branches"
 dotfiles_colon_delete_block=$(run_guard "$DOTFILES_REPO" "git push origin :main")
@@ -952,7 +1004,7 @@ dotfiles_all_block=$(run_guard "$DOTFILES_REPO" "git push --all origin")
 expect_contains "$dotfiles_all_block" "Blocked:"
 dotfiles_wrong_workdir_block=$(run_guard_with_workdir "$TEST_TMP" "git -C $REPO push origin HEAD:main" "$DOTFILES_REPO")
 expect_contains "$dotfiles_wrong_workdir_block" "origin/main"
-echo "ok 27b - direct-push exceptions are branch-scoped"
+echo "ok 27b - direct-push exceptions are branch-scoped and reject bare pushes"
 
 IFS='|' read -r TOPO_BIND_REPO TOPO_BIND_BIN TOPO_BIND_ORIGIN <<<"$(make_repo topology-bind)"
 FAKE_BIN="$TOPO_BIND_BIN"
@@ -1407,3 +1459,93 @@ set -e
 [[ "$intent_push_rc" != "0" ]] || fail "expected pg push to reject semantic mismatch"
 expect_contains "$intent_push" "$(jq -r '.reason' <<<"$intent_check")"
 echo "ok 40 - pg check and pg push both surface semantic intent mismatches"
+
+# --- yolo branch class (mho-yolo/) push classification ---
+# Raw push + PR fast path: no push-gate, no lease, force-with-lease and delete
+# allowed. The allow is keyed on the resolved push TARGET matching mho-yolo/.
+# Base refs never match the prefix, so a push-to-base can never route here.
+IFS='|' read -r YOLO_REPO YOLO_BIN YOLO_ORIGIN <<<"$(make_repo yolo)"
+EXISTING_FAKE_BIN_YOLO="$FAKE_BIN"
+FAKE_BIN="$YOLO_BIN"
+
+# Allowed: explicit plain push, -u push, and force-with-lease push to a yolo branch.
+yolo_push_plain=$(run_guard "$YOLO_REPO" "git push origin mho-yolo/quick")
+[[ -z "$yolo_push_plain" ]] || fail "expected plain yolo push to be allowed, got: $yolo_push_plain"
+yolo_push_u=$(run_guard "$YOLO_REPO" "git push -u origin mho-yolo/quick")
+[[ -z "$yolo_push_u" ]] || fail "expected -u yolo push to be allowed, got: $yolo_push_u"
+yolo_push_fwl=$(run_guard "$YOLO_REPO" "git push --force-with-lease origin mho-yolo/quick")
+[[ -z "$yolo_push_fwl" ]] || fail "expected --force-with-lease yolo push to be allowed, got: $yolo_push_fwl"
+(
+  cd "$YOLO_REPO"
+  git switch --no-track -c mho-yolo/quick main >/dev/null
+  git push -u origin mho-yolo/quick >/dev/null
+)
+yolo_attached_plain=$(run_guard "$YOLO_REPO" "git push")
+expect_contains "$yolo_attached_plain" "bare git push is not allowed"
+yolo_remote_only=$(run_guard "$YOLO_REPO" "git push origin")
+expect_contains "$yolo_remote_only" "bare git push is not allowed"
+yolo_attached_plain_workdir=$(run_guard_with_workdir "$TEST_TMP" "git push" "$YOLO_REPO")
+expect_contains "$yolo_attached_plain_workdir" "bare git push is not allowed"
+yolo_attached_plain_parameters_workdir=$(run_guard_with_parameters_workdir "$TEST_TMP" "git push" "$YOLO_REPO")
+expect_contains "$yolo_attached_plain_parameters_workdir" "bare git push is not allowed"
+echo "ok yolo-1 - explicit yolo pushes are allowed, bare yolo pushes are blocked"
+
+# Allowed: deleting a yolo branch on the remote (both --delete and :ref forms).
+yolo_delete_flag=$(run_guard "$YOLO_REPO" "git push --delete origin mho-yolo/quick")
+[[ -z "$yolo_delete_flag" ]] || fail "expected yolo --delete to be allowed, got: $yolo_delete_flag"
+yolo_delete_colon=$(run_guard "$YOLO_REPO" "git push origin :mho-yolo/quick")
+[[ -z "$yolo_delete_colon" ]] || fail "expected yolo :ref delete to be allowed, got: $yolo_delete_colon"
+echo "ok yolo-2 - yolo remote deletes (--delete and :ref) are allowed"
+
+# Allowed: yolo branches are PR-eligible (scratch branches are not).
+yolo_pr_create=$(run_guard "$YOLO_REPO" "gh pr create --head mho-yolo/quick --base main --title yolo --body yolo")
+[[ -z "$yolo_pr_create" ]] || fail "expected yolo PR creation to be allowed (PR-eligible), got: $yolo_pr_create"
+echo "ok yolo-3 - yolo PR creation is allowed (PR-eligible, unlike scratch)"
+
+# DENIED push-to-base: a yolo source can never push to a base ref target.
+yolo_base_main=$(run_guard "$YOLO_REPO" "git push origin mho-yolo/quick:main")
+expect_contains "$yolo_base_main" "pushing directly to origin/main is not allowed"
+yolo_head_main=$(run_guard "$YOLO_REPO" "git push origin HEAD:main")
+expect_contains "$yolo_head_main" "pushing directly to origin/main is not allowed"
+yolo_head_refs_main=$(run_guard "$YOLO_REPO" "git push origin HEAD:refs/heads/main")
+expect_contains "$yolo_head_refs_main" "pushing directly to origin/main is not allowed"
+yolo_base_master=$(run_guard "$YOLO_REPO" "git push origin mho-yolo/quick:master")
+expect_contains "$yolo_base_master" "pushing directly to origin/master is not allowed"
+echo "ok yolo-4 - yolo refspecs targeting main/master are blocked"
+
+# DENIED: a force refspec to a base ref, and deleting a base ref, both blocked.
+yolo_force_base=$(run_guard "$YOLO_REPO" "git push --force origin mho-yolo/quick:main")
+[[ -n "$yolo_force_base" ]] || fail "expected --force yolo push to main to be blocked, got nothing"
+yolo_delete_base=$(run_guard "$YOLO_REPO" "git push --delete origin main")
+expect_contains "$yolo_delete_base" "deleting remote branches is not allowed"
+echo "ok yolo-5 - force-to-base and base-ref deletion are blocked"
+
+# DENIED: a yolo source pushed to a non-base, non-yolo target (develop/trunk)
+# is not a yolo candidate and falls through to the default-deny (lease required).
+yolo_develop=$(run_guard "$YOLO_REPO" "git push origin mho-yolo/quick:develop")
+expect_contains "$yolo_develop" "durable lease"
+yolo_trunk=$(run_guard "$YOLO_REPO" "git push origin mho-yolo/quick:trunk")
+expect_contains "$yolo_trunk" "durable lease"
+echo "ok yolo-6 - yolo source pushed to develop/trunk falls through to default-deny"
+
+# Fail-closed: a malformed or disabled yolo policy must not enable the fast path.
+yolo_no_delete_policy="$TEST_TMP/yolo-no-delete-policy.json"
+jq 'del(.yolo_branches.allow_delete)' "$ROOT/llm/agent-push-policy.json" >"$yolo_no_delete_policy"
+yolo_no_delete=$(run_guard_with_policy "$YOLO_REPO" "git push origin mho-yolo/quick" "$yolo_no_delete_policy")
+expect_contains "$yolo_no_delete" "durable lease"
+yolo_pg_true_policy="$TEST_TMP/yolo-pg-true-policy.json"
+jq '.yolo_branches.requires_push_gate = true' "$ROOT/llm/agent-push-policy.json" >"$yolo_pg_true_policy"
+yolo_pg_true=$(run_guard_with_policy "$YOLO_REPO" "git push origin mho-yolo/quick" "$yolo_pg_true_policy")
+expect_contains "$yolo_pg_true" "durable lease"
+yolo_disabled_policy="$TEST_TMP/yolo-disabled-policy.json"
+jq '.yolo_branches.enabled = false' "$ROOT/llm/agent-push-policy.json" >"$yolo_disabled_policy"
+yolo_disabled=$(run_guard_with_policy "$YOLO_REPO" "git push origin mho-yolo/quick" "$yolo_disabled_policy")
+expect_contains "$yolo_disabled" "durable lease"
+echo "ok yolo-7 - malformed (no allow_delete / requires_push_gate=true) and disabled yolo policy fail closed"
+
+# Regression: an ordinary feature branch (not yolo) is still default-denied.
+yolo_regression=$(run_guard "$YOLO_REPO" "git push origin mho/feature")
+expect_contains "$yolo_regression" "durable lease"
+echo "ok yolo-8 - ordinary feature-branch push stays blocked (no over-broad loosening)"
+
+FAKE_BIN="$EXISTING_FAKE_BIN_YOLO"

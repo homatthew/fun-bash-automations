@@ -224,7 +224,8 @@ pg_open_pr_count_for_branch() {
 
 pg_validate_scratch_push() {
   local policy="$1" remote="$2" target_branch="$3" force_push="$4" is_delete="$5"
-  local scratch enabled default_for_agents requires_push_gate requires_user_opt_in prefixes remotes allow_force allow_delete must_not_have_pr must_not_be_base
+  local scratch enabled requires_push_gate requires_user_opt_in prefixes remotes allow_force allow_delete must_not_have_pr must_not_be_base
+  local active_work_mode
   local pr_count
 
   scratch=$(jq -c '.scratch_branches // {enabled:false}' <<<"$policy")
@@ -252,8 +253,7 @@ pg_validate_scratch_push() {
     return 0
   fi
   enabled=$(jq -r '.enabled // false' <<<"$scratch")
-  default_for_agents=$(jq -r '.default_for_agents // false' <<<"$scratch")
-  [[ "$enabled" == "true" && "$default_for_agents" == "true" ]] || {
+  [[ "$enabled" == "true" ]] || {
     jq -n '{allowed:false, scratch_candidate:false}'
     return 0
   }
@@ -264,7 +264,7 @@ pg_validate_scratch_push() {
   must_not_be_base=$(jq -r 'if has("must_not_be_pr_base") then .must_not_be_pr_base else true end' <<<"$scratch")
   allow_force=$(jq -r 'if has("allow_force_with_lease") then .allow_force_with_lease else false end' <<<"$scratch")
   allow_delete=$(jq -r 'if has("allow_delete") then .allow_delete else false end' <<<"$scratch")
-  if [[ "$requires_push_gate" != "false" || "$requires_user_opt_in" != "false" || "$must_not_have_pr" != "true" || "$must_not_be_base" != "true" || "$allow_force" != "false" || "$allow_delete" != "false" ]]; then
+  if [[ "$requires_push_gate" != "false" || "$must_not_have_pr" != "true" || "$must_not_be_base" != "true" || "$allow_force" != "false" || "$allow_delete" != "false" ]]; then
     jq -n '{allowed:false, scratch_candidate:false}'
     return 0
   fi
@@ -273,6 +273,12 @@ pg_validate_scratch_push() {
   remotes=$(jq -c '.remotes // []' <<<"$scratch")
   if ! pg_branch_matches_any_prefix "$target_branch" "$prefixes"; then
     jq -n '{allowed:false, scratch_candidate:false}'
+    return 0
+  fi
+  active_work_mode="${AGENT_WORK_MODE:-${LLM_AGENT_WORK_MODE:-}}"
+  if [[ "$requires_user_opt_in" == "true" && "$active_work_mode" != "remote_scratch" ]]; then
+    jq -n --arg branch "$target_branch" \
+      '{allowed:false, scratch_candidate:true, reason:("Blocked: scratch branch " + $branch + " requires Remote Scratch Mode. Use AGENT_WORK_MODE=remote_scratch only after the user selects remote mode.")}'
     return 0
   fi
   if ! pg_json_array_contains "$remotes" "$remote"; then
@@ -321,6 +327,105 @@ pg_validate_scratch_push() {
 
   jq -n --arg branch "$target_branch" --arg remote "$remote" \
     '{allowed:true, scratch_candidate:true, verdict:"scratch-direct", branch:$branch, remote:$remote}'
+}
+
+# Classify a push/delete against the yolo branch class (prefix mho-yolo/).
+# Yolo branches get a raw push + PR fast path: no push-gate, no editor, no
+# lease, force-with-lease and delete allowed. The allow is keyed on the
+# resolved push TARGET matching a yolo prefix — base refs never match the
+# prefix, so a push-to-base can never route through this path.
+#
+# Returns one of:
+#   {allowed:true,  yolo_candidate:true,  verdict:"yolo-direct"|"yolo-delete", ...}
+#   {allowed:false, yolo_candidate:true,  reason:...}   matched but blocked
+#   {allowed:false, yolo_candidate:false}               not a yolo push / fail-closed
+#
+# Fails closed (yolo_candidate:false → caller falls through to default-deny)
+# on any malformed or non-sanctioned policy shape.
+pg_validate_yolo_push() {
+  local policy="$1" remote="$2" target_branch="$3" is_force="$4" force_with_lease="$5" is_delete="$6"
+  local yolo enabled requires_push_gate requires_user_opt_in pr_eligible allow_force allow_delete
+  local prefixes remotes protected_refs
+
+  yolo=$(jq -c '.yolo_branches // {enabled:false}' <<<"$policy")
+  # Strict shape validation: any malformed field fails closed.
+  if ! jq -e '
+    type == "object"
+    and (.enabled | type == "boolean")
+    and (.requires_push_gate | type == "boolean")
+    and (.requires_user_opt_in | type == "boolean")
+    and (.pr_eligible | type == "boolean")
+    and (.allow_force_with_lease | type == "boolean")
+    and (.allow_delete | type == "boolean")
+    and (.requires_explicit_user_ask | type == "boolean")
+    and (.prefixes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+    and (.remotes | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+    and (.protected_base_refs | type == "array" and all(.[]; type == "string" and length > 0))
+  ' <<<"$yolo" >/dev/null; then
+    jq -n '{allowed:false, yolo_candidate:false}'
+    return 0
+  fi
+
+  enabled=$(jq -r '.enabled // false' <<<"$yolo")
+  [[ "$enabled" == "true" ]] || {
+    jq -n '{allowed:false, yolo_candidate:false}'
+    return 0
+  }
+
+  # Const-locked invariants. Any drift from the sanctioned shape fails closed
+  # so a tampered policy can never widen the fast path.
+  requires_push_gate=$(jq -r '.requires_push_gate' <<<"$yolo")
+  requires_user_opt_in=$(jq -r '.requires_user_opt_in' <<<"$yolo")
+  pr_eligible=$(jq -r '.pr_eligible' <<<"$yolo")
+  allow_force=$(jq -r '.allow_force_with_lease' <<<"$yolo")
+  allow_delete=$(jq -r '.allow_delete' <<<"$yolo")
+  if [[ "$requires_push_gate" != "false" || "$requires_user_opt_in" != "false" || "$pr_eligible" != "true" || "$allow_force" != "true" || "$allow_delete" != "true" ]]; then
+    jq -n '{allowed:false, yolo_candidate:false}'
+    return 0
+  fi
+
+  prefixes=$(jq -c '.prefixes' <<<"$yolo")
+  remotes=$(jq -c '.remotes' <<<"$yolo")
+  protected_refs=$(jq -c '.protected_base_refs' <<<"$yolo")
+
+  # Keyed on the resolved push target. Base refs never match the yolo prefix,
+  # so a push-to-base falls through here as a non-candidate.
+  if ! pg_branch_matches_any_prefix "$target_branch" "$prefixes"; then
+    jq -n '{allowed:false, yolo_candidate:false}'
+    return 0
+  fi
+
+  # Belt-and-suspenders: a yolo-prefixed target that also names a protected
+  # base ref is blocked. Structurally unreachable with mho-yolo/, kept as a
+  # documented hard floor.
+  if pg_json_array_contains "$protected_refs" "$target_branch"; then
+    jq -n --arg branch "$target_branch" \
+      '{allowed:false, yolo_candidate:true, reason:("Blocked: yolo branch " + $branch + " resolves to a protected base ref and cannot be pushed.")}'
+    return 0
+  fi
+
+  if ! pg_json_array_contains "$remotes" "$remote"; then
+    jq -n --arg remote "$remote" --arg branch "$target_branch" \
+      '{allowed:false, yolo_candidate:true, reason:("Blocked: yolo branch " + $branch + " may only be pushed to configured yolo remotes, not " + $remote + ".")}'
+    return 0
+  fi
+
+  # Plain (un-leased) force is never allowed; yolo "force" means
+  # --force-with-lease only. Also enforced upstream in pg_validate_push_guard.
+  if [[ "$is_force" == "true" && "$force_with_lease" != "true" ]]; then
+    jq -n --arg branch "$target_branch" \
+      '{allowed:false, yolo_candidate:true, reason:("Blocked: yolo branch " + $branch + " force push must use --force-with-lease, not a plain force refspec.")}'
+    return 0
+  fi
+
+  if [[ "$is_delete" == "true" ]]; then
+    jq -n --arg branch "$target_branch" --arg remote "$remote" \
+      '{allowed:true, yolo_candidate:true, verdict:"yolo-delete", branch:$branch, remote:$remote}'
+    return 0
+  fi
+
+  jq -n --arg branch "$target_branch" --arg remote "$remote" \
+    '{allowed:true, yolo_candidate:true, verdict:"yolo-direct", branch:$branch, remote:$remote}'
 }
 
 # ------------------------------------------------------------------------
@@ -3188,7 +3293,7 @@ pg_store_dir() {
 }
 
 pg_branch_name() {
-  git branch --show-current 2>/dev/null
+  git symbolic-ref --quiet --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null
 }
 
 pg_branch_ref() {
@@ -3390,6 +3495,31 @@ pg_upstream_ref() {
   git rev-parse --abbrev-ref --symbolic-full-name "${branch}@{upstream}" 2>/dev/null || true
 }
 
+pg_remote_tracking_branch_name() {
+  local ref="$1" rest
+  case "$ref" in
+    refs/remotes/*/*)
+      rest="${ref#refs/remotes/}"
+      echo "${rest#*/}"
+      ;;
+    */*)
+      echo "${ref#*/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+pg_upstream_tracks_current_branch() {
+  local branch upstream upstream_branch
+  branch=$(pg_branch_name 2>/dev/null || true)
+  upstream=$(pg_upstream_ref 2>/dev/null || true)
+  [[ -n "$branch" && -n "$upstream" ]] || return 1
+  upstream_branch=$(pg_remote_tracking_branch_name "$upstream" 2>/dev/null || true)
+  [[ "$upstream_branch" == "$branch" ]]
+}
+
 pg_branch_has_open_pr() {
   local branch="$1" pr_repo="${2:-}" raw
   command -v gh >/dev/null 2>&1 || return 1
@@ -3469,17 +3599,13 @@ pg_default_base_ref_snapshot() {
   fi
   upstream=$(pg_upstream_ref)
   [[ -n "$upstream" ]] && upstream=$(pg_normalize_upstream_ref "$upstream")
-  if [[ -n "$upstream" ]] && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
+  if [[ -n "$upstream" ]] && pg_upstream_tracks_current_branch && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
     echo "$upstream"
     return 0
   fi
   pr_base=$(pg_pr_base_ref_snapshot)
   if [[ -n "$pr_base" ]]; then
     echo "$pr_base"
-    return 0
-  fi
-  if [[ -n "$upstream" ]]; then
-    echo "$upstream"
     return 0
   fi
   stacked_parent=$(pg_stacked_parent_base_ref 2>/dev/null || true)
@@ -3525,7 +3651,7 @@ pg_full_review_base_ref_snapshot() {
   fi
   upstream=$(pg_upstream_ref 2>/dev/null || true)
   [[ -n "$upstream" ]] && upstream=$(pg_normalize_upstream_ref "$upstream")
-  if [[ -n "$upstream" ]] && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
+  if [[ -n "$upstream" ]] && pg_upstream_tracks_current_branch && git merge-base --is-ancestor "$upstream" HEAD 2>/dev/null; then
     echo "$upstream"
     return 0
   fi
@@ -4840,6 +4966,7 @@ pg_validate_push_guard() {
   local parsed parse_error is_push remote source_ref target_branch force_with_lease is_force is_broad_push multiple_pushes refspec_count current_branch lease_branch branch_ref current_head
   local lease_json lease_remote lease_status approved_anchor pending_path pending_json pending_remote pending_head pending_branch_ref
   local branch_upstream scratch_result scratch_allowed scratch_candidate scratch_reason
+  local yolo_result yolo_allowed yolo_candidate yolo_reason
 
   parsed=$(pg_parse_push_command "$command")
   parse_error=$(echo "$parsed" | jq -r '.error // empty')
@@ -4853,9 +4980,6 @@ pg_validate_push_guard() {
     return 0
   }
 
-  current_branch=$(pg_branch_name 2>/dev/null || true)
-  current_head=$(git rev-parse HEAD 2>/dev/null || true)
-
   remote=$(echo "$parsed" | jq -r '.remote // empty')
   source_ref=$(echo "$parsed" | jq -r '.source_ref // empty')
   target_branch=$(echo "$parsed" | jq -r '.target_branch // empty')
@@ -4866,18 +4990,6 @@ pg_validate_push_guard() {
   refspec_count=$(echo "$parsed" | jq -r '.refspec_count // 0')
   local is_delete
   is_delete=$(echo "$parsed" | jq -r '.is_delete')
-  [[ -n "$remote" ]] || remote=$(pg_default_remote 2>/dev/null || true)
-  if [[ -n "$target_branch" ]]; then
-    lease_branch="$target_branch"
-  else
-    lease_branch="$current_branch"
-  fi
-  if [[ -z "$lease_branch" ]]; then
-    jq -n --arg reason "Blocked: detached HEAD pushes require an explicit target branch like HEAD:<branch>. Use pg push --branch <branch> --source-ref HEAD." '{allowed:false, reason:$reason}'
-    return 0
-  fi
-  [[ -n "$target_branch" ]] || target_branch="$lease_branch"
-  branch_ref=$(pg_branch_ref "$lease_branch")
 
   if [[ "$is_broad_push" == "true" ]]; then
     jq -n '{allowed:false, reason:"Blocked: broad git push modes (--all, --mirror, --tags) are not allowed for agent pushes."}'
@@ -4894,7 +5006,44 @@ pg_validate_push_guard() {
     return 0
   fi
 
+  if [[ "$refspec_count" -eq 0 ]]; then
+    jq -n '{allowed:false, reason:"Blocked: bare git push is not allowed. Name the target branch explicitly, e.g. git push origin <branch>."}'
+    return 0
+  fi
+
+  current_branch=$(pg_branch_name 2>/dev/null || true)
+  current_head=$(git rev-parse HEAD 2>/dev/null || true)
+
+  [[ -n "$remote" ]] || remote=$(pg_default_remote 2>/dev/null || true)
+  if [[ -n "$target_branch" ]]; then
+    lease_branch="$target_branch"
+  else
+    lease_branch="$current_branch"
+  fi
+  if [[ -z "$lease_branch" ]]; then
+    jq -n --arg reason "Blocked: detached HEAD pushes require an explicit target branch like HEAD:<branch>. Use pg push --branch <branch> --source-ref HEAD." '{allowed:false, reason:$reason}'
+    return 0
+  fi
+  [[ -n "$target_branch" ]] || target_branch="$lease_branch"
+  branch_ref=$(pg_branch_ref "$lease_branch")
+
   if [[ "$is_delete" == "true" ]]; then
+    # yolo branches may be deleted on their remote; everything else is blocked.
+    # pg_validate_yolo_push re-checks prefix + protected base + remote, so a
+    # delete whose target is a base ref (e.g. `git push --delete origin main`)
+    # is never a yolo candidate and falls through to the block below.
+    yolo_result=$(pg_validate_yolo_push "$(pg_agent_push_policy_json)" "$remote" "$target_branch" "$is_force" "$force_with_lease" "true")
+    yolo_allowed=$(echo "$yolo_result" | jq -r '.allowed')
+    yolo_candidate=$(echo "$yolo_result" | jq -r '.yolo_candidate // false')
+    if [[ "$yolo_allowed" == "true" ]]; then
+      echo "$yolo_result"
+      return 0
+    fi
+    if [[ "$yolo_candidate" == "true" ]]; then
+      yolo_reason=$(echo "$yolo_result" | jq -r '.reason')
+      jq -n --arg reason "$yolo_reason" '{allowed:false, reason:$reason}'
+      return 0
+    fi
     jq -n '{allowed:false, reason:"Blocked: deleting remote branches is not allowed for agent pushes."}'
     return 0
   fi
@@ -4921,8 +5070,28 @@ pg_validate_push_guard() {
   fi
 
   branch_upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-  if [[ -n "$current_branch" && "$lease_branch" == "$current_branch" && "$branch_upstream" =~ ^(origin|upstream)/(main|master)$ && ! "$current_branch" =~ ^(main|master)$ ]]; then
-    jq -n --arg reason "Blocked: branch '$current_branch' tracks $branch_upstream. Re-set upstream first: git branch --set-upstream-to=origin/$current_branch" '{allowed:false, reason:$reason}'
+  if [[ -n "$current_branch" && "$lease_branch" == "$current_branch" && -n "$branch_upstream" ]]; then
+    local upstream_branch
+    upstream_branch=$(pg_remote_tracking_branch_name "$branch_upstream" 2>/dev/null || true)
+    if [[ -n "$upstream_branch" && "$upstream_branch" != "$current_branch" ]]; then
+      jq -n --arg reason "Blocked: branch '$current_branch' tracks $branch_upstream. Feature branches may only track a mirrored remote branch name; re-set upstream first: git branch --set-upstream-to=origin/$current_branch" '{allowed:false, reason:$reason}'
+      return 0
+    fi
+  fi
+
+  # Yolo fast path. Reached only after the base-ref deny, plain-force deny, and
+  # upstream-mirror check above — so by the time we get here a yolo-prefixed
+  # target is structurally incapable of being a base ref or a plain force push.
+  yolo_result=$(pg_validate_yolo_push "$(pg_agent_push_policy_json)" "$remote" "$target_branch" "$is_force" "$force_with_lease" "false")
+  yolo_allowed=$(echo "$yolo_result" | jq -r '.allowed')
+  yolo_candidate=$(echo "$yolo_result" | jq -r '.yolo_candidate // false')
+  if [[ "$yolo_allowed" == "true" ]]; then
+    echo "$yolo_result"
+    return 0
+  fi
+  if [[ "$yolo_candidate" == "true" ]]; then
+    yolo_reason=$(echo "$yolo_result" | jq -r '.reason')
+    jq -n --arg reason "$yolo_reason" '{allowed:false, reason:$reason}'
     return 0
   fi
 
@@ -4988,7 +5157,7 @@ pg_validate_push_guard() {
     return 0
   fi
   if [[ "$pending_head" != "$current_head" ]]; then
-    jq -n --arg reason "Blocked: branch HEAD changed after self-assertion. Re-run pg push with updated caveman text." '{allowed:false, reason:$reason}'
+    jq -n --arg reason "Blocked: branch HEAD changed after self-assertion. Re-run pg push with updated assertion text." '{allowed:false, reason:$reason}'
     return 0
   fi
 
@@ -7452,7 +7621,7 @@ pg_cmd_push() {
     return $?
   fi
 
-  [[ -n "$assert_flow" ]] || pg_fail "pg push requires --assert-flow with caveman text."
+  [[ -n "$assert_flow" ]] || pg_fail "pg push requires --assert-flow with assertion text."
   current_branch=$(pg_branch_name || true)
   branch="${branch:-$current_branch}"
   [[ -n "$branch" ]] || pg_fail "pg push requires --branch when not on a branch."
