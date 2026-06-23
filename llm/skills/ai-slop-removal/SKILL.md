@@ -191,6 +191,80 @@ if all(k in data for k in required_fields) and isinstance(data.get('id'), int):
     process(data)
 ```
 
+### 8. Unrelated Diff Churn (Scope Creep in an Edit)
+
+**Pattern**: When asked for a *specific* change (a refactor, a move, a bug fix),
+the AI also rewrites untouched code cosmetically. Each edit looks harmless on its
+own, but together they bloat the diff, bury the real change, and risk silent
+regressions in code nobody meant to touch. **Rule: a diff should contain only
+what the task requires.** Most of these surface when a function is moved or a
+call site changes, and the AI "tidies" the body along the way.
+
+**8a. Dropped docstring/comment that still applied** (the task was to change the
+call site, not the body):
+```python
+# BEFORE
+def get_replication_factor(env, cluster):
+    """Validate the new path against the legacy backend; always return the new
+    result, and log any mismatch for monitoring."""
+    ...
+
+# AFTER (churn — docstring deleted for no reason; it was still accurate)
+def get_replication_factor(env, cluster):
+    ...
+```
+Also includes dropping explanatory comments (`# this satisfies the type checker`,
+a TODO, a link to docs) that the change didn't invalidate.
+
+**8b. Conditional reflowed with identical behavior**:
+```python
+# BEFORE
+if len(values) > 0:
+    return mean(values)
+return DEFAULT
+
+# AFTER (churn — same logic, noisy diff)
+return mean(values) if values else DEFAULT
+```
+
+**8c. Casing / local-variable rename for style only**:
+```python
+# BEFORE
+ENDPOINT_URL = f"https://backend.{region}.example/v2"
+client = Client(endpoint=ENDPOINT_URL)
+
+# AFTER (churn — local renamed UPPER -> lower with no behavior change)
+endpoint_url = f"https://backend.{region}.example/v2"
+client = Client(endpoint=endpoint_url)
+```
+Same category: renaming a throwaway local (`foo` -> `parsed_tables`). This one is
+a genuine *improvement* — but it still doesn't belong in an unrelated diff. Do it
+as its own commit so a reviewer can evaluate it on its merits.
+
+**8d. Helper inlined/extracted unrelated to the task**:
+```python
+# BEFORE — small helper used by the function being moved
+async def get_tier(app, account):
+    facts = await _get_app_facts(app, account)
+    ...
+
+async def _get_app_facts(app, account):
+    return await Metadata.get(appname=app, account=account)
+
+# AFTER (churn — helper inlined and deleted; behavior identical, scope unrelated)
+async def get_tier(app, account):
+    facts = await Metadata.get(appname=app, account=account)
+    ...
+```
+
+**Detection**: After editing, diff against the base (`git diff <base>`). Every
+hunk should map to the stated task. A hunk that only rewords a comment, reflows a
+conditional, changes casing, or renames a local — with **identical behavior** — is
+churn. Revert it, or split it into a separate, clearly-labeled cleanup commit.
+
+**Not the same as "never improve"**: the point is not to forbid cleanups, it's to
+keep them out of a focused diff. Worthwhile cleanup → its own commit.
+
 ## Review Workflow
 
 ### 1. Quick Scan
@@ -225,6 +299,7 @@ After AI generates code, review:
 - [ ] No premature abstractions
 - [ ] Complexity is justified
 - [ ] Follows existing patterns in codebase
+- [ ] No unrelated diff churn — every hunk maps to the task; no cosmetic edits to untouched code
 
 ## Before/After Examples
 
