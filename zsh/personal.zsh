@@ -428,7 +428,7 @@ cwt() {
     if [[ -d "$worktree_path" ]]; then
         echo "Entering existing worktree: $worktree_path"
     else
-        git worktree add -b "$branch" "$worktree_path" HEAD || return $?
+        git worktree add --no-track -b "$branch" "$worktree_path" HEAD || return $?
         echo "Worktree created:"
         echo "  Path:   $worktree_path"
         echo "  Branch: $branch"
@@ -742,143 +742,54 @@ bdc() {
 }
 
 # ==============================================================================
-# Git Worktree Functions
+# Multi-Repo Project Bootstrap
 # ==============================================================================
-# Naming convention:
-#   Branch: mho/<branch-name>
-#   Path:   ~/worktrees/mho-<branch-name>
+# A "project" is a folder under ~/proj/<name>/ holding one git worktree per repo,
+# each cut from the repo's clone in ~/repos/. Worktree branches are mho/<name>.
 
-# gwt - Create a worktree with mho/ prefix
-# Usage: gwt <branch-name>
-# Example: gwt auth-refactor → branch mho/auth-refactor at ~/worktrees/mho-auth-refactor
-gwt() {
-    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
-
-    if [[ -z "$1" ]]; then
-        echo "Usage: gwt <branch-name>"
-        echo "Creates: branch mho/<branch-name> at ~/worktrees/mho-<branch-name>"
+# proj: Bootstrap a multi-repo project as git worktrees under ~/proj/<name>.
+# Usage:   proj <project-name> <repo> [<repo> ...]
+# Example: proj kv-billing antigravity-odsmeta antigravity-dabp
+# Each <repo> must already be cloned at ~/repos/<repo>. Adds a worktree at
+# ~/proj/<name>/<repo> on a fresh branch mho/<name> cut from origin's default
+# branch (fetched first). Missing clones abort with a /bootstrap-proj hint.
+proj() {
+    emulate -L zsh
+    local name="$1"; shift 2>/dev/null
+    if [[ -z "$name" || $# -eq 0 ]]; then
+        echo "Usage: proj <project-name> <repo> [<repo> ...]"
+        echo "  Creates ~/proj/<name>/ with a worktree of each repo on branch mho/<name>."
         return 1
     fi
 
-    local branch="mho/$1"
-    local worktree_path=~/worktrees/mho-$1
+    local proj_dir="$HOME/proj/$name" branch="mho/$name" repo missing=()
 
-    mkdir -p ~/worktrees
-    git worktree add -b "$branch" "$worktree_path" HEAD
-    echo ""
-    echo "Worktree created:"
-    echo "  Path:   $worktree_path"
-    echo "  Branch: $branch"
-    echo ""
-    echo "To enter: cd $worktree_path"
-}
-
-# gwtl - List all worktrees
-alias gwtl='git worktree list'
-
-# gwtr - Remove a worktree (with fzf selection if no arg)
-# Usage: gwtr [path]
-gwtr() {
-    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
-
-    if [[ -n "$1" ]]; then
-        git worktree remove "$1"
-        return
+    # Validate all clones exist before touching anything.
+    for repo in "$@"; do
+        git -C "$HOME/repos/$repo" rev-parse --git-dir >/dev/null 2>&1 || missing+=("$repo")
+    done
+    if (( ${#missing[@]} )); then
+        echo "proj: no clone at ~/repos/ for: ${missing[*]}" >&2
+        echo "proj: clone them, or ask Claude (/bootstrap-proj) to resolve + clone." >&2
+        return 1
     fi
 
-    # Use fzf to select if available
-    if command -v fzf > /dev/null 2>&1; then
-        local selected=$(git worktree list | tail -n +2 |
-            fzf --header "Select worktree to remove (Esc to cancel)" \
-                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} log --oneline -10 2>/dev/null' |
-            awk '{print $1}')
+    [[ -e "$proj_dir" ]] && { echo "proj: $proj_dir already exists" >&2; return 1; }
+    mkdir -p "$proj_dir" || return 1
 
-        if [[ -n "$selected" ]]; then
-            git worktree remove "$selected" && echo "Removed: $selected"
-        fi
-    else
-        echo "Usage: gwtr <path>"
-        echo "Or install fzf for interactive selection"
-        git worktree list
-    fi
-}
+    for repo in "$@"; do
+        local src="$HOME/repos/$repo" dst="$proj_dir/$repo" ref
+        git -C "$src" fetch --quiet origin || { echo "proj: fetch failed: $repo" >&2; return 1; }
+        git -C "$src" remote set-head origin --auto >/dev/null 2>&1
+        ref=$(git -C "$src" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+        [[ -z "$ref" ]] && ref="origin/main"
+        echo "proj: $repo -> $dst ($branch off $ref)"
+        git -C "$src" worktree add --no-track -b "$branch" "$dst" "$ref" \
+            || { echo "proj: worktree add failed for $repo (branch $branch may exist)" >&2; return 1; }
+    done
 
-# gwtp - Prune stale worktree references
-alias gwtp='git worktree prune -v'
-
-# gwtc - cd into a worktree (with fzf selection)
-gwtc() {
-    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
-
-    if [[ -n "$1" ]]; then
-        cd "$1"
-        return
-    fi
-
-    if command -v fzf > /dev/null 2>&1; then
-        local selected=$(git worktree list |
-            fzf --header "Select worktree to enter" \
-                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} status -s 2>/dev/null; echo ""; git -C {1} log --oneline -5 2>/dev/null' |
-            awk '{print $1}')
-
-        if [[ -n "$selected" ]]; then
-            cd "$selected"
-        fi
-    else
-        echo "Usage: gwtc <path>"
-        git worktree list
-    fi
-}
-
-# gwtclean - Interactive cleanup of all worktrees in ~/worktrees
-gwtclean() {
-    git rev-parse HEAD > /dev/null 2>&1 || { echo "Not in a git repo"; return 1; }
-
-    local worktrees=$(git worktree list | tail -n +2)
-
-    if [[ -z "$worktrees" ]]; then
-        echo "No worktrees to clean up."
-        return 0
-    fi
-
-    echo "Current worktrees:"
-    echo "$worktrees"
-    echo ""
-
-    if command -v fzf > /dev/null 2>&1; then
-        local selected=$(echo "$worktrees" |
-            fzf --multi --header "Select worktrees to REMOVE (Tab=select, Enter=confirm)" \
-                --preview 'echo "Branch: $(git -C {1} rev-parse --abbrev-ref HEAD 2>/dev/null)"; echo ""; git -C {1} log --oneline -10 2>/dev/null' |
-            awk '{print $1}')
-
-        if [[ -z "$selected" ]]; then
-            echo "No worktrees selected."
-            return 0
-        fi
-
-        echo ""
-        echo "Will remove:"
-        echo "$selected"
-        echo ""
-        read "confirm?Remove these worktrees? [y/N]: "
-
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            echo "$selected" | while read path; do
-                git worktree remove "$path" 2>/dev/null && echo "Removed: $path" || echo "Failed: $path"
-            done
-            git worktree prune
-        else
-            echo "Aborted."
-        fi
-    else
-        read "confirm?Remove ALL worktrees? [y/N]: "
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            echo "$worktrees" | awk '{print $1}' | while read path; do
-                git worktree remove "$path" 2>/dev/null && echo "Removed: $path"
-            done
-            git worktree prune
-        fi
-    fi
+    echo "proj: ready -> $proj_dir"
+    cd "$proj_dir"
 }
 
 # ==============================================================================

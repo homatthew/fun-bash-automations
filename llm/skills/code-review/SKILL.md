@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Use when reviewing a PR, branch diff, or staged changes. Use when the user says "review", "code review", "/code-review", or "review this PR". Use INSTEAD of the superpowers code-reviewer agent.
+description: Use when reviewing a PR, branch diff, or staged changes. Use when the user says "review", "code review", "/code-review", or "review this PR".
 ---
 
 # Multi-Agent Code Review
@@ -76,7 +76,7 @@ When running inside Claude Code, spawn **both agents in a single message** so th
 
 ### Codex Runtime Launch Path
 
-When running inside Codex, there is no native `pr-review-toolkit:code-reviewer` subagent. Invoke Claude as an external reviewer with `claude --print`, and run the Codex review locally or via a Codex subagent.
+When running inside Codex, there is no native `pr-review-toolkit:code-reviewer` subagent. Invoke Claude as a local external reviewer with `claude --print`, and run the Codex review locally or via a Codex subagent. Do not use cloud review commands such as `ultrareview`; this workflow must be reproducible from local repo context.
 
 1. Write the Claude prompt to a temp file:
 
@@ -85,35 +85,125 @@ When running inside Codex, there is no native `pr-review-toolkit:code-reviewer` 
    # write Agent A prompt into "$claude_prompt"
    ```
 
-2. Start Claude in the background from the repository root:
+2. Start Claude from the repository root in a detached `tmux` session. Claude
+   must write stream JSON, stderr, the extracted final result, and the exit code
+   to files. Do **not** stream Claude's JSONL into the Codex transcript.
+
+   **Codex exec runtimes must not launch Claude with shell backgrounding (`&`)
+   from a one-shot command.** The exec harness can clean up the process tree as
+   soon as the shell command returns, leaving zero-byte JSONL/stderr files.
+   `nohup` and `setsid` are not reliable here either. Use `tmux`, then poll tiny
+   file status from Codex.
 
    ```bash
-   claude_out="$(mktemp -t code-review-claude-out)"
-   claude_err="$(mktemp -t code-review-claude-err)"
-   NOTIFY_SUPPRESS=1 claude -p \
+   review_dir="$(mktemp -d -t code-review-claude)"
+   claude_jsonl="$review_dir/claude.jsonl"
+   claude_err="$review_dir/claude.err"
+   claude_result="$review_dir/claude.result.md"
+   claude_rc="$review_dir/claude.rc"
+   claude_runner="$review_dir/run-claude-review.sh"
+   claude_session="code-review-claude-$(date +%s)-$RANDOM"
+
+   cat > "$claude_runner" <<'EOF'
+   #!/usr/bin/env bash
+   set -o pipefail
+
+   claude_cmd="$(command -v t3-claude || command -v claude)"
+   "$claude_cmd" --version >/dev/null
+   claude_effort="${CODE_REVIEW_CLAUDE_EFFORT:-max}"
+
+   NOTIFY_SUPPRESS=1 "$claude_cmd" -p \
      --agent pr-review-toolkit:code-reviewer \
      --permission-mode plan \
      --tools "Read,Grep,Glob,Bash" \
      --no-session-persistence \
-     < "$claude_prompt" > "$claude_out" 2> "$claude_err" &
-   claude_pid=$!
+     --effort "$claude_effort" \
+     --output-format stream-json \
+     --include-partial-messages \
+     --include-hook-events \
+     --verbose \
+     < "$CLAUDE_PROMPT" > "$CLAUDE_JSONL" 2> "$CLAUDE_ERR"
+   rc=$?
+
+   jq -r 'select(.type == "result") | .result // empty' "$CLAUDE_JSONL" | tail -1 > "$CLAUDE_RESULT" || true
+   if [ ! -s "$CLAUDE_RESULT" ]; then
+     jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' "$CLAUDE_JSONL" > "$CLAUDE_RESULT" || true
+   fi
+   printf '%s\n' "$rc" > "$CLAUDE_RC"
+   exit "$rc"
+   EOF
+   chmod +x "$claude_runner"
+
+   tmux new-session -d -s "$claude_session" \
+     "cd '$PWD' && CLAUDE_PROMPT='$claude_prompt' CLAUDE_JSONL='$claude_jsonl' CLAUDE_ERR='$claude_err' CLAUDE_RESULT='$claude_result' CLAUDE_RC='$claude_rc' '$claude_runner'"
+
+   printf 'Claude review session: %s\nreview_dir=%s\n' "$claude_session" "$review_dir"
    ```
 
 3. While Claude runs, perform Agent B's Codex review independently in the current Codex session, using the Agent B prompt below.
 
-4. Wait for Claude before consolidation:
+4. Wait for Claude before consolidation. **Do not proceed to consolidation
+   just because Claude is slow.** Poll only low-volume status from Codex:
+   never `cat` the JSONL, never tail large output, and do not paste Claude's
+   reasoning stream into the chat. Use a heartbeat that detects both progress
+   and stalls.
 
    ```bash
-   if ! wait "$claude_pid"; then
-     echo "Claude reviewer failed; stderr follows:" >&2
-     tail -80 "$claude_err" >&2
-   fi
-   claude_findings="$(cat "$claude_out")"
+   heartbeat_interval_seconds="${CODE_REVIEW_HEARTBEAT_SECONDS:-30}"
+   stuck_after_heartbeats="${CODE_REVIEW_STUCK_HEARTBEATS:-6}"
+   last_events=-1
+   last_bytes=-1
+   unchanged_heartbeats=0
+
+   while tmux has-session -t "$claude_session" 2>/dev/null; do
+     events="$(wc -l < "$claude_jsonl" 2>/dev/null || echo 0)"
+     bytes="$(wc -c < "$claude_jsonl" 2>/dev/null || echo 0)"
+     stderr_bytes="$(wc -c < "$claude_err" 2>/dev/null || echo 0)"
+     echo "Claude reviewer heartbeat; events=$events bytes=$bytes stderr=$stderr_bytes unchanged=$unchanged_heartbeats" >&2
+
+     if [ "$events" = "$last_events" ] && [ "$bytes" = "$last_bytes" ]; then
+       unchanged_heartbeats=$((unchanged_heartbeats + 1))
+     else
+       unchanged_heartbeats=0
+       last_events="$events"
+       last_bytes="$bytes"
+     fi
+
+     if [ "$unchanged_heartbeats" -ge "$stuck_after_heartbeats" ]; then
+       echo "Claude reviewer appears stuck: no JSONL progress for $unchanged_heartbeats heartbeat intervals." >&2
+       echo "Inspect or restart the Claude reviewer; do not consolidate without either a Claude result or an explicit note that this leg was unavailable." >&2
+       tail -80 "$claude_err" >&2
+       exit 124
+     fi
+
+     sleep "$heartbeat_interval_seconds"
+   done
+
+   echo "Claude reviewer finished; rc=$(cat "$claude_rc" 2>/dev/null || echo unknown) result_bytes=$(wc -c < "$claude_result" 2>/dev/null || echo 0) stderr=$(wc -c < "$claude_err" 2>/dev/null || echo 0)" >&2
    ```
 
-5. If `claude` is unavailable or fails before producing findings, continue with the Codex review but explicitly report that the Claude leg was unavailable. Do not invent `[Claude]` findings.
+   After Claude finishes, read only the final extracted result:
 
-Do not pass write tools to Claude for review. Use `NOTIFY_SUPPRESS=1` so the nested Claude review does not create duplicate desktop notifications. Remove the temp prompt/output/error files after consolidation.
+   ```bash
+   claude_rc_value="$(cat "$claude_rc" 2>/dev/null || echo 1)"
+   claude_findings="$(cat "$claude_result" 2>/dev/null || true)"
+   if [ "$claude_rc_value" != "0" ] || [ -z "$claude_findings" ]; then
+     echo "Claude reviewer failed or produced no result; stderr follows:" >&2
+     tail -80 "$claude_err" >&2
+   fi
+   ```
+
+5. If `claude` is unavailable, exits non-zero, produces no findings, or the
+   heartbeat exits `124` for a no-progress stall, first try to fix the local
+   issue and rerun the Claude leg once. Continue with the Codex review only
+   after that retry also fails, and explicitly report that the Claude leg was
+   unavailable. Do not invent `[Claude]` findings.
+
+Prefer `t3-claude` when available; it bypasses slow Netflix wrapper startup paths that can trip short health-check or command timeouts. Use the strongest local effort mode the installed CLI actually supports. Default to `max`; if a local wrapper supports `ultracode`, set `CODE_REVIEW_CLAUDE_EFFORT=ultracode` after confirming the CLI does not print `Unknown --effort value`. Do not pass write tools to Claude for review. Use `NOTIFY_SUPPRESS=1` so the nested Claude review does not create duplicate desktop notifications. Keep the JSONL file until after consolidation when debugging a long or empty Claude run; otherwise remove the temp prompt/output/error files after consolidation.
+
+If wrapping the Claude invocation in zsh, store command return codes in a
+variable such as `rc`; do not assign to `status`, which is a read-only zsh
+special parameter.
 
 ### Agent A: Claude Code Reviewer
 
@@ -144,7 +234,9 @@ Review this code for:
 4. **Assumptions**: List every assumption the code makes. What breaks if each is wrong?
 5. **Magic values**: Flag any literals/defaults without justification
 6. **Simplicity**: Could this be done with less code? Unnecessary indirection?
-7. **Silent failures**: What could break elsewhere with no test failing?
+7. **Hidden state machines**: Flag nested helpers or closures that combine lazy loading, caching, sentinel flags, `nonlocal` mutation, and swallowed failures. Prefer an explicit state object, clear return contract, or simpler phase ordering.
+8. **Silent failures**: What could break elsewhere with no test failing?
+9. **Unrelated diff churn**: Flag cosmetic edits to code the change didn't need to touch — dropped/reworded docstrings or comments that still applied, conditionals reflowed with identical behavior (e.g. `if/else` → ternary), casing-only changes, or local-variable renames. Each looks harmless but together they bury the real change and risk silent regressions; they belong in a separate cleanup commit, not this one.
 
 Output findings in this format:
 
@@ -196,6 +288,8 @@ Focus your review on:
 4. **Error handling**: Silent swallows, inappropriate fallbacks, missing error paths
 5. **Race conditions or ordering issues** (if concurrent code)
 6. **API contract violations**: Does this change any observable behavior for callers?
+7. **Hidden state machines**: Look for functions that are hard to reason about because they mix lazy loading, caching, sentinel flags, `nonlocal` state, and error swallowing. Suggest a concrete refactor, such as an explicit result object or moving the load/resolve phase out of the inner loop.
+8. **Unrelated diff churn**: Cosmetic edits to code the change didn't need to touch — reworded comments/docstrings, conditionals reformatted with identical logic, casing changes, or local-variable renames. Call these out so they can be reverted or split into a separate cleanup commit.
 
 For each finding, provide:
 - Severity: Critical / Important / Observation
@@ -216,7 +310,111 @@ After both agents return their findings:
 4. **Classify**: Group all findings as Critical > Important > Observation
 5. **Include mandatory items**: False-pass bug and test compression from the Claude reviewer
 
-## Phase 4: Present Unified Findings
+## Phase 4: Targeted Deep Dives
+
+Do not stop after the first-pass consolidation. Run a second review iteration
+for the riskiest areas before presenting final findings.
+
+1. Select up to 3 targets for deeper review:
+   - any Critical finding
+   - any finding tagged `[Both]`
+   - any touched implementation file with non-trivial branching, state,
+     persistence, network calls, concurrency, migrations, auth, or API contracts
+   - any test that appears to assert mocked/stubbed behavior instead of caller
+     visible behavior
+2. For each target, create a small drill-down package containing only:
+   - the relevant finding or risk hypothesis
+   - the relevant diff hunk(s)
+   - nearby caller/callee snippets needed to reason about the contract
+   - relevant tests
+3. Send each target to a fresh local reviewer when possible. Prefer a new
+   `t3-claude -p` invocation with read-only tools and the strongest supported
+   local effort mode (`CODE_REVIEW_CLAUDE_EFFORT=ultracode` only if supported;
+   otherwise `max`). Otherwise do a fresh local pass with the same narrow
+   package. These are challenge reviews: ask the reviewer to prove or disprove
+   the risk, find the next layer of failure, and name the smallest confirming
+   test.
+4. Merge drill-down results back into the findings:
+   - promote confirmed risks
+   - demote or remove disproven findings
+   - add any new concrete bug found one layer deeper
+   - keep speculative concerns only as Observations with clear uncertainty
+
+Deep-dive prompt:
+
+```
+You are doing a targeted second-pass review, not a broad review.
+
+Risk hypothesis:
+{finding or suspected risk}
+
+Relevant diff/context:
+{small focused package}
+
+Tasks:
+1. Try to disprove the risk first. If it is false, explain why with code evidence.
+2. If true, identify the exact failing path and the smallest code fix.
+3. Name the smallest behavioral test that would fail before the fix.
+4. Look one layer deeper: what adjacent caller, callee, or invariant could still
+   break after the obvious fix?
+
+Return only confirmed findings and explicit non-findings.
+```
+
+Preferred local Claude deep-dive invocation:
+
+```bash
+deep_prompt="$(mktemp -t code-review-deep-prompt)"
+# write the deep-dive prompt and focused package into "$deep_prompt"
+deep_dir="$(mktemp -d -t code-review-deep)"
+deep_jsonl="$deep_dir/claude.jsonl"
+deep_err="$deep_dir/claude.err"
+deep_result="$deep_dir/claude.result.md"
+deep_rc="$deep_dir/claude.rc"
+deep_runner="$deep_dir/run-claude-deep-review.sh"
+deep_session="code-review-deep-$(date +%s)-$RANDOM"
+
+cat > "$deep_runner" <<'EOF'
+#!/usr/bin/env bash
+set -o pipefail
+
+claude_cmd="$(command -v t3-claude || command -v claude)"
+claude_effort="${CODE_REVIEW_CLAUDE_EFFORT:-max}"
+NOTIFY_SUPPRESS=1 "$claude_cmd" -p \
+  --agent pr-review-toolkit:code-reviewer \
+  --permission-mode plan \
+  --tools "Read,Grep,Glob,Bash" \
+  --no-session-persistence \
+  --effort "$claude_effort" \
+  --output-format stream-json \
+  --include-partial-messages \
+  --include-hook-events \
+  --verbose \
+  < "$DEEP_PROMPT" > "$DEEP_JSONL" 2> "$DEEP_ERR"
+rc=$?
+jq -r 'select(.type == "result") | .result // empty' "$DEEP_JSONL" | tail -1 > "$DEEP_RESULT" || true
+if [ ! -s "$DEEP_RESULT" ]; then
+  jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' "$DEEP_JSONL" > "$DEEP_RESULT" || true
+fi
+printf '%s\n' "$rc" > "$DEEP_RC"
+exit "$rc"
+EOF
+chmod +x "$deep_runner"
+
+tmux new-session -d -s "$deep_session" \
+  "cd '$PWD' && DEEP_PROMPT='$deep_prompt' DEEP_JSONL='$deep_jsonl' DEEP_ERR='$deep_err' DEEP_RESULT='$deep_result' DEEP_RC='$deep_rc' '$deep_runner'"
+printf 'Claude deep-review session: %s\ndeep_dir=%s\n' "$deep_session" "$deep_dir"
+```
+
+If the command emits `Unknown --effort value`, rerun with
+`CODE_REVIEW_CLAUDE_EFFORT=max` and mention the fallback in the review notes.
+Use the same heartbeat loop from the broad review, replacing `claude_*` variable
+names with `deep_*` and `claude_session` with `deep_session`. Wait for the
+deep-review session to finish before merging drill-down results. If the
+heartbeat reports a no-progress stall, inspect or restart the deep-review leg;
+do not silently skip it. Read only `"$deep_result"` after completion.
+
+## Phase 5: Present Unified Findings
 
 ```
 ## Review Findings
@@ -245,9 +443,30 @@ Which findings should I fix? (e.g., "1,3" or "all" or "none")
 ```
 
 After user selects findings to fix:
-- Implement fixes one at a time
+- Implement fixes one at a time using the Minimal-Diff Fix Protocol below
 - Run tests after each fix
 - Report results
+
+## Minimal-Diff Fix Protocol
+
+When changing code after review, bias hard toward the smallest reviewable diff
+that fixes the selected finding.
+
+1. Before editing, state the selected finding and the exact behavioral change.
+2. Touch only files needed for that finding. Do not opportunistically refactor,
+   rename, reformat, reorder imports, or broaden abstractions.
+3. Preserve public APIs, data shapes, defaults, error types, and call ordering
+   unless the selected finding requires changing them.
+4. Prefer deleting unnecessary new code over adding compensating code.
+5. Add or adjust the smallest behavioral test that would have failed before the
+   fix. Avoid tests that only assert mocks, implementation details, or the
+   code path you just hard-coded.
+6. After editing, inspect `git diff`. If the diff contains unrelated cleanup,
+   split it out or revert it.
+7. Re-run the narrowest meaningful verification, then broaden only if the blast
+   radius justifies it.
+8. If multiple fixes touch the same area, combine them only when that reduces
+   review complexity. Otherwise keep them separate and explain the boundary.
 
 ## Anti-Rationalization Rules
 
@@ -257,6 +476,27 @@ After user selects findings to fix:
 - "comprehensive" → instead say "covers A,B,C; misses D,E"
 - "clean" → instead say "follows project pattern X consistently"
 - "reasonable" → instead say "value N works because [reason]; breaks if [condition]"
+
+### Code smells reviewers must call out
+
+- **Hidden state machine in a helper**: Nested helper with `nonlocal` variables,
+  a separate `loaded` boolean, cached return values, and exception swallowing.
+  Fix by making the state explicit: use a small model/result object, a sentinel
+  with one cached variable, or move the load/resolve operation before the loop.
+- **Ambiguous helper contract**: Helper name or return value does not make the
+  input/output contract obvious. Fix by renaming around concrete examples and
+  documenting what representative inputs become.
+- **Policy mixed with parsing**: Code both interprets a data format and decides
+  user-facing behavior in the same branch. Fix by moving parsing/normalization
+  into a domain helper and leaving policy decisions at the caller.
+- **Unrelated diff churn**: A focused change also rewrites untouched code
+  cosmetically — drops or rewords a docstring/comment that still applied, reflows
+  a conditional (`if/else` → ternary) with identical behavior, changes casing, or
+  renames a local for style only. Each looks harmless, but together they bury the
+  real change and risk silent regressions in code nobody meant to touch. Fix by
+  reverting the churn or splitting it into a separate, clearly-labeled cleanup
+  commit. (Even a genuine improvement, like renaming a `foo` local, belongs in
+  its own commit — not smuggled into an unrelated diff.)
 
 ### Red flags that the review is shallow
 - Zero issues found (every PR has issues)
