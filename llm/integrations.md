@@ -14,6 +14,11 @@ plugin behavior.
 
 ## Portable MCP (configure in Codex)
 
+Codex MCPs are explicit. `bin/fba-deploy` renders the portable allowlist from
+`codex/mcp.toml`; install/auth notes live in `codex/MCP.md`. Do not copy
+Claude, Dropship, or plugin MCP state into Codex unless the server is added to
+that allowlist.
+
 - `chrome-devtools`
   - command: `npx`
   - args: `chrome-devtools-mcp@latest`
@@ -21,9 +26,13 @@ plugin behavior.
 - `core-tools`
   - HTTP MCP gateway for Netflix search, manuals, Slack RAG, and direct Slack
     thread fetch.
+  - Not in the portable FBA allowlist yet; requires confirmed Codex remote
+    gateway endpoint and auth behavior.
 
 - `ndex-slack-private`
   - Slack MCP from the ODS first-team Claude plugin.
+  - Not in the portable FBA allowlist yet; local/private token behavior differs
+    from remote workspace gateway setup.
   - Operational workflow lives in `llm/skills/slack-context/SKILL.md`.
   - Codex uses `bin/launch-slack-mcp` so Keychain Slack token behavior matches
     local agent setup (`slack-user-token` or `claude-slack-user-token`).
@@ -58,20 +67,30 @@ plugin behavior.
 
 - `NECP`
   - HTTP MCP gateway for Netflix engineering context.
+  - Not in the portable FBA allowlist yet; requires confirmed Codex remote
+    gateway endpoint and auth behavior.
 
 - `netflix-ci-official`
   - HTTP MCP gateway for Netflix CI / Boost tooling.
+  - Not in the portable FBA allowlist yet; requires confirmed Codex remote
+    gateway endpoint and auth behavior.
 
 - `nflx-spinnaker`
   - command: `npx`
   - args: `-y @netflix-internal/mcp-server-spinnaker@latest`
+  - Not in the portable FBA allowlist yet; remote install/auth requirements
+    still need confirmation.
 
 - Sourcegraph MCP
-  - Configured as both stdio `sourcegraph` and HTTP `sourcegraph-official`,
-    matching the current Claude setup.
+  - Not in the portable FBA allowlist; it is an internal MCP owned by the
+    dotfiles overlay.
   - If Sourcegraph returns a 502, especially `downstream` or
     `ngp-mcp-sourcegraph`, ask the user to open
     `http://go/authorize-sourcegraph`, then retry the query.
+
+- `sourcegraph-official`, `socket-dev`, `railguard`
+  - Not in the portable FBA allowlist yet. Add only after confirming the Codex
+    endpoint, install path, and auth behavior for remote workspaces.
 
 ## Non-MCP Claude Plugin Workflows (shared skill/helper parity)
 
@@ -84,7 +103,7 @@ plugin behavior.
   - No Codex-side parity required; Codex is already the primary harness.
 
 - `frontend-design`, `pr-review-toolkit`, `code-review`, `skill-creator`,
-  `superpowers`, `interface-design`, `elements-of-style`, `ods-first-team`
+  `interface-design`, `ods-first-team`
   - Treat as Claude plugin UX unless an explicit MCP server contract exists.
   - Parity strategy: document as Claude-only or re-create high-value behavior
     via shared `llm/skills`.
