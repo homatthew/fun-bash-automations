@@ -26,14 +26,21 @@ Codex, and future harnesses.
 ### Git history and branch safety
 
 - Block `git push --force`; allow `--force-with-lease` only where delivery
-  push-gate policy permits it. Scratch branches never allow force pushes.
+  push-gate policy permits it. Scratch branches never allow force pushes; yolo
+  branches allow `--force-with-lease` and delete (see the yolo branch class
+  below).
 - Block `git reset --hard`
 - Block broad discard commands like `git checkout .`, `git checkout -- .`,
-  `git restore .`, `git clean -f`, `git branch -D`
+  `git restore .`, `git clean -f`, `git branch -D` (the `git branch -D` block
+  is exempt only when **every** deleted branch name is yolo-prefixed — local
+  cleanup of unmerged yolo branches)
 - Block stash destruction (`git stash drop`, `git stash clear`)
 
 ### Push approval
 
+- Block bare `git push` and remote-only `git push origin`. The command must
+  name the target branch or refspec explicitly, e.g. `git push origin <branch>`,
+  so guard classification never depends on hidden current-branch/upstream state.
 - Require explicit user approval before any delivery or PR-eligible push.
   Non-delivery scratch branch pushes are governed by the scratch branch class
   below.
@@ -76,22 +83,56 @@ agent remote backup, resumability, and cross-workspace handoff. Scratch branch
 pushes are not a push-gate bypass because push-gate applies to delivery and
 PR-eligible branches; scratch branches are explicitly non-PR work surfaces.
 
-Agents may commit and push matching scratch branches at their discretion. The
-guard allows those pushes only when the target branch matches a configured
-scratch prefix, targets a configured scratch remote, is not a force/delete
-push, has no open PR as its head, and is not the base of an open PR. If any of
-those checks fails or cannot be verified, the branch is treated as delivery
-scope and must use push-gate.
+Agents may commit and push matching scratch branches only after the user selects
+Remote Scratch Mode. The guard allows those pushes only when the shell declares
+`AGENT_WORK_MODE=remote_scratch` or `LLM_AGENT_WORK_MODE=remote_scratch`, the
+target branch matches a configured scratch prefix, targets a configured scratch
+remote, is not a force/delete push, has no open PR as its head, and is not the
+base of an open PR. If any of those checks fails or cannot be verified, the
+branch is treated as delivery scope and must use push-gate.
 
-The machine-readable cadence is `regular_milestones`: commit and push after a
-coherent checkpoint worth preserving, after verification passes, before
-long-running or interruptible work, and before handoff or context compaction.
-That cadence is for scratch branches only; delivery and PR-eligible branches
-still require the normal explicit finish/push-gate path.
+The machine-readable cadence is `regular_milestones`: in Remote Scratch Mode,
+commit and push after a coherent checkpoint worth preserving, after verification
+passes, before long-running or interruptible work, and before handoff or context
+compaction. That cadence is for scratch branches only; delivery and PR-eligible
+branches still require the normal explicit finish/push-gate path.
 
 Promoting scratch work means creating or updating a delivery/PR branch from the
 scratch commits. That promotion is subject to push-gate exactly like any other
 delivery push.
+
+### Yolo branch class
+
+`llm/agent-push-policy.json` also defines a `yolo_branches` class (prefix
+`mho-yolo/`) for a raw explicit-branch push + PR fast path on any repo: no
+push-gate, no editor, no lease. Unlike scratch branches, yolo branches **are**
+PR-eligible and allow `--force-with-lease` and delete. This is not a push-gate
+bypass — push-gate governs delivery branches, and yolo branches are a separate
+sanctioned class.
+
+The allow is keyed on the resolved push **target** matching a yolo prefix, so the
+class is structurally incapable of pushing to a base ref:
+
+- Base refs (`main`/`master`/`develop`/`trunk`) never match `mho-yolo/`, so
+  `git push origin mho-yolo/x:main`, `HEAD:main`, etc. resolve their target to a
+  base and are hard-blocked before any yolo allow can run.
+- The universal `check_branch_tracking` guard means a yolo branch can never
+  acquire `origin/main` (or any non-mirrored ref) as upstream: creating one from
+  a base requires `--no-track`.
+- Plain `git push --force` stays blocked; yolo "force" is `--force-with-lease`.
+- Bare `git push` stays blocked; yolo pushes must name the branch in the
+  command, e.g. `git push origin mho-yolo/x`.
+- `git branch -D` is exempt only for yolo-prefixed names (local cleanup); remote
+  deletes are gated in push-gate and allowed only for yolo targets on a
+  configured remote.
+
+Unlike scratch, the **trigger is the prefix alone** — no session toggle is
+needed to mechanically allow a yolo push. The autonomy default is still a soft
+"only after the user explicitly asks" (`requires_explicit_user_ask: true`, like
+the direct-push exceptions). Fully autonomous yolo push/PR is opt-in via
+`AGENT_WORK_MODE=yolo`. A malformed or disabled `yolo_branches` policy fails
+closed: the push falls through to the delivery default-deny. See the `yolo-pr`
+skill.
 
 When push-gate blocks and no interactive terminal is available, the correct
 response has two parts:
@@ -157,9 +198,13 @@ lease, and never bypass the failure with an override env.
   be pushed
 - Block `git commit --amend` on protected branches (`main`/`master`)
 - Block disabling signing or pre-commit checks
-- Block feature/stack branches from tracking `origin/main` or
-  `upstream/main`; a plain `git push` from such a branch could target the
-  protected integration branch under some git push modes.
+- Block feature/stack branches from tracking any non-mirrored remote branch.
+  A local branch may track `origin/<same-branch-name>` or
+  `upstream/<same-branch-name>` after its first approved push, but must not
+  track integration/base refs such as `origin/main`, `upstream/main`, or
+  `origin/release/main`. When creating a feature branch from a base ref, use
+  `--no-track`, including `git worktree add --no-track -b <branch> <path>
+  <base-ref>`.
 
 ### Broad staging
 
@@ -222,8 +267,11 @@ lease, and never bypass the failure with an override env.
 
 ### GitHub host safety
 
-- Block `GH_HOST=github.netflix.net`; agents must use
-  `GH_HOST=git.netflix.net` for Netflix GHE
+- Block `GH_HOST=github.netflix.net` and `gh --hostname github.netflix.net`;
+  agents must use `GH_HOST=git.netflix.net` for Netflix GHE.
+- Block `gh --repo` or `gh -R` values that include `github.netflix.net` or
+  `git.netflix.net`; `gh` repo arguments must be plain `owner/repo`, for
+  example `GH_HOST=git.netflix.net gh pr view 123 --repo org/repo`.
 - Block `gh api` gist creation unless the command explicitly targets Netflix
   GHE via `GH_HOST=git.netflix.net` or `--hostname git.netflix.net`
 - Block gist uploads unless uploaded filenames or gist payload keys use
@@ -231,13 +279,30 @@ lease, and never bypass the failure with an override env.
 
 ### Process killing
 
-- Block broad/destructive kill patterns (`kill -9`, `killall`)
-- Allow scoped port-targeted process cleanup when necessary
+- Allow local process cleanup commands (`kill`, `pkill`, `killall`) so agents
+  can stop tools they started or clean up stuck local subprocesses.
+- Remote SSH command safety remains governed by the SSH lease and remote-command
+  guard rules.
 
 ### DGW KV writes
 
 - Block `dgw-cli kv put` and `dgw-cli kv delete` by default
 - Require explicit write-authorization flags for `test` or `prod`
+
+### Private guard extensions
+
+- `bash-safety-guard.sh` runs optional private extensions from
+  `bash-safety-guard.d/*.sh` next to the projected hook, or from the
+  colon-separated `BASH_SAFETY_GUARD_EXTENSION_DIRS` override used by tests.
+- Extensions receive the original hook JSON on stdin. Empty stdout means allow.
+  To block, print normal hook denial JSON with
+  `hookSpecificOutput.permissionDecision == "deny"`.
+- Extensions are fail-closed: nonzero exit status, stderr output, or any nonempty
+  output that is not valid denial JSON blocks the command with an extension
+  failure message.
+- Confidential hostnames, private API topology, team-specific allowlists, and
+  lease files belong in dotfiles-owned extension scripts, not in this shared
+  repository.
 
 ## Maintenance Rules
 

@@ -136,7 +136,7 @@ After approval, spawn an agent in a worktree to execute.
 ### Reconstruct Strategy (Safer)
 
 1. Note the current branch name as `<original-branch>`
-2. Create a worktree: `git worktree add ~/worktrees/mho-split-<branch> <base> -b mho/split-<branch>`
+2. Create a worktree: `git worktree add --no-track -b mho/split-<branch> ~/worktrees/mho-split-<branch> <base>`
 3. For each planned commit:
    - Cherry-pick relevant changes or manually apply from original
    - Stage only the files for this commit

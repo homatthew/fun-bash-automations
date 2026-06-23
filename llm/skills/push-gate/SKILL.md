@@ -57,12 +57,18 @@ If you find yourself about to type any of those, STOP.
 
 Scratch branches are a separate, explicit non-delivery branch class configured
 in `llm/agent-push-policy.json`. Agents may commit and push configured scratch
-branches at regular milestones for backup/resume/handoff without push-gate:
-after coherent checkpoints, after verification passes, before long-running or
-interruptible work, and before handoff or context compaction. This is not a
-bypass: if a scratch branch has an open PR, is the base of an open PR, targets
-an unconfigured remote, or otherwise fails classification, it becomes delivery
+branches only after the user selects Remote Scratch Mode; the shell must declare
+`AGENT_WORK_MODE=remote_scratch` or `LLM_AGENT_WORK_MODE=remote_scratch` for the
+guard to allow that scratch push. Remote Scratch Mode is not a bypass: if a
+scratch branch has an open PR, is the base of an open PR, targets an
+unconfigured remote, or otherwise fails classification, it becomes delivery
 scope and must use push-gate.
+
+Yolo branches (`mho-yolo/*`) are the no-ceremony alternative when the user
+wants the old branch → `git push` → open-a-PR flow: raw push + PR, no
+push-gate, no editor, no lease. They are PR-eligible and allow
+`--force-with-lease` and delete, and are structurally incapable of targeting or
+tracking a base ref. Use the `yolo-pr` skill, not push-gate, for that flow.
 
 ## Step 3 — Sanctioned flow
 

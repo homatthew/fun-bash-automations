@@ -11,6 +11,10 @@ When a repo has both `origin` and `upstream` remotes:
 - PR lookup/binding defaults to the upstream repo.
 - Pushes stay on the branch's tracked remote when present.
 - New untracked branches prefer `upstream` only when the current viewer can push there; otherwise they use `origin`.
+- Feature branches must only track a mirrored remote branch name. Use
+  `--no-track` when creating a branch from a base ref; never leave a feature
+  branch tracking `origin/main`, `upstream/main`, `origin/release/main`, or any
+  other differently named base branch.
 
 ## When to Use
 
@@ -72,7 +76,7 @@ Repeat per branch in stack order.
 Once the user confirms the branch lease was approved:
 
 ```bash
-# Push each branch with a fresh caveman self-assertion
+# Push each branch with a fresh self-assertion
 pg push --assert-flow $'new pr flow\nbranch mho/feature-base\nbase infra\nno rewrite' --set-upstream
 pg push --assert-flow $'new pr flow\nbranch mho/feature-api\napi layer\nno rewrite' --set-upstream
 pg push --assert-flow $'new pr flow\nbranch mho/feature-ui\nui layer\nno rewrite' --set-upstream

@@ -15,9 +15,15 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 | `notify-input-summary.sh` | (helper) | Detached Codex classifier for input-needed notifications; replaces provisional question alerts with generated kind/context/summary only if the same input state is still active. |
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on `pg push` / push-gate lease approval. |
+| `beads-prime.sh` | SessionStart, PreCompact | Emits `bd prime` task context when the shared Beads DB exists. This is context plumbing, not a style/personality hook. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
 | `sourcegraph-auth-hint.sh` | PostToolUse, PostToolUseFailure | Adds the `http://go/authorize-sourcegraph` recovery hint when Sourcegraph MCP returns a 502. |
 | `slack-push-event.sh` | (off by default) | Slack variant of notify-push-event; disabled pending explicit opt-in. |
+
+`bash-safety-guard.sh` also runs optional private extensions from
+`bash-safety-guard.d/*.sh` next to the projected hook. Keep confidential
+hostnames, service-specific allowlists, and private lease policy in those
+dotfiles-owned extensions rather than in this shared repository.
 | `push-gate.sh` | (CLI impl) | Backs the `pg` / `push-gate` shell function, branch leases, and Dolt-backed stack-trunk leases. Not a hook. |
 | `stack.sh` | (CLI impl) | Backs `bin/stack` — local-first stacked-PR view (`status`), scratch-preflighted restack (`sync`/`insert`), Dolt-backed private trunk materialization (`trunk`), current-branch cleanup (`squash`), and push-gate push orchestration (`push`). Not a hook. |
 

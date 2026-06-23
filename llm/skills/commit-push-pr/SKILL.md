@@ -10,6 +10,9 @@ description: "Commit, push, and create/update a PR. This is the ONLY sanctioned 
 > **Related skills:**
 > - `/update-pr-description <PR#>` - Update an existing PR's description text (no push needed)
 > - `/address-comments-by <reviewer>` - Address review comments after PR is created
+> - `/yolo-pr` - Raw push + PR on a `mho-yolo/*` branch (no push-gate, no editor,
+>   no lease). Use that instead of this flow when the user wants the
+>   no-ceremony branch → `git push` → open-a-PR path.
 
 ## Step 1: Gather Context
 
@@ -30,6 +33,19 @@ gh pr list --head "$BRANCH" --json number,title,url
 
 - If a PR already exists → this is an **update** (commit + push only, skip PR creation)
 - If no PR exists → this is a **new PR** (commit + push + create)
+
+When creating a new feature branch from a base branch, always prevent Git from
+tracking the base:
+
+```bash
+git switch --no-track -c <feature-branch> <base-ref>
+# or, when resetting/recreating the local branch:
+git switch --no-track -C <feature-branch> <base-ref>
+```
+
+Feature branches may only track a mirrored remote branch name, e.g.
+`mho/foo -> origin/mho/foo`. They must not track base/integration refs such as
+`origin/main`, `upstream/main`, or `origin/release/main`.
 
 ## Step 3: Commit
 
@@ -87,6 +103,9 @@ pg push \
   --assert-flow $'update pr #<pr>\nbranch '"$BRANCH"$'\n<main areas>\nno rewrite' \
   --set-upstream
 ```
+
+Use `--set-upstream` only for the feature branch's matching remote branch name;
+do not set upstream to the PR base.
 
 If the push is blocked, use `pg doctor` or generate a replacement lease. For rebases or amended commits, create a new lease before using `pg push --force-with-lease`.
 

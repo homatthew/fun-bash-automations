@@ -154,7 +154,7 @@ if [[ -n "$WORKTREE_NAME" ]]; then
     echo "Resuming in existing worktree."
   else
     echo "Creating worktree: $WT_DIR (branch: $BRANCH)"
-    git worktree add -b "$BRANCH" "$WT_DIR" HEAD
+    git worktree add --no-track -b "$BRANCH" "$WT_DIR" HEAD
   fi
   cd "$WT_DIR"
 elif [[ -n "$WORK_DIR" ]]; then

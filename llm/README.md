@@ -7,12 +7,14 @@ harnesses.
 
 - `AGENTS.md` shared instruction policy
 - `agent-push-policy.json` schema-backed branch classes for delivery vs
-  non-delivery scratch pushes
+  opt-in non-delivery scratch pushes
 - `skills/*/SKILL.md` shared skills
 - `hooks/*.sh` shared hooks (projected to both harnesses)
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
 - `../codex/config.toml` portable Codex config template
+- `../codex/mcp.toml` explicit portable Codex MCP allowlist
+- `../codex/MCP.md` Codex MCP install/auth notes
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
 - `../codex/hooks.json` portable Codex hooks template
 - `../bin/stack` local stacked-PR CLI wrapper backed by `hooks/stack.sh`
@@ -54,6 +56,8 @@ LLM skills, use `config/llm/skills-internal/`; for private shell config, use
   - `~/.claude/hooks/*.sh` -> `llm/hooks/*.sh` + `claude/hooks/*.sh`
 - Codex:
   - `~/.codex/auth.json` -> copied from `codex/auth.json`
+  - `~/.codex/config.toml` -> rendered from `codex/config.toml` plus
+    `codex/mcp.toml`, preserving user-local state
   - `~/.codex/hooks.json` -> copied from `codex/hooks.json`
   - `~/.codex/hooks/*.sh` -> `llm/hooks/*.sh`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`

@@ -5,22 +5,26 @@ canonical instruction entrypoint.
 
 ## Canonical Sources
 
+- Repository role, install paths, and contribution guide: `README.md`
 - Shared instructions: `llm/AGENTS.md`
 - Shared skills: `llm/skills/*/SKILL.md`
 - Shared layout + migration notes: `llm/README.md`
 - Machine-readable mapping: `llm/manifest.json`
 - Portable Codex config template: `codex/config.toml`
+- Portable Codex MCP allowlist and docs: `codex/mcp.toml`, `codex/MCP.md`
 - Portable Codex auth template: `codex/auth.json`
 
 ## Repository Delivery Policy
 
 - This repository does not use push-gate.
 - After the user explicitly asks to push or invokes an explicit finish workflow,
-  agents should push directly with normal `git push` to `mh-netflix`.
+  agents should push directly with an explicit branch target, e.g.
+  `git push origin mh-netflix`.
 - Do not run `pg prepare`, ask the user to run `pg`, or use `pg push` for this
   repository.
 - That delivery push rule does not apply to configured non-delivery scratch
-  branches; see `llm/AGENTS.md` and `llm/agent-push-policy.json`.
+  branches when Remote Scratch Mode is active; see `llm/AGENTS.md` and
+  `llm/agent-push-policy.json`.
 - Do not create, reopen, or mark ready PRs from `mh-netflix` to `main`;
   `mh-netflix` is the delivery branch.
 
@@ -39,3 +43,13 @@ canonical instruction entrypoint.
 - Use setup/install scripts to project shared files to home directories.
 - For durable resumption across compaction, use beads (`bd ready`) and second
   brain topics in `~/repos/dump/second-brain/topics/*/README.md`.
+
+## Install Boundary
+
+- Treat this repository as the shared base layer.
+- Treat `~/repos/dotfiles` as the private final-install layer for Netflix
+  workspaces and MacBook-specific local overlays.
+- Do not add confidential topology, private URLs, or machine-specific install
+  behavior here; put those details in `dotfiles/config/`.
+- For MacBook shell repair, prefer `dotfiles/scripts/link-local-shell.sh`
+  instead of the full workspace installer.
