@@ -1,0 +1,9 @@
+# Explicit portable Codex MCP allowlist.
+#
+# Claude/Dropship MCPs are not imported automatically. Add a server here only
+# when its Codex command/args/env are known and its remote install/auth
+# requirements are documented in codex/MCP.md.
+
+[mcp_servers.chrome-devtools]
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]

@@ -129,24 +129,56 @@ project_agent_bins() {
     fi
 }
 
-append_preserved_codex_config_sections() {
-    local existing_config="$1"
-    [[ -f "$existing_config" ]] || return 0
-
+extract_toml_table_headers() {
     awk '
-        function is_managed_header(line) {
-            return (line == "[marketplaces.ods-datastores-minimal]" ||
-                    line == "[plugins.\"ods-datastores-minimal@ods-datastores-minimal\"]")
-        }
-        function is_preserved_header(line) {
-            return (line ~ /^\[hooks\.state(\.|])/ ||
-                    line == "[tui.model_availability_nux]" ||
-                    line ~ /^\[marketplaces\./ ||
-                    line ~ /^\[plugins\./ ||
-                    line ~ /^\[projects\./)
+        /^\[\[[^]]+\]\]$/ {
+            line = $0
+            sub(/^\[\[/, "", line)
+            sub(/\]\]$/, "", line)
+            print line
+            next
         }
         /^\[[^]]+\]$/ {
-            keep = is_preserved_header($0) && !is_managed_header($0)
+            line = $0
+            sub(/^\[/, "", line)
+            sub(/\]$/, "", line)
+            print line
+        }
+    ' "$@"
+}
+
+append_preserved_codex_config_sections() {
+    local existing_config="$1"
+    local managed_headers="$2"
+    local preserve_mcp="${FBA_DEPLOY_PRESERVE_CODEX_MCP:-1}"
+    [[ -f "$existing_config" ]] || return 0
+
+    awk -v preserve_mcp="$preserve_mcp" '
+        NR == FNR {
+            managed[$0] = 1
+            next
+        }
+        function is_managed_table(table, key) {
+            for (key in managed) {
+                if (table == key || index(table, key ".") == 1) {
+                    return 1
+                }
+            }
+            return 0
+        }
+        function is_preserved_table(table) {
+            return (table ~ /^hooks\.state(\.|$)/ ||
+                    table == "tui.model_availability_nux" ||
+                    (preserve_mcp == "1" && table ~ /^mcp_servers\./) ||
+                    table ~ /^marketplaces\./ ||
+                    table ~ /^plugins\./ ||
+                    table ~ /^projects\./)
+        }
+        /^\[[^]]+\]$/ {
+            table = $0
+            sub(/^\[/, "", table)
+            sub(/\]$/, "", table)
+            keep = is_preserved_table(table) && !is_managed_table(table)
         }
         keep {
             print
@@ -157,20 +189,29 @@ append_preserved_codex_config_sections() {
                 print ""
             }
         }
-    ' "$existing_config"
+    ' "$managed_headers" "$existing_config"
 }
 
 render_codex_config() {
     local base_url="$1"
     local target="$HOME/.codex/config.toml"
-    local tmp
+    local tmp managed_headers
     tmp="$(mktemp "$HOME/.codex/config.toml.XXXXXX")"
+    managed_headers="$(mktemp "$HOME/.codex/managed-codex-tables.XXXXXX")"
 
     sed \
         -e "s|__CODEX_BASE_URL__|$base_url|g" \
         -e "s|__FBA_ROOT__|$ROOT|g" \
         "$ROOT/codex/config.toml" > "$tmp"
-    append_preserved_codex_config_sections "$target" >> "$tmp"
+    if [[ -f "$ROOT/codex/mcp.toml" ]]; then
+        {
+            printf '\n# Portable Codex MCP allowlist\n'
+            sed -e "s|__FBA_ROOT__|$ROOT|g" "$ROOT/codex/mcp.toml"
+        } >> "$tmp"
+        extract_toml_table_headers "$ROOT/codex/mcp.toml" > "$managed_headers"
+    fi
+    append_preserved_codex_config_sections "$target" "$managed_headers" >> "$tmp"
+    rm -f "$managed_headers"
     mv "$tmp" "$target"
     chmod 600 "$target"
 }

@@ -76,6 +76,13 @@ trusted_hash = "sha256:sentinel"
 
 [tui.model_availability_nux]
 "gpt-5.5" = 2
+
+[mcp_servers.local-only]
+command = "local-mcp"
+args = ["--flag"]
+
+[mcp_servers.local-only.env]
+LOCAL_ONLY = "1"
 EOF
 run_deploy
 
@@ -107,7 +114,6 @@ done < <(jq -r '
   | map(select(. != "" and (test("^echo ") | not)))
   | unique[]
 ' "$ROOT/codex/hooks.json")
-
 # Canary: the hooks the dotfiles installer used to miss
 echo "-- hook drift canaries --"
 assert_executable "$TMP_HOME/.claude/hooks/notify.sh" "claude notify.sh present"
@@ -134,13 +140,14 @@ for harness in claude codex; do
   fi
   if jq -e '
     .scratch_branches.enabled == true
-    and .scratch_branches.default_for_agents == true
+    and .scratch_branches.default_for_agents == false
+    and .scratch_branches.requires_user_opt_in == true
     and (.scratch_branches.prefixes | index("wip/agent/") != null)
     and (.scratch_branches.prefixes | index("scratch/agent/") != null)
   ' "$policy" >/dev/null; then
-    pass "$harness agent push policy projects scratch branch defaults"
+    pass "$harness agent push policy projects opt-in scratch branch defaults"
   else
-    fail "$harness agent push policy projects scratch branch defaults"
+    fail "$harness agent push policy projects opt-in scratch branch defaults"
   fi
   if jq -e '
     .scratch_branches.commit_push_cadence.mode == "regular_milestones"
@@ -161,6 +168,21 @@ for harness in claude codex; do
     pass "$harness agent push policy projects direct-push exceptions"
   else
     fail "$harness agent push policy projects direct-push exceptions"
+  fi
+  if jq -e '
+    .yolo_branches.enabled == true
+    and .yolo_branches.requires_push_gate == false
+    and .yolo_branches.requires_user_opt_in == false
+    and .yolo_branches.pr_eligible == true
+    and .yolo_branches.allow_force_with_lease == true
+    and .yolo_branches.allow_delete == true
+    and (.yolo_branches.prefixes | index("mho-yolo/") != null)
+    and (.yolo_branches.protected_base_refs | index("main") != null)
+    and (.yolo_branches.protected_base_refs | index("master") != null)
+  ' "$policy" >/dev/null; then
+    pass "$harness agent push policy projects yolo branch class"
+  else
+    fail "$harness agent push policy projects yolo branch class"
   fi
 done
 
@@ -215,6 +237,43 @@ if grep -Fq "[tui.model_availability_nux]" "$TMP_HOME/.codex/config.toml"; then
   pass "codex model availability state preserved"
 else
   fail "codex model availability state preserved"
+fi
+if grep -Fq 'terminal_title = ["spinner", "project", "git-branch"]' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq '"current-dir"' "$TMP_HOME/.codex/config.toml" \
+  && ! grep -Fq '"project-root"' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex TUI config avoids deprecated title/status items"
+else
+  fail "codex TUI config avoids deprecated title/status items"
+fi
+if command -v python3 >/dev/null 2>&1 && python3 - "$TMP_HOME/.codex/config.toml" <<'PY'
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit(0)
+
+with open(sys.argv[1], "rb") as f:
+    tomllib.load(f)
+PY
+then
+  pass "codex config TOML parses"
+else
+  fail "codex config TOML parses"
+fi
+echo "-- codex MCP allowlist --"
+if grep -Fq "[mcp_servers.chrome-devtools]" "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'args = ["chrome-devtools-mcp@latest"]' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex Chrome DevTools MCP projected"
+else
+  fail "codex Chrome DevTools MCP projected"
+fi
+if grep -Fq "[mcp_servers.local-only]" "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq 'command = "local-mcp"' "$TMP_HOME/.codex/config.toml" \
+  && grep -Fq "[mcp_servers.local-only.env]" "$TMP_HOME/.codex/config.toml"; then
+  pass "unmanaged local Codex MCP preserved"
+else
+  fail "unmanaged local Codex MCP preserved"
 fi
 assert_not_contains_file "$TMP_HOME/.codex/config.toml" "ngpmcpgateway.prod.local.dev.netflix.net" \
   "internal Codex MCP gateways stay out of FBA projection"

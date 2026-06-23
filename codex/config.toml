@@ -27,17 +27,13 @@ notifications = [ "agent-turn-complete", "approval-requested" ]
 status_line = [
   "model-with-reasoning",
   "git-branch",
-  "project-root",
+  "current-dir",
   "context-usage",
 ]
-terminal_title = ["spinner", "project-root", "git-branch"]
+terminal_title = ["spinner", "project", "git-branch"]
 
 [model_providers.openai-chat-completions]
 name = "Netflix Model Gateway"
 base_url = "__CODEX_BASE_URL__"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
-
-[mcp_servers.chrome-devtools]
-command = "npx"
-args = ["chrome-devtools-mcp@latest"]
