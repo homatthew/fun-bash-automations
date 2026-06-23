@@ -26,7 +26,7 @@ BRANCH_NAME="mho/<feature-name>"
 WORKTREE_PATH=~/worktrees/mho-<feature-name>
 
 mkdir -p ~/worktrees
-git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" HEAD
+git worktree add --no-track -b "$BRANCH_NAME" "$WORKTREE_PATH" HEAD
 ```
 
 ### 2. Develop in Worktree
@@ -46,7 +46,6 @@ When development is complete, provide:
 After reviewing, user can:
 ```bash
 # cd into the worktree
-gwtc                     # Interactive fzf selection
 cd ~/worktrees/mho-<feature>
 
 # Merge changes to their current branch
@@ -55,21 +54,19 @@ git merge mho/<branch-name>
 # Or cherry-pick specific commits
 git cherry-pick <commit-hash>
 
-# Remove single worktree
-gwtr ~/worktrees/mho-<feature>
+# Remove the worktree when done
+git worktree remove ~/worktrees/mho-<feature>
 
-# Or use interactive cleanup
-gwtclean
+# Prune stale references
+git worktree prune
 ```
 
 ## Shell Commands Reference
-The user has these aliases/functions available:
-- `gwt <name>` - Create worktree with `mho/` prefix
-- `gwtl` - List all worktrees
-- `gwtr [path]` - Remove worktree (fzf selection if no path)
-- `gwtp` - Prune stale references
-- `gwtc [path]` - cd into worktree (fzf selection if no path)
-- `gwtclean` - Interactive cleanup of all worktrees
+Use raw git worktree commands:
+- `git worktree add --no-track -b mho/<name> ~/worktrees/mho-<name> HEAD` - Create
+- `git worktree list` - List all worktrees
+- `git worktree remove <path>` - Remove a worktree
+- `git worktree prune` - Prune stale references
 
 ## Important Notes
 - NEVER remove the worktree without user permission

@@ -62,4 +62,6 @@ Tell the user:
 - Use `--reason` on closes so there's a paper trail
 - Don't delete issues unless they're clearly junk — prefer close with reason
 - If unsure about an issue, flag it for the user rather than closing
-- Run `bd sync` at the end to persist changes
+- Run `bd sync` only when the active work mode permits git side effects.
+  In Local Mode or Mentor Mode, leave Beads changes unsynced and report that
+  persistence is pending human review.

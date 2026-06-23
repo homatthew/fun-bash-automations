@@ -12,7 +12,13 @@ cwd=$(echo "$input" | jq -r '.cwd')
 worktree_path="$cwd/.claude/worktrees/$name"
 
 cd "$cwd"
-git worktree add "$worktree_path" -b "$name" >&2
+# --no-track is load-bearing: it ensures the new branch never adopts an
+# upstream (e.g. origin/main) from the base it is cut from. This is part of the
+# structural guarantee that a yolo branch (mho-yolo/*) — or any worktree branch —
+# cannot acquire a base ref as upstream and later push to it. The bash-safety
+# guard's check_branch_tracking enforces the same rule on hand-run git commands;
+# this keeps the hook-created worktrees consistent with it. Covered by a pen test.
+git worktree add --no-track -b "$name" "$worktree_path" >&2
 
 remote=$(git remote get-url origin 2>/dev/null || echo "")
 project=$(basename "$(git rev-parse --show-toplevel)")

@@ -3,8 +3,8 @@
   "version": 1,
   "scratch_branches": {
     "enabled": true,
-    "default_for_agents": true,
-    "purpose": "Remote backup, resumability, and cross-workspace handoff for agent work that is not PR delivery.",
+    "default_for_agents": false,
+    "purpose": "Opt-in Remote Scratch Mode for agent remote backup, resumability, and cross-workspace handoff outside PR delivery.",
     "commit_push_cadence": {
       "mode": "regular_milestones",
       "events": [
@@ -17,11 +17,24 @@
     "prefixes": ["wip/agent/", "scratch/agent/"],
     "remotes": ["origin"],
     "requires_push_gate": false,
-    "requires_user_opt_in": false,
+    "requires_user_opt_in": true,
     "must_not_have_open_pr": true,
     "must_not_be_pr_base": true,
     "allow_force_with_lease": false,
     "allow_delete": false
+  },
+  "yolo_branches": {
+    "enabled": true,
+    "purpose": "Raw push + PR fast path on any repo. No push-gate, no editor, no lease.",
+    "prefixes": ["mho-yolo/"],
+    "remotes": ["origin"],
+    "requires_push_gate": false,
+    "requires_user_opt_in": false,
+    "pr_eligible": true,
+    "allow_force_with_lease": true,
+    "allow_delete": true,
+    "requires_explicit_user_ask": true,
+    "protected_base_refs": ["main", "master", "develop", "trunk"]
   },
   "delivery_branches": {
     "requires_push_gate": true,

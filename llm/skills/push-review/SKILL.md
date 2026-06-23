@@ -19,6 +19,10 @@ Remote topology defaults:
 - PR lookup/binding prefers the `upstream` repo when an `upstream` remote exists.
 - Push remote stays on the branch's tracked remote when present.
 - Untracked branches prefer `upstream` only when the current viewer can push there; otherwise they fall back to `origin`.
+- Branch upstreams must be mirrored by branch name. A feature branch may track
+  `origin/<same-branch>` or `upstream/<same-branch>` after push, but must not
+  track a PR/base branch such as `origin/main`, `upstream/main`, or
+  `origin/release/main`. When creating a branch from a base, use `--no-track`.
 
 ## Step 0: Stale Detection
 

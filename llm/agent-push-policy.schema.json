@@ -3,7 +3,7 @@
   "$id": "https://github.com/homatthew/fun-bash-automations/llm/agent-push-policy.schema.json",
   "title": "Agent Push Policy",
   "type": "object",
-  "required": ["version", "scratch_branches", "delivery_branches", "direct_push_exceptions"],
+  "required": ["version", "scratch_branches", "yolo_branches", "delivery_branches", "direct_push_exceptions"],
   "additionalProperties": false,
   "properties": {
     "version": {
@@ -28,7 +28,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean", "const": true },
-        "default_for_agents": { "type": "boolean", "const": true },
+        "default_for_agents": { "type": "boolean", "const": false },
         "purpose": { "type": "string" },
         "commit_push_cadence": {
           "type": "object",
@@ -77,11 +77,63 @@
           "uniqueItems": true
         },
         "requires_push_gate": { "type": "boolean", "const": false },
-        "requires_user_opt_in": { "type": "boolean", "const": false },
+        "requires_user_opt_in": { "type": "boolean", "const": true },
         "must_not_have_open_pr": { "type": "boolean", "const": true },
         "must_not_be_pr_base": { "type": "boolean", "const": true },
         "allow_force_with_lease": { "type": "boolean", "const": false },
         "allow_delete": { "type": "boolean", "const": false }
+      }
+    },
+    "yolo_branches": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "prefixes",
+        "remotes",
+        "requires_push_gate",
+        "requires_user_opt_in",
+        "pr_eligible",
+        "allow_force_with_lease",
+        "allow_delete",
+        "requires_explicit_user_ask",
+        "protected_base_refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "purpose": { "type": "string" },
+        "prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "remotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "requires_push_gate": { "type": "boolean", "const": false },
+        "requires_user_opt_in": { "type": "boolean", "const": false },
+        "pr_eligible": { "type": "boolean", "const": true },
+        "allow_force_with_lease": { "type": "boolean", "const": true },
+        "allow_delete": { "type": "boolean", "const": true },
+        "requires_explicit_user_ask": { "type": "boolean", "default": true },
+        "protected_base_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
       }
     },
     "delivery_branches": {
