@@ -17,11 +17,6 @@ harnesses.
 - `../codex/MCP.md` Codex MCP install/auth notes
 - `../codex/auth.json` portable Codex auth template (dummy gateway token)
 - `../codex/hooks.json` portable Codex hooks template
-- `../bin/stack` local stacked-PR CLI wrapper backed by `hooks/stack.sh`
-- `../bin/pg` and `../bin/push-gate` executable wrappers backed by
-  `hooks/push-gate.sh`; these keep remote shells working when zsh aliases are
-  not loaded.
-- `stack/README.md` canonical guide for the guided `stack` next-step workflow
 - `command-guard-policy.md` shared command safety policy
 
 ## Canonical Editing Rules

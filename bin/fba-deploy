@@ -121,14 +121,6 @@ project_shared_hooks() {
     done
 }
 
-project_agent_bins() {
-    mkdir -p "$HOME/.local/bin"
-    if [[ -f "$ROOT/bin/agent-stack-refresh" ]]; then
-        link_path "$ROOT/bin/agent-stack-refresh" "$HOME/.local/bin/agent-stack-refresh"
-        chmod +x "$ROOT/bin/agent-stack-refresh"
-    fi
-}
-
 extract_toml_table_headers() {
     awk '
         /^\[\[[^]]+\]\]$/ {
@@ -248,8 +240,6 @@ project_shared() {
             fi
         done
     fi
-
-    project_agent_bins
 }
 
 deploy_claude() {

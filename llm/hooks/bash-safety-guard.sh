@@ -86,9 +86,6 @@ print(input_workdir)
 PY
 )
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# Do NOT source push-gate.sh here — a syntax error in that file would take
-# down the Bash tool entirely. Call it as a subprocess below (guard-check)
-# so its failures are isolated and reported through deny() cleanly.
 
 deny() {
   jq -n --arg reason "$1" '{
@@ -1481,34 +1478,40 @@ check_git_force() {
 }
 
 # --- 2. Push Guard ---
-# Blocks delivery git pushes by default. Pushes require either an explicit
-# non-delivery scratch classification from llm/agent-push-policy.json, or a
-# durable branch lease plus fresh pending self-assertion created by `pg push`.
-# Invokes push-gate.sh as a subprocess so a bug there can't take down this hook.
+# Self-contained protected-branch guard for agent-initiated pushes. The
+# authoritative main-branch protection is the git-level pre-push hook, which
+# also catches external binaries (gnhf, no-mistakes); this agent-layer check is
+# defense-in-depth. The push-gate lease / Remote Scratch Mode / Dolt-stack
+# auditing was retired with the rest of that stack, so this guard has no
+# external dependency.
+#
+# Allowed: configured delivery pushes (FBA mh-netflix, dotfiles main) and normal
+# feature-branch / no-mistakes-remote / gnhf pushes that name a non-protected
+# target. Blocked: pushes (or deletes) to main/master/develop/trunk and bare or
+# ambiguous pushes that do not name an explicit branch. Force-push protection
+# lives separately in check_git_force.
 check_push_guard() {
-  local result allowed reason rc
+  is_git_push_command || return
   if is_direct_delivery_push; then
     return
   fi
-  if [[ -n "$GUARD_WORKDIR" && -d "$GUARD_WORKDIR" ]]; then
-    result=$(cd "$GUARD_WORKDIR" && bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
-  else
-    result=$(bash "$SCRIPT_DIR/push-gate.sh" guard-check --command "$COMMAND" 2>/dev/null)
-  fi
-  rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$result" ]; then
-    # push-gate itself failed — allow the command through (fail-open) so
-    # a broken push-gate doesn't block all shell usage. The user still
-    # gets a warning on stderr for visibility.
-    echo "bash-safety-guard: push-gate subprocess failed (rc=$rc); allowing command through" >&2
-    return
-  fi
-  allowed=$(echo "$result" | jq -r '.allowed' 2>/dev/null)
-  if [ "$allowed" = "true" ]; then
-    return
-  fi
-  reason=$(echo "$result" | jq -r '.reason' 2>/dev/null)
-  deny "${reason:-push blocked by push-gate}"
+  local target_branch
+  target_branch=$(git_push_target_branch_from_command)
+  case "$target_branch" in
+    main|master|develop|trunk)
+      deny "Blocked: pushing directly to origin/${target_branch} is not allowed. Push a feature branch and open a PR (e.g. via the no-mistakes remote)."
+      ;;
+    ""|__MULTI__|__MULTI_PUSH__|__BROAD__)
+      deny "Blocked: bare git push is not allowed. Name the target branch explicitly, e.g. git push origin <branch>."
+      ;;
+    __DELETE__)
+      # Protected-branch deletes are caught authoritatively by the git-level
+      # pre-push hook; mirror that here as defense-in-depth.
+      if echo "$COMMAND" | grep -qE '(^|[[:space:]:/+])(main|master|develop|trunk)([[:space:]]|$)|refs/heads/(main|master|develop|trunk)'; then
+        deny "Blocked: deleting a protected branch (main/master/develop/trunk) is not allowed."
+      fi
+      ;;
+  esac
 }
 
 # --- 2b. Branch Creation Tracking Guard ---
