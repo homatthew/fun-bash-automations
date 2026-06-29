@@ -1,10 +1,26 @@
 {
   "$schema": "./agent-push-policy.schema.json",
-  "version": 1,
+  "version": 2,
+  "model": "Feature branches ship through the no-mistakes gate (review/test/lint/docs) to a PR. The git-level main pre-push hook and bash-safety-guard.sh block protected-branch and bare/ambiguous pushes. push-gate (durable leases, semantic-scope approval, Dolt stack trunks) was retired; do not reintroduce its fields.",
+  "no_mistakes_branches": {
+    "purpose": "Default delivery path: a feature branch validated by the no-mistakes gate before it reaches the configured push target and opens/updates a PR. Drive it via the /ship skill or the no-mistakes skill.",
+    "prefixes": ["mho/", "feature/", "fix/"],
+    "gate": "no-mistakes",
+    "pr_eligible": true,
+    "requires_explicit_user_ask": true,
+    "protected_base_refs": ["main", "master", "develop", "trunk"]
+  },
+  "gnhf_branches": {
+    "purpose": "gnhf long-run loops create and push their own working branch and ship through the same no-mistakes gate. Bounded runs use --max-iterations / --max-tokens.",
+    "prefixes": ["gnhf/"],
+    "gate": "no-mistakes",
+    "pr_eligible": true,
+    "protected_base_refs": ["main", "master", "develop", "trunk"]
+  },
   "scratch_branches": {
     "enabled": true,
     "default_for_agents": false,
-    "purpose": "Opt-in Remote Scratch Mode for agent remote backup, resumability, and cross-workspace handoff outside PR delivery.",
+    "purpose": "Opt-in remote backup, resumability, and cross-workspace handoff outside PR delivery.",
     "commit_push_cadence": {
       "mode": "regular_milestones",
       "events": [
@@ -16,44 +32,38 @@
     },
     "prefixes": ["wip/agent/", "scratch/agent/"],
     "remotes": ["origin"],
-    "requires_push_gate": false,
     "requires_user_opt_in": true,
     "must_not_have_open_pr": true,
     "must_not_be_pr_base": true,
-    "allow_force_with_lease": false,
     "allow_delete": false
   },
   "yolo_branches": {
     "enabled": true,
-    "purpose": "Raw push + PR fast path on any repo. No push-gate, no editor, no lease.",
+    "purpose": "Raw push + PR fast path on any repo. No gate, no editor review, no lease.",
     "prefixes": ["mho-yolo/"],
     "remotes": ["origin"],
-    "requires_push_gate": false,
     "requires_user_opt_in": false,
     "pr_eligible": true,
-    "allow_force_with_lease": true,
     "allow_delete": true,
     "requires_explicit_user_ask": true,
     "protected_base_refs": ["main", "master", "develop", "trunk"]
   },
   "delivery_branches": {
-    "requires_push_gate": true,
     "pr_eligible": true,
-    "notes": "Any branch with an open PR, intended PR, or PR-base relationship is delivery scope and uses push-gate unless a repo-specific direct-push exception applies."
+    "gate": "no-mistakes",
+    "notes": "Any branch with an open PR, intended PR, or PR-base relationship is delivery scope and ships through the no-mistakes gate unless a repo-specific direct-push exception applies."
   },
   "direct_push_exceptions": [
     {
       "repo": "fun-bash-automations",
       "delivery_branch": "mh-netflix",
       "requires_explicit_user_ask": true,
-      "requires_push_gate": false,
       "disallow_pr_to_main": true
     },
     {
       "repo": "dotfiles",
       "delivery_branch": "main",
       "requires_explicit_user_ask": true,
-      "requires_push_gate": false,
       "disallow_pr_to_main": true
     }
   ]

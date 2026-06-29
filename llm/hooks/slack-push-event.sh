@@ -15,7 +15,7 @@ INPUT=$(cat)
 emit_success() { [ "${RUNTIME:-}" = "codex" ] && printf '{}\n'; return 0; }
 cleanup_and_exit() { emit_success; exit 0; }
 
-# Suppress when caller is an internal LLM invocation (pg → codex exec).
+# Suppress when caller is an internal LLM invocation (NOTIFY_SUPPRESS=1).
 [ "${NOTIFY_SUPPRESS:-0}" = "1" ] && cleanup_and_exit
 
 SCRIPT_PATH="$0"

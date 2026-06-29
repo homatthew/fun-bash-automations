@@ -10,6 +10,48 @@
       "type": "integer",
       "minimum": 1
     },
+    "model": { "type": "string" },
+    "no_mistakes_branches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "purpose": { "type": "string" },
+        "prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "gate": { "type": "string", "const": "no-mistakes" },
+        "pr_eligible": { "type": "boolean", "const": true },
+        "requires_explicit_user_ask": { "type": "boolean" },
+        "protected_base_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "gnhf_branches": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "purpose": { "type": "string" },
+        "prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "gate": { "type": "string", "const": "no-mistakes" },
+        "pr_eligible": { "type": "boolean", "const": true },
+        "protected_base_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
     "scratch_branches": {
       "type": "object",
       "required": [
@@ -18,11 +60,9 @@
         "commit_push_cadence",
         "prefixes",
         "remotes",
-        "requires_push_gate",
         "requires_user_opt_in",
         "must_not_have_open_pr",
         "must_not_be_pr_base",
-        "allow_force_with_lease",
         "allow_delete"
       ],
       "additionalProperties": false,
@@ -76,11 +116,9 @@
           },
           "uniqueItems": true
         },
-        "requires_push_gate": { "type": "boolean", "const": false },
         "requires_user_opt_in": { "type": "boolean", "const": true },
         "must_not_have_open_pr": { "type": "boolean", "const": true },
         "must_not_be_pr_base": { "type": "boolean", "const": true },
-        "allow_force_with_lease": { "type": "boolean", "const": false },
         "allow_delete": { "type": "boolean", "const": false }
       }
     },
@@ -90,10 +128,8 @@
         "enabled",
         "prefixes",
         "remotes",
-        "requires_push_gate",
         "requires_user_opt_in",
         "pr_eligible",
-        "allow_force_with_lease",
         "allow_delete",
         "requires_explicit_user_ask",
         "protected_base_refs"
@@ -120,10 +156,8 @@
           },
           "uniqueItems": true
         },
-        "requires_push_gate": { "type": "boolean", "const": false },
         "requires_user_opt_in": { "type": "boolean", "const": false },
         "pr_eligible": { "type": "boolean", "const": true },
-        "allow_force_with_lease": { "type": "boolean", "const": true },
         "allow_delete": { "type": "boolean", "const": true },
         "requires_explicit_user_ask": { "type": "boolean", "default": true },
         "protected_base_refs": {
@@ -138,10 +172,10 @@
     },
     "delivery_branches": {
       "type": "object",
-      "required": ["requires_push_gate", "pr_eligible"],
+      "required": ["pr_eligible"],
       "additionalProperties": false,
       "properties": {
-        "requires_push_gate": { "type": "boolean", "const": true },
+        "gate": { "type": "string", "const": "no-mistakes" },
         "pr_eligible": { "type": "boolean", "const": true },
         "notes": { "type": "string" }
       }
@@ -154,7 +188,6 @@
           "repo",
           "delivery_branch",
           "requires_explicit_user_ask",
-          "requires_push_gate",
           "disallow_pr_to_main"
         ],
         "additionalProperties": false,
@@ -162,7 +195,6 @@
           "repo": { "type": "string", "minLength": 1 },
           "delivery_branch": { "type": "string", "minLength": 1 },
           "requires_explicit_user_ask": { "type": "boolean", "const": true },
-          "requires_push_gate": { "type": "boolean", "const": false },
           "disallow_pr_to_main": { "type": "boolean", "const": true }
         }
       }
