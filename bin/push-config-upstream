@@ -232,7 +232,7 @@ Review only the supplied outgoing committed diffs and status blocks. Do not ask 
 
 Return JSON matching the schema. Use:
 - "status": "fail" if you see likely sensitive material, credentials, private keys, tokens, customer/member data, secrets, or a high-confidence important issue that should block pushing.
-- "status": "fail" if the diff obviously breaks shell startup, Codex/Claude runtime config, push-gate guardrails, scratch branch policy, or Neovim startup.
+- "status": "fail" if the diff obviously breaks shell startup, Codex/Claude runtime config, the bash-safety-guard / main-branch push guard, scratch branch policy, or Neovim startup.
 - "status": "pass" if there are no blockers. Put minor concerns in warnings.
 
 Be concise but specific. Mention file paths and commit subjects when useful. The local wrapper already ran a deterministic added-line secret scan before this LLM review, but you should still look for less obvious sensitive-data risks.

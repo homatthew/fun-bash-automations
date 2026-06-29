@@ -162,8 +162,8 @@ for harness in claude codex; do
   fi
   if jq -e '
     (.direct_push_exceptions // [])
-    | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix" and .requires_push_gate == false))
-      and (any(.repo == "dotfiles" and .delivery_branch == "main" and .requires_push_gate == false))
+    | (any(.repo == "fun-bash-automations" and .delivery_branch == "mh-netflix"))
+      and (any(.repo == "dotfiles" and .delivery_branch == "main"))
   ' "$policy" >/dev/null; then
     pass "$harness agent push policy projects direct-push exceptions"
   else
@@ -171,10 +171,8 @@ for harness in claude codex; do
   fi
   if jq -e '
     .yolo_branches.enabled == true
-    and .yolo_branches.requires_push_gate == false
     and .yolo_branches.requires_user_opt_in == false
     and .yolo_branches.pr_eligible == true
-    and .yolo_branches.allow_force_with_lease == true
     and .yolo_branches.allow_delete == true
     and (.yolo_branches.prefixes | index("mho-yolo/") != null)
     and (.yolo_branches.protected_base_refs | index("main") != null)

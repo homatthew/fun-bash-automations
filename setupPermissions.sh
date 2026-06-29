@@ -164,7 +164,7 @@ if command -v brew &> /dev/null; then
 		fi
 	fi
 
-	# jq - JSON processor, used pervasively by hooks and push-gate
+	# jq - JSON processor, used pervasively by hooks and the no-mistakes gate
 	if ! command -v jq &> /dev/null; then
 		echo "Installing jq..."
 		brew install jq
@@ -173,7 +173,7 @@ if command -v brew &> /dev/null; then
 		echo "✓ jq already installed"
 	fi
 
-	# yq (mikefarah) - YAML processor; push-gate approval flow edits drafts in YAML
+	# yq (mikefarah) - YAML processor; used for hook/config YAML (e.g. .no-mistakes.yaml)
 	if ! command -v yq &> /dev/null; then
 		echo "Installing yq..."
 		brew install yq
@@ -182,7 +182,7 @@ if command -v brew &> /dev/null; then
 		echo "✓ yq already installed"
 	fi
 
-	# gh - GitHub CLI, used by push-gate for PR lookup and push-review skill
+	# gh - GitHub CLI, used for PR lookup and the code-review skill
 	if ! command -v gh &> /dev/null; then
 		echo "Installing gh..."
 		brew install gh
@@ -191,10 +191,10 @@ if command -v brew &> /dev/null; then
 		echo "✓ gh already installed"
 	fi
 
-	# sqlite3 ships with macOS; push-gate uses it for the central lease DB
-	# at ~/.push-gate/leases.db. Verify it's reachable and warn if not.
+	# sqlite3 ships with macOS; beads (bd) uses it for the local issue DB.
+	# Verify it's reachable and warn if not.
 	if ! command -v sqlite3 &> /dev/null; then
-		echo "⚠ sqlite3 not found on PATH — push-gate cross-repo lease DB will be disabled."
+		echo "⚠ sqlite3 not found on PATH — beads (bd) local issue DB will be unavailable."
 		echo "  macOS usually ships sqlite3 at /usr/bin/sqlite3; check your PATH."
 	else
 		echo "✓ sqlite3 available ($(command -v sqlite3))"

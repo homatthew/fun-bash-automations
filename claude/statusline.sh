@@ -59,9 +59,7 @@ if [ -n "$BRANCH" ]; then
   if [ -n "$CWD" ] && [ -d "$CWD" ]; then
     git -C "$CWD" diff --quiet HEAD 2>/dev/null || DIRTY="${YELLOW}*${RST}"
   fi
-  WT=""
-  [[ "$CWD" == *"/worktrees/"* ]] && WT=" ${DIM}[wt]${RST}"
-  GIT="${CYAN}${BRANCH}${RST}${DIRTY}${WT}"
+  GIT="${CYAN}${BRANCH}${RST}${DIRTY}"
 fi
 
 # ━━━ Directory ━━━
