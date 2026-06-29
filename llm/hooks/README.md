@@ -24,8 +24,6 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 `bash-safety-guard.d/*.sh` next to the projected hook. Keep confidential
 hostnames, service-specific allowlists, and private lease policy in those
 dotfiles-owned extensions rather than in this shared repository.
-| `push-gate.sh` | (CLI impl) | Backs the `pg` / `push-gate` shell function, branch leases, and Dolt-backed stack-trunk leases. Not a hook. |
-| `stack.sh` | (CLI impl) | Backs `bin/stack` — local-first stacked-PR view (`status`), scratch-preflighted restack (`sync`/`insert`), Dolt-backed private trunk materialization (`trunk`), current-branch cleanup (`squash`), and push-gate push orchestration (`push`). Not a hook. |
 
 Only one of `notify.sh` / `notify-slack.sh` is referenced from
 `settings.json` at a time — don't route both at once.
