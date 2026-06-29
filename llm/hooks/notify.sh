@@ -304,8 +304,8 @@ pr_context_label() {
         s/^ //; s/ $//;')
 
   [ -n "$title" ] || return 0
-  if printf '%s' "$title" | grep -Eiq 'push-gate|push gate|lease'; then
-    printf 'Push-gate leases'
+  if printf '%s' "$title" | grep -Eiq 'no-mistakes|no mistakes|gate failed|pipeline'; then
+    printf 'No-mistakes gate'
     return
   fi
   if printf '%s' "$title" | grep -Eiq 'notif|alerter|hook|focus|icon|show|vscode|claude|codex'; then
@@ -395,7 +395,7 @@ stop_message_needs_input() {
 input_request_kind() {
   local value
   value=$(normalize_message "$1" 500 | tr '[:upper:]' '[:lower:]')
-  if printf '%s' "$value" | grep -Eiq 'permission|approval|approve|pg push|push --assert-flow|push-gate|run `?pg`?'; then
+  if printf '%s' "$value" | grep -Eiq 'permission|approval|approve|no-mistakes|gate'; then
     printf 'Permission'
   elif printf '%s' "$value" | grep -Eiq 'choose|choice|which (option|approach|one|direction)|two possible|options?:'; then
     printf 'Choice needed'

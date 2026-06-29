@@ -135,7 +135,7 @@ context: 1-3 words for the workspace/topic, suitable for the notification subtit
 summary: 3-9 words describing what the user needs to do.
 
 Examples:
-{\"state\":\"input\",\"kind\":\"Permission\",\"context\":\"Git workflow\",\"summary\":\"Approve push-gate lease\"}
+{\"state\":\"input\",\"kind\":\"Permission\",\"context\":\"Git workflow\",\"summary\":\"Approve no-mistakes push\"}
 {\"state\":\"input\",\"kind\":\"Choice needed\",\"context\":\"Agent notifications\",\"summary\":\"Choose input notification behavior\"}
 {\"state\":\"input\",\"kind\":\"Confirm\",\"context\":\"Runtime deploy\",\"summary\":\"Confirm hook deployment\"}
 {\"state\":\"done\",\"kind\":\"Input needed\",\"context\":\"\",\"summary\":\"\"}
