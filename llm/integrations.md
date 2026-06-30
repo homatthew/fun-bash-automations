@@ -102,8 +102,13 @@ that allowlist.
   - Claude plugin that delegates to Codex from Claude.
   - No Codex-side parity required; Codex is already the primary harness.
 
-- `frontend-design`, `pr-review-toolkit`, `code-review`, `skill-creator`,
+- `frontend-design`, `pr-review-toolkit`, `skill-creator`,
   `interface-design`, `ods-first-team`
   - Treat as Claude plugin UX unless an explicit MCP server contract exists.
   - Parity strategy: document as Claude-only or re-create high-value behavior
     via shared `llm/skills`.
+  - Review is collapsed to one entrypoint (q9v.19): the shared `code-review`
+    skill is the single deep-review surface (pre-gate) + the `no-mistakes`
+    automated gate. The standalone `code-review` plugin is disabled in
+    `claude/settings.json`; `pr-review-toolkit` stays (the skill draws on its
+    `code-reviewer` agent) but is reached only via the skill, never standalone.

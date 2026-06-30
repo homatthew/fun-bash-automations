@@ -9,6 +9,24 @@ An orchestrated review that gathers context, then spawns two independent sub-age
 
 **This is a RIGID skill. Follow the phases in exact order. Do not skip or reorder.**
 
+## Scope: the one deep-review entrypoint (q9v.19)
+
+This skill is the **single sanctioned deep-review entrypoint**, run **pre-gate**
+(before `no-mistakes`). Review has exactly two layers:
+
+1. **This `code-review` skill** — the deep, human-triggered review (dual
+   Claude+Codex). Reach all deep review through here.
+2. **The `no-mistakes` gate** — the automated review step that runs on every ship.
+
+Deprecated as standalone entrypoints (reach them only *via* this skill): the
+`code-review` plugin, the standalone `pr-review-toolkit` commands, and the
+`test-code-reviewer` agent. This skill may still draw on the
+`pr-review-toolkit:code-reviewer` agent type internally (see below).
+
+`simplify`, `ai-slop-removal`, and `/security-review` are pre-gate cleanup
+passes that complement review, not separate review surfaces — run them before
+shipping to the gate.
+
 ## Phase 1: Context Gathering
 
 ### 1a: Detect review scope
