@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# gnhf-here — per-repo tuning shim for the gnhf autonomous loop.
+#
+# gnhf itself ONLY reads the global ~/.gnhf/config.yml (verified from its
+# source: loadConfig() joins homedir()+".gnhf"/"config.yml" and merges
+# DEFAULT_CONFIG < that file < CLI overrides). There is no native per-repo
+# config. This shim adds the *convention* of a committed `.gnhf.yml` at the
+# repo root and applies it for a single invocation, then execs real gnhf.
+#
+# How keys are applied (two paths, because not every config key has a flag):
+#   1. Keys that have a real gnhf CLI flag are PREPENDED as flags, so the
+#      file acts as a per-repo default and anything the user passes on the
+#      command line still wins (commander uses the last value for value
+#      options; we only inject boolean defaults the user did not pass):
+#        agent           -> --agent <v>          (verified flag + config key)
+#        maxIterations   -> --max-iterations <n> (verified flag; run limit)
+#        maxTokens       -> --max-tokens <n>     (verified flag; run limit)
+#        stopWhen        -> --stop-when <v>      (verified flag; run limit)
+#        meteorFrequency -> --meteor-frequency <n> (verified flag)
+#        preventSleep    -> --prevent-sleep on|off (verified flag + config key)
+#        worktree:true   -> --worktree          (verified flag)
+#        currentBranch:t -> --current-branch    (verified flag)
+#        push:true       -> --push              (verified flag)
+#   2. Keys gnhf reads ONLY from config.yml (no CLI flag exists) are merged
+#      into ~/.gnhf/config.yml for the duration of the run, then the original
+#      file is restored (or removed if it did not exist). A trap guarantees
+#      restore even on failure / Ctrl-C:
+#        agentArgsOverride  (map: agent -> [args]; verified config-only key)
+#        commitMessage.preset: conventional      (verified config-only key)
+#
+# With no `.gnhf.yml` present, this behaves EXACTLY like plain `gnhf "$@"`.
+#
+# Resolved decisions are printed to stderr (prefixed "gnhf-here:") so a run
+# log shows what the repo tuned.
+
+set -euo pipefail
+
+log() { printf 'gnhf-here: %s\n' "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+# --- locate real gnhf ------------------------------------------------------
+GNHF_BIN="${GNHF_BIN:-$(command -v gnhf || true)}"
+[ -n "$GNHF_BIN" ] || die "gnhf not found on PATH (set GNHF_BIN to override)"
+
+# --- find the repo-root .gnhf.yml (search from cwd up to git toplevel) -----
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+GNHF_YML=""
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/.gnhf.yml" ]; then
+  GNHF_YML="$REPO_ROOT/.gnhf.yml"
+elif [ -f ".gnhf.yml" ]; then
+  GNHF_YML="$(pwd)/.gnhf.yml"
+fi
+
+# No per-repo file: degrade to plain gnhf, identical behavior.
+if [ -z "$GNHF_YML" ]; then
+  log "no .gnhf.yml found; running plain gnhf"
+  exec "$GNHF_BIN" "$@"
+fi
+
+log "applying $GNHF_YML"
+
+# --- resolve a node + js-yaml we can use to read YAML ----------------------
+# Prefer js-yaml shipped alongside gnhf so we parse identically to gnhf.
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+[ -n "$NODE_BIN" ] || die "node not found; needed to parse YAML config"
+
+# Real gnhf entry (follow symlinks) so createRequire can resolve js-yaml.
+GNHF_REAL="$GNHF_BIN"
+if command -v readlink >/dev/null 2>&1; then
+  GNHF_REAL="$(readlink -f "$GNHF_BIN" 2>/dev/null || true)"
+  [ -n "$GNHF_REAL" ] || GNHF_REAL="$GNHF_BIN"
+fi
+
+# Emit a small parser script. It prints, on stdout:
+#   line 1+: zero or more "FLAG\t<value>" pairs (NUL-free, tab-delimited) for
+#            keys that map to CLI flags, then a literal "---CONFIG---" marker,
+#            then a YAML document of the config-only keys (or empty).
+# We keep all YAML knowledge inside node (js-yaml) and never hand-roll a
+# parser in bash.
+LOAD_YAML_JS='
+const { createRequire } = require("module");
+const path = require("path");
+function loadYaml(gnhfEntry) {
+  const bases = [gnhfEntry, __filename];
+  // Also probe node_modules dirs walking up from the gnhf entry, so we find
+  // the js-yaml gnhf itself ships even from odd install layouts.
+  let dir = gnhfEntry ? path.dirname(gnhfEntry) : null;
+  for (let i = 0; dir && i < 6; i++) {
+    bases.push(path.join(dir, "node_modules", "x"));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const base of bases) {
+    try { return createRequire(base)("js-yaml"); } catch (_) {}
+  }
+  return null;
+}
+'
+
+PARSE_JS="$LOAD_YAML_JS$(cat <<'NODE'
+const fs = require("fs");
+const gnhfEntry = process.argv[1];
+const ymlPath = process.argv[2];
+
+const yaml = loadYaml(gnhfEntry);
+if (!yaml) {
+  process.stderr.write("gnhf-here: error: could not load js-yaml (needed to read .gnhf.yml)\n");
+  process.exit(3);
+}
+
+let doc;
+try {
+  doc = yaml.load(fs.readFileSync(ymlPath, "utf8")) || {};
+} catch (e) {
+  process.stderr.write("gnhf-here: error: invalid YAML in " + ymlPath + ": " + e.message + "\n");
+  process.exit(4);
+}
+if (typeof doc !== "object" || Array.isArray(doc)) {
+  process.stderr.write("gnhf-here: error: " + ymlPath + " must be a YAML mapping\n");
+  process.exit(4);
+}
+
+const out = [];
+const emit = (flag, value) => out.push(flag + "\t" + String(value));
+
+// Value flags (repo default; user CLI value still wins).
+if (doc.agent !== undefined) emit("--agent", doc.agent);
+if (doc.maxIterations !== undefined) emit("--max-iterations", doc.maxIterations);
+if (doc.maxTokens !== undefined) emit("--max-tokens", doc.maxTokens);
+if (doc.stopWhen !== undefined) emit("--stop-when", doc.stopWhen);
+if (doc.meteorFrequency !== undefined) emit("--meteor-frequency", doc.meteorFrequency);
+if (doc.preventSleep !== undefined) {
+  emit("--prevent-sleep", doc.preventSleep === true || doc.preventSleep === "on" || doc.preventSleep === "true" ? "on" : "off");
+}
+// Boolean switches (only injected when true; tagged so bash treats them as a
+// flag with no value and can skip ones the user already passed).
+const SWITCH = "\x1fSWITCH\x1f"; // unit-separator sentinel; never a real value
+if (doc.worktree === true) out.push("--worktree\t" + SWITCH);
+if (doc.currentBranch === true) out.push("--current-branch\t" + SWITCH);
+if (doc.push === true) out.push("--push\t" + SWITCH);
+
+process.stdout.write(out.join("\n"));
+process.stdout.write("\n---CONFIG---\n");
+
+// Config-only keys (no CLI flag): re-emit as a YAML fragment to merge.
+const cfg = {};
+if (doc.agentArgsOverride !== undefined) cfg.agentArgsOverride = doc.agentArgsOverride;
+if (doc.commitMessage !== undefined) cfg.commitMessage = doc.commitMessage;
+if (Object.keys(cfg).length > 0) {
+  process.stdout.write(yaml.dump(cfg, { lineWidth: -1, noRefs: true, sortKeys: false }));
+}
+NODE
+)"
+
+PARSED="$("$NODE_BIN" -e "$PARSE_JS" "$GNHF_REAL" "$GNHF_YML")" \
+  || die "failed to parse $GNHF_YML"
+
+FLAG_SECTION="${PARSED%%---CONFIG---*}"
+CONFIG_SECTION="${PARSED#*---CONFIG---}"
+# Trim leading newline left by the marker.
+CONFIG_SECTION="${CONFIG_SECTION#$'\n'}"
+
+# --- build flag prefix; skip switches the user already passed --------------
+# Note: arrays are referenced with "${arr[@]+"${arr[@]}"}" so an empty array
+# expands to nothing under `set -u` (never to a stray empty argument).
+user_has_flag() {
+  local f="$1" a
+  for a in ${USER_ARGS[@]+"${USER_ARGS[@]}"}; do
+    [ "$a" = "$f" ] && return 0
+  done
+  return 1
+}
+
+USER_ARGS=("$@")
+PREFIX_FLAGS=()
+SWITCH=$'\x1fSWITCH\x1f'
+while IFS=$'\t' read -r flag value; do
+  [ -n "$flag" ] || continue
+  if [ "$value" = "$SWITCH" ]; then
+    if user_has_flag "$flag"; then
+      log "skip $flag (already on command line)"
+    else
+      PREFIX_FLAGS+=("$flag")
+      log "default $flag"
+    fi
+  else
+    PREFIX_FLAGS+=("$flag" "$value")
+    log "default $flag $value"
+  fi
+done <<EOF
+$FLAG_SECTION
+EOF
+
+# --- merge config-only keys into ~/.gnhf/config.yml (restore after) --------
+RESTORE_DONE=0
+restore_config() {
+  [ "$RESTORE_DONE" = 1 ] && return
+  RESTORE_DONE=1
+  if [ -n "${CONFIG_BACKUP:-}" ]; then
+    if [ -f "$CONFIG_BACKUP" ]; then
+      mv -f "$CONFIG_BACKUP" "$GLOBAL_CONFIG"
+      log "restored original ~/.gnhf/config.yml"
+    else
+      rm -f "$GLOBAL_CONFIG"
+      log "removed temporary ~/.gnhf/config.yml (none existed before)"
+    fi
+  fi
+}
+
+if [ -n "$CONFIG_SECTION" ] && printf '%s' "$CONFIG_SECTION" | grep -q '[^[:space:]]'; then
+  GLOBAL_DIR="$HOME/.gnhf"
+  GLOBAL_CONFIG="$GLOBAL_DIR/config.yml"
+  mkdir -p "$GLOBAL_DIR"
+
+  CONFIG_BACKUP=""
+  if [ -f "$GLOBAL_CONFIG" ]; then
+    CONFIG_BACKUP="$GLOBAL_CONFIG.gnhf-here.bak.$$"
+    cp -p "$GLOBAL_CONFIG" "$CONFIG_BACKUP"
+  else
+    # Sentinel that does not exist -> restore removes the temp file.
+    CONFIG_BACKUP="$GLOBAL_CONFIG.gnhf-here.absent.$$"
+  fi
+  trap restore_config EXIT INT TERM
+
+  MERGE_JS="$LOAD_YAML_JS$(cat <<'NODE'
+const fs = require("fs");
+const gnhfEntry = process.argv[1];
+const configPath = process.argv[2];
+const overlayYaml = process.argv[3];
+
+const yaml = loadYaml(gnhfEntry);
+if (!yaml) { process.stderr.write("gnhf-here: error: could not load js-yaml\n"); process.exit(3); }
+
+let existing = {};
+try { existing = yaml.load(fs.readFileSync(configPath, "utf8")) || {}; } catch (_) {}
+if (typeof existing !== "object" || Array.isArray(existing)) existing = {};
+
+const overlay = yaml.load(overlayYaml) || {};
+const merged = Object.assign({}, existing, overlay); // overlay (repo) wins
+fs.writeFileSync(configPath, yaml.dump(merged, { lineWidth: -1, noRefs: true, sortKeys: false }), "utf8");
+NODE
+)"
+
+  "$NODE_BIN" -e "$MERGE_JS" "$GNHF_REAL" "$GLOBAL_CONFIG" "$CONFIG_SECTION" \
+    || die "failed to merge config-only keys into $GLOBAL_CONFIG"
+  log "merged config-only keys (agentArgsOverride / commitMessage) into ~/.gnhf/config.yml for this run"
+fi
+
+# --- run gnhf with repo defaults first, user args last ---------------------
+log "exec: gnhf ${PREFIX_FLAGS[*]+${PREFIX_FLAGS[*]}} $*"
+
+if [ -n "${CONFIG_BACKUP:-}" ]; then
+  # We mutated the global config and must restore after gnhf exits, so we
+  # cannot exec; run, capture status, restore via the EXIT trap.
+  "$GNHF_BIN" ${PREFIX_FLAGS[@]+"${PREFIX_FLAGS[@]}"} "$@"
+  status=$?
+  restore_config
+  exit "$status"
+else
+  # No config mutation in play: exec for a clean process replacement.
+  exec "$GNHF_BIN" ${PREFIX_FLAGS[@]+"${PREFIX_FLAGS[@]}"} "$@"
+fi
