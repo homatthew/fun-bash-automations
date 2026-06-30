@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# kun-stack-uninstall — remove the pinned Kun stack tools listed in the manifest.
+#
+# Removes go-installed and npm-installed binaries and the marker files. The
+# firstmate git clone is left in place (it is a user repo that may hold local
+# state) unless --purge is given. Usage: kun-stack-uninstall [--purge] [tool ...]
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+MANIFEST="${KUN_STACK_MANIFEST:-$SCRIPT_DIR/../llm/kun-stack/manifest.json}"
+PURGE=0
+ONLY=()
+for arg in "$@"; do
+  case "$arg" in
+    --purge) PURGE=1 ;;
+    -*) echo "kun-stack-uninstall: unknown flag $arg" >&2; exit 2 ;;
+    *) ONLY+=("$arg") ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "kun-stack-uninstall: jq is required" >&2; exit 1; }
+[ -f "$MANIFEST" ] || { echo "kun-stack-uninstall: manifest not found: $MANIFEST" >&2; exit 1; }
+
+log()  { printf '[kun-stack] %s\n' "$*" >&2; }
+expand() { printf '%s' "${1/#\~/$HOME}"; }
+MARKER_DIR=$(expand "$(jq -r '.marker_dir // "~/.local/state/kun-stack"' "$MANIFEST")")
+GOBIN="${GOBIN:-$HOME/.local/bin}"
+
+want_tool() {
+  [ "${#ONLY[@]}" -eq 0 ] && return 0
+  local t; for t in "${ONLY[@]}"; do [ "$t" = "$1" ] && return 0; done
+  return 1
+}
+
+for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
+  want_tool "$name" || continue
+  kind=$(jq -r --arg t "$name" '.tools[$t].kind' "$MANIFEST")
+  case "$kind" in
+    go)
+      bin=$(jq -r --arg t "$name" '.tools[$t].bin' "$MANIFEST")
+      for cand in "$GOBIN/$bin" "$(command -v "$bin" 2>/dev/null || true)"; do
+        [ -n "$cand" ] && [ -f "$cand" ] && { rm -f "$cand" && log "removed $cand"; }
+      done
+      ;;
+    npm)
+      package=$(jq -r --arg t "$name" '.tools[$t].package' "$MANIFEST")
+      if command -v npm >/dev/null 2>&1; then
+        npm uninstall -g "$package" >&2 && log "npm uninstalled $package" || log "npm uninstall $package failed"
+      fi
+      ;;
+    git)
+      dest=$(expand "$(jq -r --arg t "$name" '.tools[$t].dest' "$MANIFEST")")
+      if [ "$PURGE" -eq 1 ]; then
+        [ -d "$dest" ] && { rm -rf "$dest" && log "purged $dest"; }
+      else
+        log "left $name clone at $dest in place (use --purge to remove)"
+      fi
+      ;;
+  esac
+  rm -f "$MARKER_DIR/$name" 2>/dev/null || true
+done
+
+log "kun-stack-uninstall complete"
