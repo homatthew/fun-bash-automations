@@ -24,8 +24,8 @@ This file is Claude-specific runtime guidance layered on top of shared policy.
 
 ## Shared Finish Workflow
 
-- When the user says `/go`, load the shared `/go` skill from projected skills
-  and use it as the finish-the-job workflow.
+- When the user says `/ship`, load the shared `/ship` skill from projected
+  skills and use it as the finish-the-job workflow.
 - Keep execution-quality rules in `llm/AGENTS.md` and `llm/skills/*`, not in
   this adapter.
 
