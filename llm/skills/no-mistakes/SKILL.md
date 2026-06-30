@@ -50,7 +50,7 @@ no-mistakes axi abort    # cancel the active run
 - Default delivery path for `mho/`, `feature/`, `fix/`, `gnhf/*` branches
   (`agent-push-policy.json`). The gate owns the push (`git push no-mistakes`), so
   do not hand-roll `git push` + `gh pr create`.
-- Pipeline stages are configured in `.no-mistakes.yaml` (see Track-2 I4 template
-  + stage reference once landed).
+- Pipeline stages are configured in `.no-mistakes.yaml` (sanctioned baseline at
+  the FBA repo root; stage reference in `llm/no-mistakes-stages.md`).
 - If a step fails, fix and `rerun` — do **not** `--skip` a real failure to fake a
   green run.

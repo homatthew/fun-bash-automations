@@ -44,4 +44,5 @@ gnhf --stop-when "all tests pass" "..."       # end when the agent reports this 
 ## Config
 
 - Global config: `~/.gnhf/config.yml` (agent, default args, commit preset).
-- Per-repo overrides: see the per-repo gnhf config shim (Track-2 I3) once landed.
+- Per-repo overrides: commit a `.gnhf.yml` and run `gnhf-here` (see
+  `llm/gnhf-per-repo-config.md`).
