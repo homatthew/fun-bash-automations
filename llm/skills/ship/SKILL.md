@@ -81,6 +81,11 @@ the pipeline runs.
 - First time in a repo: `no-mistakes init` (one-time; sets up the gate).
 - Then: `no-mistakes` to run the pipeline for the current branch.
 - Re-run after fixes: `no-mistakes rerun`.
+- **Netflix GHE (`git.netflix.net`) repos:** no-mistakes validates and pushes the
+  branch but **skips PR creation** (its PR step has no `git.netflix.net` provider
+  yet — it logs `provider unknown is not supported yet`). After the gate's push
+  completes, run **`nm-ghes-pr`** to open the PR. `github.com` repos get the PR
+  from no-mistakes directly, so this extra step is GHES-only.
 
 If a step fails, fix it and re-run — do not `--skip` a real failure to get
 green.
