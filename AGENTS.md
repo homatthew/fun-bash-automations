@@ -16,15 +16,18 @@ canonical instruction entrypoint.
 
 ## Repository Delivery Policy
 
-- This repository does not use push-gate.
+- This repository delivers directly on `mh-netflix`; there is no PR gate.
 - After the user explicitly asks to push or invokes an explicit finish workflow,
   agents should push directly with an explicit branch target, e.g.
   `git push origin mh-netflix`.
-- Do not run `pg prepare`, ask the user to run `pg`, or use `pg push` for this
-  repository.
+- The finish-the-job entrypoint is the `/ship` skill for a single change; it runs
+  the `no-mistakes` gate (automated code review, tests, lint, docs) and then
+  pushes to the configured target. For breadth across many tasks use `firstmate`;
+  for a long-run single-objective loop use `gnhf`.
 - That delivery push rule does not apply to configured non-delivery scratch
   branches when Remote Scratch Mode is active; see `llm/AGENTS.md` and
-  `llm/agent-push-policy.json`.
+  `llm/agent-push-policy.json`. Promoting scratch work to a delivery branch goes
+  through the `no-mistakes` gate.
 - Do not create, reopen, or mark ready PRs from `mh-netflix` to `main`;
   `mh-netflix` is the delivery branch.
 

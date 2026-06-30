@@ -96,31 +96,36 @@ Press `Ctrl+G` then the second key:
 | `to_mp3 <file>` | Convert any audio file to MP3 |
 | `webm_to_mp3` | Convert all .webm files in directory |
 
-### Push-gate (durable push approval)
-| Command | Description |
-|---------|-------------|
-| `pg` | Review exact Diffview diff, then approve a human-first YAML lease draft |
-| `pg -C <path>` | Run pg in another repo without `cd` |
-| `pgr [shortname]` | fzf picker over active-lease repos + `~/repos/*`, then `pg -C` there |
-| `pg leases` | Table of active leases across all repos (SQLite index) |
-| `pg queue` | Show prepared briefs plus active leases |
-| `pg approve-all -C repo1 -C repo2` | Sequentially run normal human approval review for multiple repos |
-| `pg leases --all --json` | Full lease index as JSON |
-| `pg leases reindex` | Scan `~/repos/*/.git/push-gate/leases/*` into the DB |
-| `pg review-diff` | Open the exact approval diff in Neovim Diffview; `q` or `Space q r` closes the review |
+### Agent Delivery Workflow
+
+Finishing and shipping work goes through agent-driven tooling rather than a
+manual approval CLI:
+
+| Tool | Description |
+|------|-------------|
+| `/ship` | Finish-the-job entrypoint for a single change; runs the `no-mistakes` gate, then pushes to the configured target and opens/updates the PR |
+| `no-mistakes` | The delivery gate itself: automated code review, tests, lint, and docs before anything reaches the push target |
+| `firstmate` | Orchestrates a crew of agents for breadth across many tasks |
+| `gnhf` | Long-run single-objective loop for depth on one goal |
+| `treehouse` | Provides isolated, pooled worktrees for parallel agent work |
+
+Local review still uses Neovim Diffview and the optional 99/Codex helper:
+
+| Keybinding | Action |
+|------------|--------|
 | `Space g c` | Open AI-assisted local review thread UI that breaks vague notes into agent-actionable asks |
 | `a/r/e/q` | In the review thread panel: accept/save, reply/refine, edit/save, or cancel |
-| `:PgReviewComment TEXT` | Record a direct local cursor-line review comment |
-| `Space r l` | Cycle Diffview split layouts while in the push-gate review |
+| `Space r l` | Cycle Diffview split layouts while reviewing |
 | `Space r u` | Open a unified inline-style `git diff base..head` buffer |
 | `Space 9 s` | Ask the optional 99/Codex helper to search the current repo/diff |
 | `Space 9 v` | In visual mode, ask Codex for a suggested edit and store it as a local review comment |
-| `pg review-comments --json` | Export local pre-push review comments for agents |
-| `pg review-comments status` | Show unresolved/resolved/stale local review comment counts |
-| `pg push --assert-flow TEXT` | Guarded push (requires active lease, scope-validated) |
-| `pg check [branch]` | Machine-readable: approved scope plus unresolved local review comments |
 
-Requires: `jq`, `yq` (mikefarah), `gh`, `sqlite3`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
+Protected-branch pushes (main/master/develop/trunk), bare/ambiguous
+`git push`, plain `git push --force`, and `git add -A` are blocked by the git
+main pre-push hook plus `bash-safety-guard.sh`; `--force-with-lease` is still
+allowed where appropriate.
+
+Requires: `jq`, `yq` (mikefarah), `gh`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
 
 ---
 

@@ -25,8 +25,8 @@ Codex, and future harnesses.
 
 ### Git history and branch safety
 
-- Block `git push --force`; allow `--force-with-lease` only where delivery
-  push-gate policy permits it. Scratch branches never allow force pushes; yolo
+- Block `git push --force`; allow `--force-with-lease` only where the push
+  policy permits it. Scratch branches never allow force pushes; yolo
   branches allow `--force-with-lease` and delete (see the yolo branch class
   below).
 - Block `git reset --hard`
@@ -45,43 +45,35 @@ Codex, and future harnesses.
   Non-delivery scratch branch pushes are governed by the scratch branch class
   below.
 - Block direct pushes to `origin/main`, `origin/master`, `upstream/main`, and
-  `upstream/master`
-- Allow feature-branch pushes to `upstream/*` only when the branch has a
-  matching durable lease
-- Use `push-gate` / `pg` durable branch leases when the harness supports the
-  shared lease model
-- Require a fresh self-assertion via `pg push --assert-flow ...` for each agent
-  push, even when the durable lease is still valid
+  `upstream/master`. The git-level main pre-push hook enforces this even for
+  external binaries (gnhf, no-mistakes); the agent-layer guard is
+  defense-in-depth.
+- Deliver feature branches through the **no-mistakes** gate: it runs automated
+  review/tests/lint/docs, then pushes to the configured target and opens or
+  updates the PR. Drive it with the `/ship` skill or the `no-mistakes` skill;
+  for breadth, firstmate ships each crew task through the same gate.
+- Do not hand-roll `git push` + `gh pr create` for delivery work — let the gate
+  own the push so the pipeline runs.
 
-### Push-gate bypass prohibition
+### Gate and guard bypass prohibition
 
-The `push-gate` approval flow is load-bearing: `pg` generates a draft, the
-user edits the draft in `$EDITOR` (scope, caps, paths, subjects), saves to
-activate the lease, then `pg push --assert-flow ...` performs the push. The
-edit-before-approve step is the policy; skipping it turns `pg` into a rubber
-stamp.
+The no-mistakes gate and the safety guard are load-bearing. Agents MUST NOT
+suggest, run, or document any of the following to get a blocked push through:
 
-Agents MUST NOT suggest, run, or document any of the following as a
-workaround when a push is blocked:
-
-- `PG_SKIP_EDIT=1` (bypasses the editor review step)
-- `PG_ALLOW_DESCENDANT=1` (overrides lease-anchor drift)
-- `PG_SCOPE_OVERRIDE=1` (overrides the approved_scope path/commit/line caps)
-- `PG_ALLOW_INFERENCE=1` (legacy inference bypass; agents must run
-  `pg prepare` instead)
-- Piping `yes`, `echo y`, or any non-interactive confirmation into the
+- `--no-verify` on `git commit` / `git push` (bypasses hooks)
+- Piping `yes`, `echo y`, or any non-interactive confirmation into a gate or
   approval prompt
-- Manually editing `~/.push-gate/` lease state, the Dolt stack-trunk store, or
-  `/tmp/pg-approve-*.json` outside the intended editor flow
-- Calling `git push` after the hook blocks, expecting the bypass envs above
-  to unblock it
+- `no-mistakes --skip <step>` to skip a step that actually failed (skip is only
+  for genuinely inapplicable steps, never to fake a green run)
+- Editing guard or gate internal state by hand to force a push
+- Calling `git push` to a protected branch after the guard blocks, expecting an
+  env override to unblock it — there is none
 
 ### Scratch branch class
 
 `llm/agent-push-policy.json` defines a non-delivery scratch branch class for
-agent remote backup, resumability, and cross-workspace handoff. Scratch branch
-pushes are not a push-gate bypass because push-gate applies to delivery and
-PR-eligible branches; scratch branches are explicitly non-PR work surfaces.
+agent remote backup, resumability, and cross-workspace handoff. Scratch
+branches are explicitly non-PR work surfaces — they are not a delivery bypass.
 
 Agents may commit and push matching scratch branches only after the user selects
 Remote Scratch Mode. The guard allows those pushes only when the shell declares
@@ -89,26 +81,25 @@ Remote Scratch Mode. The guard allows those pushes only when the shell declares
 target branch matches a configured scratch prefix, targets a configured scratch
 remote, is not a force/delete push, has no open PR as its head, and is not the
 base of an open PR. If any of those checks fails or cannot be verified, the
-branch is treated as delivery scope and must use push-gate.
+branch is treated as delivery scope.
 
 The machine-readable cadence is `regular_milestones`: in Remote Scratch Mode,
 commit and push after a coherent checkpoint worth preserving, after verification
 passes, before long-running or interruptible work, and before handoff or context
-compaction. That cadence is for scratch branches only; delivery and PR-eligible
-branches still require the normal explicit finish/push-gate path.
+compaction. That cadence is for scratch branches only; delivery branches ship
+through the no-mistakes gate.
 
 Promoting scratch work means creating or updating a delivery/PR branch from the
-scratch commits. That promotion is subject to push-gate exactly like any other
-delivery push.
+scratch commits. That promotion ships through the no-mistakes gate exactly like
+any other delivery change.
 
 ### Yolo branch class
 
 `llm/agent-push-policy.json` also defines a `yolo_branches` class (prefix
-`mho-yolo/`) for a raw explicit-branch push + PR fast path on any repo: no
-push-gate, no editor, no lease. Unlike scratch branches, yolo branches **are**
-PR-eligible and allow `--force-with-lease` and delete. This is not a push-gate
-bypass — push-gate governs delivery branches, and yolo branches are a separate
-sanctioned class.
+`mho-yolo/`) for a raw explicit-branch push + PR fast path on any repo: no gate,
+no editor review, no lease. Unlike scratch branches, yolo branches **are**
+PR-eligible and allow `--force-with-lease` and delete. This is a separate
+sanctioned class, not a delivery bypass.
 
 The allow is keyed on the resolved push **target** matching a yolo prefix, so the
 class is structurally incapable of pushing to a base ref:
@@ -123,67 +114,14 @@ class is structurally incapable of pushing to a base ref:
 - Bare `git push` stays blocked; yolo pushes must name the branch in the
   command, e.g. `git push origin mho-yolo/x`.
 - `git branch -D` is exempt only for yolo-prefixed names (local cleanup); remote
-  deletes are gated in push-gate and allowed only for yolo targets on a
-  configured remote.
+  deletes are allowed only for yolo targets on a configured remote.
 
-Unlike scratch, the **trigger is the prefix alone** — no session toggle is
-needed to mechanically allow a yolo push. The autonomy default is still a soft
-"only after the user explicitly asks" (`requires_explicit_user_ask: true`, like
-the direct-push exceptions). Fully autonomous yolo push/PR is opt-in via
-`AGENT_WORK_MODE=yolo`. A malformed or disabled `yolo_branches` policy fails
-closed: the push falls through to the delivery default-deny. See the `yolo-pr`
-skill.
-
-When push-gate blocks and no interactive terminal is available, the correct
-response has two parts:
-
-1. Agent runs `pg prepare --what ... --why ... --approach ...` to hand off
-   the rationale (see `push-gate-prepare` skill).
-2. Agent asks the user to run `pg` (or `pg -C <path>`) in their own
-   terminal, and waits.
-
-The `--assert-flow TEXT` argument on `pg push` is the semantic-scope
-assertion checked against the approved template — it is NOT a bypass.
-
-For async branch work, the human-approved prepare brief becomes an
-`approved_scope.work_package`. Descendant commits may add expected files that
-match the reviewed package path hints or text tokens, but unrelated paths,
-unmatched commit subjects, expired leases, exhausted budgets, and unapproved
-rewrites still block. Agents must treat those block reasons as requiring a new
-prepare and human review.
-
-For local pre-push review, use `pg review-diff`. It opens the exact
-push-gate `base..HEAD` comparison in Neovim Diffview and does not create,
-approve, mutate, or consume leases. `pg review-comments --json` may be used by
-agents to read exported local review comments for the current head when a
-review artifact exists; stale comments must not be treated as approval.
-`pg queue` is inspection only. `pg approve-all -C ...` is only sequencing
-sugar: each repo still gets the normal editor review and approval flow.
-
-Stack trunks use the same policy at stack scope. `stack trunk init/add` writes
-the manifest to push-gate's Dolt store, `stack trunk materialize --stack <name>`
-records the generated trunk tip and item commits, the agent runs
-`pg prepare-trunk --stack <name> ...`, the human reviews with
-`pg trunk --stack <name>`, and the agent pushes approved item commits with
-`pg push --trunk-stack <name> --branch <branch> --source-ref <commit>
---assert-flow "..."`.
-
-### Semantic self-check: `pg check`
-
-Before any `pg push`, agents should run `pg check [branch]` to validate the
-current HEAD against the active lease's `approved_scope`. Output is JSON:
-
-- `allowed` (bool) — would the push pass scope validation?
-- `reason` (string, present when `allowed: false`) — actionable block reason
-- `approved_scope` — full scope record (base_ref, paths, subjects, caps,
-  optional async work package)
-- `current` — head, approved_anchor, `anchor_matches_head`, commits,
-  added_lines, changed_files, subjects
-
-If `allowed: false` or `anchor_matches_head: false`, stop, run
-`pg prepare` again with the updated rationale, then ask the user to run
-`pg` to regenerate the lease. Never push on a stale or scope-violating
-lease, and never bypass the failure with an override env.
+The **trigger is the prefix alone** — no session toggle is needed to mechanically
+allow a yolo push. The autonomy default is still a soft "only after the user
+explicitly asks" (`requires_explicit_user_ask: true`, like the direct-push
+exceptions). Fully autonomous yolo push/PR is opt-in via `AGENT_WORK_MODE=yolo`.
+A malformed or disabled `yolo_branches` policy fails closed: the push falls
+through to the delivery default-deny.
 
 ### Git config and bypasses
 
@@ -193,9 +131,9 @@ lease, and never bypass the failure with an override env.
   Read-only queries such as `git config --get ...` and `git config --list` are
   allowed.
 - Block `--no-verify`
-- Allow `git commit --amend` on feature/stack branches; it only rewrites local
-  history and push-gate requires a fresh approval before any rewritten tip can
-  be pushed
+- Allow `git commit --amend` on feature branches; it only rewrites local
+  history, and the no-mistakes gate re-validates any rewritten tip before it is
+  pushed
 - Block `git commit --amend` on protected branches (`main`/`master`)
 - Block disabling signing or pre-commit checks
 - Block feature/stack branches from tracking any non-mirrored remote branch.

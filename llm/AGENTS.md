@@ -36,8 +36,8 @@ branches.
   branches such as `wip/agent/<topic>` or `scratch/agent/<topic>`.
 - Scratch branches must not have an open PR, must not be the base of an open
   PR, and must not be treated as delivery branches.
-- Promoting scratch work to a delivery or PR branch requires the normal
-  delivery approval flow.
+- Promoting scratch work to a delivery or PR branch ships through the
+  no-mistakes gate like any other delivery change.
 
 ### Mentor Mode
 
@@ -58,9 +58,9 @@ Mentor Mode optimizes for learning and reviewability over speed.
 
 ### Yolo Mode
 
-Yolo Mode is the raw push + PR fast path on `mho-yolo/*` branches: no push-gate,
-no editor review, no lease. It is the pre-push-gate workflow on a sanctioned,
-structurally-fenced branch class.
+Yolo Mode is the raw push + PR fast path on `mho-yolo/*` branches: no gate,
+no editor review, no lease. It is a sanctioned, structurally-fenced branch
+class for throwaway-fast work.
 
 - Yolo branches use the prefix `mho-yolo/` (e.g. `mho-yolo/quick-fix`) on any
   repo, and are defined by the `yolo_branches` class in
@@ -76,51 +76,57 @@ structurally-fenced branch class.
 - Autonomy default is still soft: only push or open the PR after the user
   explicitly asks. Fully autonomous yolo push/PR is opt-in via
   `AGENT_WORK_MODE=yolo`.
-- See the `yolo-pr` skill for the full workflow.
+- The guard recognizes the class by prefix; see the yolo branch class in
+  `llm/command-guard-policy.md`.
 
 ## Delivery And Push Policy
 
 - Keep `fun-bash-automations` history linear on branch `mh-netflix`.
 - Do not create, reopen, or mark ready PRs from `fun-bash-automations`
   `mh-netflix` to `main`; `mh-netflix` is the delivery branch.
-- `fun-bash-automations` and `dotfiles` do not use push-gate. After the user
-  explicitly asks to push, or invokes an explicit finish workflow, push these
-  repos directly with an explicit branch target such as
-  `git push origin mh-netflix` or `git push origin main`.
+- Ship feature work through the **no-mistakes** gate: it runs automated
+  review/tests/lint/docs, then pushes to the configured target and opens or
+  updates the PR. The finish-the-job entrypoint is the `/ship` skill for a
+  single change; for breadth across many tasks use `firstmate`, and for a
+  long-run single-objective loop use `gnhf`. All ship through the same gate.
+- `fun-bash-automations` and `dotfiles` are direct-push delivery repos
+  (`mh-netflix` and `main`): after the user explicitly asks to push or invokes a
+  finish workflow, the gate pushes directly with an explicit branch target such
+  as `git push origin mh-netflix` or `git push origin main`. Do not hand-roll
+  `git push` + `gh pr create` for delivery work — let the gate own the push.
 - Do not push delivery or PR-eligible branches unless the user explicitly asks.
-- Explicit finish workflows such as `/go`, `/commit-push-pr`, `/push-review`,
-  and `/stacked-pr` count as an explicit ask for their delivery actions.
+  `/ship` (and firstmate ship tasks) count as that explicit ask for their
+  delivery actions.
 - Agents may commit and push matching scratch branches only in Remote Scratch
-  Mode. Scratch branches are not PR-eligible, are not subject to push-gate, and
-  must not have an open PR or be the base of an open PR. Promoting scratch work
-  to delivery or PR branches requires the normal push-gate flow.
+  Mode. Scratch branches are not PR-eligible and must not have an open PR or be
+  the base of an open PR. Promoting scratch work to a delivery branch ships
+  through the no-mistakes gate.
 - Yolo branches (`mho-yolo/*`) get a raw explicit-branch push + PR fast path:
-  `git push origin mho-yolo/<topic>` plus `gh pr create`, no push-gate,
+  `git push origin mho-yolo/<topic>` plus `gh pr create`, no gate,
   force-with-lease and delete allowed. They are keyed on the branch prefix and
   can never target or track a base ref. Bare `git push` is never allowed. The
-  push itself is allowed by prefix alone, but the autonomy default is still to
-  push only after the user explicitly asks (or under `AGENT_WORK_MODE=yolo`).
-  See Yolo Mode above and the `yolo-pr` skill.
+  push is allowed by prefix alone, but the autonomy default is still to push
+  only after the user explicitly asks (or under `AGENT_WORK_MODE=yolo`). See
+  Yolo Mode above.
 
-## Push-Gate Policy
+## Delivery Gate Policy
 
-Use push-gate before any push operation that requires approval. The two
-direct-push repos named above are the only standing exception.
+The **no-mistakes** gate is the one sanctioned automated delivery path. It
+validates a feature branch (automated code review, tests, lint, docs) before it
+reaches the configured push target, then pushes and opens or updates the PR.
+Drive it with the `/ship` skill or the `no-mistakes` skill (`no-mistakes`, or
+`no-mistakes axi run` for agent-driven TOON output). The git-level main pre-push
+hook and `bash-safety-guard.sh` block protected-branch and bare/ambiguous pushes
+underneath it; these guardrails are never weakened.
 
-Never bypass push-gate. Do not suggest, run, or document `PG_SKIP_EDIT=1`,
-`PG_ALLOW_DESCENDANT=1`, `PG_SCOPE_OVERRIDE=1`, `PG_ALLOW_INFERENCE=1`, or any
-pattern that pipes automated confirmations into approval prompts.
+Never bypass the gate or the guard. Do not suggest, run, or document
+`--no-verify`, piping `yes` / `echo y` into a prompt, `no-mistakes --skip <step>`
+to skip a step that actually failed, manual edits to guard/gate state, or any
+pattern that fakes a green run.
 
-Canonical push-gate flow:
-
-1. Agent: `pg prepare --what ... --why ... --approach ...` at end of
-   implementation. See the `push-gate-prepare` skill.
-2. Human: `pg` or `pg -C <path>` in their interactive terminal.
-3. Agent: `pg push --assert-flow "..."`.
-
-When push-gate blocks and no interactive terminal is available, stop and ask
-the user to run `pg`. Do not ask for `pg compose`; that command is removed.
-Details live in `llm/command-guard-policy.md`.
+If a gate step fails, fix it and `no-mistakes rerun` — do not skip it. When the
+gate needs an interactive approval and no terminal is available, stop and ask
+the user. Details live in `llm/command-guard-policy.md`.
 
 ## Planning And Verification
 

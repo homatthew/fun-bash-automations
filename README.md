@@ -14,7 +14,7 @@ Use this repository for behavior that is broadly reusable:
 - shared hooks in `llm/hooks/*.sh`
 - portable Codex config in `codex/config.toml`
 - portable Codex MCP definitions in `codex/mcp.toml`
-- local workflow tools such as `bin/pg`, `bin/stack`, and push-gate helpers
+- local workflow helpers in `bin/` such as `fba-deploy` and notification tooling
 
 Do not put confidential or machine-specific details here. Jira board topology,
 private field IDs, internal service URLs, private Slack lore, team-specific
@@ -86,14 +86,17 @@ tests/projection-regression.sh
 
 ## Delivery Policy
 
-This repository uses `mh-netflix` as its delivery branch and does not use
-push-gate. Agents may push to `mh-netflix` only after the user explicitly asks
-for a push or invokes an explicit finish workflow. Do not create PRs from
-`mh-netflix` to `main`.
+This repository uses `mh-netflix` as its delivery branch and delivers directly
+to it. Agents may push to `mh-netflix` only after the user explicitly asks for a
+push or invokes an explicit finish workflow. The finish-the-job entrypoint is the
+`/ship` skill, which runs the `no-mistakes` gate (automated code review, tests,
+lint, docs) before pushing. Do not create PRs from `mh-netflix` to `main`.
 
 The shared push policy (`llm/agent-push-policy.json`) defines four branch
-classes: **delivery** (push-gate), **scratch** (`wip/agent/`, `scratch/agent/` —
-opt-in Remote Scratch Mode, not PR-eligible), **direct-push exceptions**
-(`fun-bash-automations`, `dotfiles`), and **yolo** (`mho-yolo/*` — raw push + PR
-fast path on any repo, no push-gate, force-with-lease and delete allowed, and
-structurally unable to target or track a base ref). See the `yolo-pr` skill.
+classes: **delivery** (no-mistakes gate), **scratch** (`wip/agent/`,
+`scratch/agent/` — opt-in Remote Scratch Mode for backup/handoff, not
+PR-eligible; promotion to a delivery branch goes through the no-mistakes gate),
+**direct-push exceptions** (`fun-bash-automations`, `dotfiles`), and **yolo**
+(`mho-yolo/*` — raw explicit-branch push + PR fast path on any repo,
+force-with-lease and delete allowed, and structurally unable to target or track
+a base ref).
