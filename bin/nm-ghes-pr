@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# nm-ghes-pr — open a PR on Netflix GHE (git.netflix.net) after the no-mistakes
+# gate has validated and pushed the branch.
+#
+# Why this exists: no-mistakes runs its full pipeline against git.netflix.net
+# repos and pushes the feature branch fine, but its built-in `pr` step skips
+# with "provider unknown is not supported yet" — it has no GHES provider handler
+# yet. This shim fills that one gap. On github.com origins no-mistakes opens the
+# PR itself, so this no-ops there.
+#
+# Idempotent: if a PR for the head branch already exists, it prints that URL.
+# stdout = PR URL only; everything else goes to stderr.
+#
+# Usage: nm-ghes-pr [--base <branch>] [--head <branch>] [--title T] [--body B] [--draft]
+set -euo pipefail
+
+BASE="" HEAD="" TITLE="" BODY="" DRAFT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) BASE="$2"; shift 2 ;;
+    --head) HEAD="$2"; shift 2 ;;
+    --title) TITLE="$2"; shift 2 ;;
+    --body) BODY="$2"; shift 2 ;;
+    --draft) DRAFT="--draft"; shift ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "nm-ghes-pr: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v gh >/dev/null 2>&1 || { echo "nm-ghes-pr: gh not found" >&2; exit 1; }
+
+origin=$(git remote get-url origin 2>/dev/null) || { echo "nm-ghes-pr: no origin remote" >&2; exit 1; }
+case "$origin" in
+  *git.netflix.net*) : ;;  # Netflix GHE — proceed
+  *github.com*) echo "nm-ghes-pr: github.com origin — no-mistakes opens PRs natively; nothing to do." >&2; exit 0 ;;
+  *) echo "nm-ghes-pr: origin is not git.netflix.net ($origin); this shim is GHES-only." >&2; exit 0 ;;
+esac
+
+# Parse owner/repo from https://git.netflix.net/OWNER/REPO(.git)
+slug=$(printf '%s' "$origin" | sed -E 's#^[a-z]+://git\.netflix\.net/##; s#^git@git\.netflix\.net:##; s#\.git$##')
+[ -n "$slug" ] && [ "$slug" != "$origin" ] || { echo "nm-ghes-pr: cannot parse owner/repo from $origin" >&2; exit 1; }
+
+HEAD="${HEAD:-$(git symbolic-ref --short HEAD 2>/dev/null || true)}"
+[ -n "$HEAD" ] || { echo "nm-ghes-pr: detached HEAD — pass --head <branch>" >&2; exit 1; }
+case "$HEAD" in
+  main|master|develop|trunk) echo "nm-ghes-pr: refusing to open a PR from a base branch ($HEAD)" >&2; exit 1 ;;
+esac
+
+export GH_HOST="git.netflix.net"
+
+# The gate pushes the branch to origin; require it to be there before PR'ing.
+if [ -z "$(git ls-remote --heads origin "$HEAD" 2>/dev/null)" ]; then
+  echo "nm-ghes-pr: '$HEAD' is not on origin yet — run the no-mistakes gate first (it validates and pushes)." >&2
+  exit 1
+fi
+
+BASE="${BASE:-$(gh api "repos/$slug" --jq '.default_branch' 2>/dev/null || echo main)}"
+
+# Idempotent: reuse an existing open PR for this head.
+existing=$(gh pr list --repo "$slug" --head "$HEAD" --state open --json url --jq '.[0].url' 2>/dev/null || true)
+if [ -n "$existing" ]; then
+  echo "nm-ghes-pr: PR already open for $HEAD" >&2
+  printf '%s\n' "$existing"
+  exit 0
+fi
+
+TITLE="${TITLE:-$(git log -1 --format=%s 2>/dev/null)}"
+BODY="${BODY:-"Validated and pushed by the no-mistakes gate. PR opened by nm-ghes-pr because no-mistakes' built-in PR step does not yet support the git.netflix.net provider."}"
+
+echo "nm-ghes-pr: opening PR $slug $HEAD -> $BASE" >&2
+gh pr create --repo "$slug" --base "$BASE" --head "$HEAD" --title "$TITLE" --body "$BODY" $DRAFT
