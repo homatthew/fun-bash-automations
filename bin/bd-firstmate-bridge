@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# bd-firstmate-bridge — project `bd ready` into firstmate's data/backlog.md.
+#
+# ONE-WAY: beads is the source of truth. This regenerates ONLY the `## Queued`
+# section of the firstmate backlog from `bd ready`; firstmate-owned sections
+# (## In flight, ## Done, ...) are preserved untouched. The crew closes work
+# back in beads (`bd close <id>`) on merge; re-run to reflect new bd state.
+#
+# Usage: bd-firstmate-bridge [--home <firstmate-home>] [--include-epics] [--dry-run]
+#   --home          firstmate home (default: $FM_HOME or ~/repos/firstmate)
+#   --include-epics project epics too (default: skip; epics are containers)
+#   --dry-run       print the would-be backlog to stdout, do not write
+set -euo pipefail
+
+FM_HOME_DIR="${FM_HOME:-$HOME/repos/firstmate}"
+INCLUDE_EPICS=0
+DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --home) FM_HOME_DIR="$2"; shift 2 ;;
+    --include-epics) INCLUDE_EPICS=1; shift ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "bd-firstmate-bridge: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v bd >/dev/null 2>&1 || { echo "bd-firstmate-bridge: bd not found" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "bd-firstmate-bridge: jq not found" >&2; exit 1; }
+[ -d "$FM_HOME_DIR/data" ] || { echo "bd-firstmate-bridge: not a firstmate home (no data/): $FM_HOME_DIR" >&2; exit 1; }
+BACKLOG="$FM_HOME_DIR/data/backlog.md"
+
+GEN_MARK='<!-- GENERATED from `bd ready` by bd-firstmate-bridge — do not hand-edit. beads is the source of truth; close items with `bd close <id>`. -->'
+
+# Fetch the ready beads as JSON. --allow-stale keeps the read working when the
+# daemon is down and the DB lags the (git-backed, authoritative) JSONL; the
+# JSONL is the source of truth regardless. Abort rather than clobber the backlog
+# if bd returns nothing parseable.
+READY_JSON=$(bd ready --json --allow-stale 2>/dev/null || true)
+if ! printf '%s' "$READY_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "bd-firstmate-bridge: 'bd ready' returned no parseable JSON (stale DB? run 'bd sync --import-only'); not touching $BACKLOG" >&2
+  exit 1
+fi
+
+# Regenerated `## Queued` section from the ready beads (one per dispatchable bead).
+gen_queued() {
+  printf '## Queued\n'
+  printf '%s\n' "$GEN_MARK"
+  local sel='.[]'
+  [ "$INCLUDE_EPICS" -eq 0 ] && sel='.[] | select(.issue_type != "epic")'
+  printf '%s' "$READY_JSON" | jq -r "
+    $sel
+    | \"- \(.id)  \(.title)  (P\(.priority), \(.issue_type))\"
+      + ((.labels // [] | map(select(startswith(\"repo:\"))))
+         | if length > 0 then \"  [\" + join(\" \") + \"]\" else \"\" end)
+  "
+  printf '\n'
+}
+
+QUEUED=$(gen_queued)
+count=$(printf '%s\n' "$QUEUED" | grep -cE '^- ' || true)
+
+# Splice: replace the existing `## Queued` block (up to the next `## ` or EOF)
+# with the regenerated one; preserve every other section. Create a scaffold if
+# the backlog does not exist yet.
+render() {
+  if [ ! -f "$BACKLOG" ]; then
+    printf '# firstmate backlog\n\n'
+    printf '%s\n' "$QUEUED"
+    printf '## In flight\n\n## Done\n'
+    return
+  fi
+  if ! grep -qE '^## Queued[[:space:]]*$' "$BACKLOG"; then
+    # No Queued section yet: prepend it after the first heading block.
+    printf '%s\n' "$QUEUED"
+    cat "$BACKLOG"
+    return
+  fi
+  awk -v queued="$QUEUED" '
+    BEGIN { inq = 0 }
+    /^## Queued[[:space:]]*$/ { print queued; inq = 1; next }
+    inq == 1 && /^## / { inq = 0 }       # next section header ends the Queued block
+    inq == 1 { next }                    # drop old Queued body
+    { print }
+  ' "$BACKLOG"
+}
+
+OUT=$(render)
+if [ "$DRY" -eq 1 ]; then
+  printf '%s\n' "$OUT"
+  echo "bd-firstmate-bridge: DRY-RUN — $count queued item(s) (not written)" >&2
+  exit 0
+fi
+
+printf '%s\n' "$OUT" > "$BACKLOG"
+echo "bd-firstmate-bridge: wrote $count queued item(s) to $BACKLOG (In flight/Done preserved)" >&2
