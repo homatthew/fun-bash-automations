@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# fm — thin firstmate preset launcher.
+#
+# firstmate is NOT a CLI. It is an agent home: you run your coding-agent
+# harness (claude) *inside* a firstmate checkout and AGENTS.md takes over as
+# the operating manual. firstmate ships ~40 FM_* tuning knobs (see
+# `grep -rhoE 'FM_[A-Z_]+' ~/repos/firstmate/bin`); almost all are watcher /
+# daemon / timing internals you should never touch. This launcher hides them
+# behind sane defaults so starting firstmate is one command.
+#
+# What it does:
+#   1. Resolves the firstmate home (FM_HOME, else ~/repos/firstmate).
+#   2. Seeds the home's LOCAL, gitignored data/captain.md and data/projects.md
+#      and config/crew-harness from the checked-in baseline under
+#      llm/firstmate/ when they are absent (never clobbers a customized one
+#      without --reseed).
+#   3. cd's into the home and launches the claude harness so AGENTS.md drives.
+#
+# It deliberately sets ONLY the few knobs that matter for a captain's own
+# main firstmate session (FM_HOME + the crew harness); everything else is left
+# at firstmate's own defaults on purpose. See llm/firstmate/README.md.
+#
+# Usage:
+#   fm [--reseed] [--help]
+#
+# Options:
+#   --reseed   overwrite the home's captain.md / projects.md / crew-harness
+#              from the checked-in baseline (backs up the old ones to *.bak).
+#   --help     show this help.
+#
+# Env:
+#   FM_HOME    firstmate operational home (default: ~/repos/firstmate).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BASELINE_DIR="$REPO_ROOT/llm/firstmate"
+
+# --- sane FM_* defaults (only the few that matter) --------------------------
+# FM_HOME: the operational home firstmate reads data/, config/, projects/,
+#   state/ from. Unset => firstmate uses its own repo root; we default it to the
+#   conventional ~/repos/firstmate checkout so the preset is reproducible.
+FM_HOME="${FM_HOME:-$HOME/repos/firstmate}"
+# Crew harness: crewmates dispatched by firstmate default to "claude". This is
+#   written to $FM_HOME/config/crew-harness (LOCAL, gitignored), which is the
+#   one documented switch firstmate reads (AGENTS.md section 4).
+FM_PRESET_CREW_HARNESS="${FM_PRESET_CREW_HARNESS:-claude}"
+# The harness binary to launch for the captain's own firstmate session.
+FM_PRESET_HARNESS_CMD="${FM_PRESET_HARNESS_CMD:-claude}"
+
+RESEED=0
+
+usage() {
+  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+log() { printf 'fm: %s\n' "$*" >&2; }
+
+# Seed one baseline file into the home if absent, or always when --reseed.
+# $1 baseline source path, $2 destination path, $3 human label.
+seed_file() {
+  local src=$1 dst=$2 label=$3
+  if [ ! -f "$src" ]; then
+    log "warn: baseline $label missing at $src; skipping seed"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  if [ -f "$dst" ]; then
+    if [ "$RESEED" -eq 1 ]; then
+      cp "$dst" "$dst.bak"
+      cp "$src" "$dst"
+      log "reseeded $label -> $dst (old saved to $dst.bak)"
+    else
+      log "kept existing $label at $dst (use --reseed to overwrite)"
+    fi
+  else
+    cp "$src" "$dst"
+    log "seeded $label -> $dst"
+  fi
+}
+
+# Seed crew-harness only if absent (or --reseed); it is a single word.
+seed_crew_harness() {
+  local dst="$FM_HOME/config/crew-harness"
+  mkdir -p "$(dirname "$dst")"
+  if [ -f "$dst" ] && [ "$RESEED" -eq 0 ]; then
+    log "kept existing crew-harness at $dst (use --reseed to overwrite)"
+    return 0
+  fi
+  printf '%s\n' "$FM_PRESET_CREW_HARNESS" > "$dst"
+  log "set crew-harness=$FM_PRESET_CREW_HARNESS -> $dst"
+}
+
+main() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reseed) RESEED=1 ;;
+      -h|--help) usage; exit 0 ;;
+      *) log "error: unknown argument: $1 (try --help)"; exit 2 ;;
+    esac
+    shift
+  done
+
+  # Degrade gracefully if the firstmate home does not exist.
+  if [ ! -d "$FM_HOME" ]; then
+    log "error: firstmate home not found at: $FM_HOME"
+    log "       firstmate is launched by running your agent inside a firstmate"
+    log "       checkout. Clone it first, e.g.:"
+    log "         git clone https://github.com/kunchenguid/firstmate ~/repos/firstmate"
+    log "       or point FM_HOME at an existing checkout: FM_HOME=/path/to/firstmate fm"
+    exit 1
+  fi
+  if [ ! -f "$FM_HOME/AGENTS.md" ]; then
+    log "error: $FM_HOME does not look like a firstmate checkout (no AGENTS.md)"
+    log "       set FM_HOME to a real firstmate checkout."
+    exit 1
+  fi
+
+  # Seed the LOCAL, gitignored home state from the checked-in baseline.
+  seed_file "$BASELINE_DIR/captain.md"  "$FM_HOME/data/captain.md"   "captain.md"
+  seed_file "$BASELINE_DIR/projects.md" "$FM_HOME/data/projects.md"  "projects.md"
+  seed_crew_harness
+
+  # Print resolved settings to stderr so a run is reproducible / auditable.
+  log "resolved settings:"
+  log "  FM_HOME            = $FM_HOME"
+  log "  crew harness       = $FM_PRESET_CREW_HARNESS (config/crew-harness)"
+  log "  launch harness     = $FM_PRESET_HARNESS_CMD"
+  log "  baseline dir       = $BASELINE_DIR"
+  log "  reseed             = $([ "$RESEED" -eq 1 ] && echo yes || echo no)"
+
+  if ! command -v "$FM_PRESET_HARNESS_CMD" >/dev/null 2>&1; then
+    log "error: harness command '$FM_PRESET_HARNESS_CMD' not on PATH"
+    log "       install it, or set FM_PRESET_HARNESS_CMD to your harness binary."
+    exit 1
+  fi
+
+  log "launching $FM_PRESET_HARNESS_CMD in $FM_HOME (AGENTS.md takes over) ..."
+  # Export FM_HOME so firstmate's own bin/fm-*.sh scripts (invoked by the agent
+  # from inside the home) resolve the same operational home we seeded.
+  export FM_HOME
+  cd "$FM_HOME"
+  exec "$FM_PRESET_HARNESS_CMD"
+}
+
+main "$@"
