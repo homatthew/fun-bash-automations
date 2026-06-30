@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# kun-status — one-glance state of the Kun stack as token-efficient TOON (AXI).
+#
+# Surfaces four substrates of the Kun agent stack for the current repository:
+#   pool   treehouse worktree pool          (source: `treehouse status`)
+#   gate   no-mistakes validation gate       (source: `no-mistakes axi status`)
+#   crew   firstmate crewmates               (source: tmux windows named `fm-*`)
+#   wake   scheduled / cron wakeups          (source: crontab + launchd, best-effort)
+#
+# Output:
+#   stdout  structured TOON only (what the agent consumes)
+#   stderr  banners, progress, diagnostics (agents ignore this)
+#
+# Usage:
+#   kun-status                 show all sections (default)
+#   kun-status --pool          worktree pool only
+#   kun-status --gate          no-mistakes gate only
+#   kun-status --crew          firstmate crew only
+#   kun-status --wake          wake-queue only
+#   kun-status --pool --gate   any combination of section flags
+#   kun-status -h | --help     this help
+#
+# Each source degrades gracefully: a missing tool, absent server, or
+# uninitialized repo yields an `unavailable` row, never a crash.
+#
+# Exit codes: 0 success (including all-unavailable), 2 usage error.
+
+set -euo pipefail
+
+# --- identity -------------------------------------------------------------
+self_path() {
+    local p="${BASH_SOURCE[0]}"
+    # Resolve symlinks where possible without requiring GNU readlink.
+    if command -v realpath >/dev/null 2>&1; then
+        p="$(realpath "$p" 2>/dev/null || echo "$p")"
+    fi
+    printf '%s' "${p/#$HOME/~}"
+}
+
+DESC="One-glance Kun stack state (pool, gate, crew, wake) as TOON."
+
+print_help() {
+    # Help reads from this file's own header comment block.
+    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# --- toon emit helpers ----------------------------------------------------
+# All emit to stdout. Values are emitted bare unless they need quoting
+# (contain a comma, leading/trailing space, or are empty).
+toon_val() {
+    local v="$1"
+    if [[ -z "$v" || "$v" == *,* || "$v" == *'"'* || "$v" =~ ^[[:space:]] || "$v" =~ [[:space:]]$ ]]; then
+        v="${v//\"/\\\"}"
+        printf '"%s"' "$v"
+    else
+        printf '%s' "$v"
+    fi
+}
+
+# --- progress (stderr only) ----------------------------------------------
+log() { printf '%s\n' "$*" >&2; }
+
+# =========================================================================
+# pool — treehouse worktree pool
+# =========================================================================
+# treehouse writes ALL of its output (incl. its update banner and the
+# "No worktrees in pool." message) to stderr and nothing to stdout, so we
+# capture merged output and strip the known banner lines before parsing.
+section_pool() {
+    log "kun-status: probing treehouse pool..."
+    if ! command -v treehouse >/dev/null 2>&1; then
+        printf 'pool:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: treehouse not installed\n'
+        printf '  help: install treehouse to enable the worktree pool\n'
+        return
+    fi
+
+    local raw rc=0
+    raw="$(treehouse status 2>&1)" || rc=$?
+    # Drop the self-update banner and blank lines.
+    local body
+    body="$(printf '%s\n' "$raw" \
+        | grep -vE '^A new version of treehouse is available' \
+        | grep -vE '^Run "treehouse update" to update' \
+        | sed '/^[[:space:]]*$/d')"
+
+    if [[ $rc -ne 0 && -z "$body" ]]; then
+        printf 'pool:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: treehouse status failed (exit %s)\n' "$rc"
+        return
+    fi
+
+    # Empty pool is a definitive state, not an error.
+    if printf '%s' "$body" | grep -qiE 'No worktrees in pool'; then
+        printf 'pool:\n'
+        printf '  status: empty\n'
+        printf '  count: 0\n'
+        printf '  help: Run `treehouse get` to acquire a worktree\n'
+        return
+    fi
+
+    # Populated pool: each non-header line is a worktree entry. treehouse's
+    # human format varies across versions, so we keep a tolerant projection:
+    # one `worktrees[N]{line}` array of the raw (banner-stripped) lines.
+    local -a lines=()
+    while IFS= read -r ln; do
+        [[ -n "$ln" ]] && lines+=("$ln")
+    done <<< "$body"
+
+    local n="${#lines[@]}"
+    if [[ $n -eq 0 ]]; then
+        printf 'pool:\n'
+        printf '  status: empty\n'
+        printf '  count: 0\n'
+        return
+    fi
+
+    printf 'pool:\n'
+    printf '  status: active\n'
+    printf '  count: %s\n' "$n"
+    printf 'pool_worktrees[%s]{entry}:\n' "$n"
+    local ln
+    for ln in "${lines[@]}"; do
+        printf '  %s\n' "$(toon_val "$ln")"
+    done
+}
+
+# =========================================================================
+# gate — no-mistakes validation gate
+# =========================================================================
+# `no-mistakes axi status` is itself AXI: structured output on stdout,
+# banner on stderr. We surface it directly, normalizing the common states
+# (no repo, not initialized, no runs, active/recent run) into a stable schema.
+section_gate() {
+    log "kun-status: probing no-mistakes gate..."
+    if ! command -v no-mistakes >/dev/null 2>&1; then
+        printf 'gate:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: no-mistakes not installed\n'
+        printf '  help: install no-mistakes to enable the validation gate\n'
+        return
+    fi
+
+    local out rc=0
+    out="$(no-mistakes axi status 2>/dev/null)" || rc=$?
+
+    if [[ -z "$out" ]]; then
+        printf 'gate:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: no-mistakes returned no output (exit %s)\n' "$rc"
+        return
+    fi
+
+    # not initialized for this repo → a clear, actionable state (not a crash).
+    if printf '%s' "$out" | grep -qiE 'not initialized'; then
+        printf 'gate:\n'
+        printf '  status: not-initialized\n'
+        printf '  reason: no-mistakes gate not set up in this repository\n'
+        printf '  help: Run `no-mistakes init` to enable the gate here\n'
+        return
+    fi
+    if printf '%s' "$out" | grep -qiE 'not (in|inside) a git repository'; then
+        printf 'gate:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: not inside a git repository\n'
+        return
+    fi
+    if printf '%s' "$out" | grep -qiE 'no runs'; then
+        printf 'gate:\n'
+        printf '  status: idle\n'
+        printf '  runs: 0\n'
+        printf '  help: Run `no-mistakes axi run` to validate changes\n'
+        return
+    fi
+
+    # Active or recent run: no-mistakes already emits AXI TOON. Re-key it
+    # under our `gate` namespace and pass its structured lines through.
+    printf 'gate:\n'
+    printf '  status: reported\n'
+    printf '%s\n' "$out" | sed 's/^/  /'
+}
+
+# =========================================================================
+# crew — firstmate crewmates (tmux windows named fm-*)
+# =========================================================================
+section_crew() {
+    log "kun-status: probing firstmate crew (tmux fm-*)..."
+    if ! command -v tmux >/dev/null 2>&1; then
+        printf 'crew:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: tmux not installed\n'
+        printf '  help: firstmate crewmates run in tmux windows named fm-*\n'
+        return
+    fi
+
+    local raw rc=0
+    # If no server is running tmux prints "no server running..." to stderr
+    # and exits non-zero; treat that as a definitive "no crew".
+    raw="$(tmux list-windows -a -F '#{window_name}	#{session_name}:#{window_index}	#{window_active}	#{pane_current_command}' 2>/dev/null)" || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        printf 'crew:\n'
+        printf '  status: offline\n'
+        printf '  count: 0\n'
+        printf '  reason: no tmux server running\n'
+        return
+    fi
+
+    # Select only firstmate crewmate windows.
+    local fm
+    fm="$(printf '%s\n' "$raw" | awk -F'\t' '$1 ~ /^fm-/')"
+
+    if [[ -z "$fm" ]]; then
+        printf 'crew:\n'
+        printf '  status: idle\n'
+        printf '  count: 0\n'
+        printf '  help: crewmates appear as tmux windows named fm-*; launch via firstmate\n'
+        return
+    fi
+
+    local n
+    n="$(printf '%s\n' "$fm" | grep -c . )"
+    printf 'crew:\n'
+    printf '  status: active\n'
+    printf '  count: %s\n' "$n"
+    printf 'crew_members[%s]{name,window,active,cmd}:\n' "$n"
+    local name win act cmd
+    while IFS=$'\t' read -r name win act cmd; do
+        [[ -z "$name" ]] && continue
+        printf '  %s,%s,%s,%s\n' \
+            "$(toon_val "$name")" "$(toon_val "$win")" \
+            "$(toon_val "$act")" "$(toon_val "$cmd")"
+    done <<< "$fm"
+}
+
+# =========================================================================
+# wake — scheduled / cron wakeups (best-effort)
+# =========================================================================
+# There is no dedicated wake-queue daemon in this stack today, so we probe
+# the generic schedulers (user crontab + per-user launchd agents) for any
+# Kun/firstmate/wake-tagged jobs. When no source yields anything we say so
+# explicitly rather than implying a queue exists.
+section_wake() {
+    log "kun-status: probing wake-queue (cron/launchd)..."
+    local -a entries=()
+    local probed=0
+
+    # 1) user crontab
+    if command -v crontab >/dev/null 2>&1; then
+        probed=1
+        local cron
+        cron="$(crontab -l 2>/dev/null | grep -vE '^[[:space:]]*#' | sed '/^[[:space:]]*$/d' \
+            | grep -iE 'wake|wakeup|firstmate|fm-|crewmate' || true)"
+        if [[ -n "$cron" ]]; then
+            while IFS= read -r ln; do
+                [[ -n "$ln" ]] && entries+=("cron	$ln")
+            done <<< "$cron"
+        fi
+    fi
+
+    # 2) per-user launchd agents (macOS)
+    if command -v launchctl >/dev/null 2>&1; then
+        probed=1
+        local la
+        la="$(launchctl list 2>/dev/null \
+            | awk 'NR>1 {print $3}' \
+            | grep -iE 'wake|wakeup|firstmate|crewmate' || true)"
+        if [[ -n "$la" ]]; then
+            while IFS= read -r ln; do
+                [[ -n "$ln" ]] && entries+=("launchd	$ln")
+            done <<< "$la"
+        fi
+    fi
+
+    if [[ $probed -eq 0 ]]; then
+        printf 'wake:\n'
+        printf '  status: unavailable\n'
+        printf '  reason: no scheduler available (crontab/launchctl not found)\n'
+        return
+    fi
+
+    local n="${#entries[@]}"
+    if [[ $n -eq 0 ]]; then
+        printf 'wake:\n'
+        printf '  status: empty\n'
+        printf '  count: 0\n'
+        printf '  reason: no dedicated wake-queue source; no matching cron/launchd jobs\n'
+        return
+    fi
+
+    printf 'wake:\n'
+    printf '  status: scheduled\n'
+    printf '  count: %s\n' "$n"
+    printf 'wake_jobs[%s]{source,job}:\n' "$n"
+    local src job e
+    for e in "${entries[@]}"; do
+        src="${e%%	*}"; job="${e#*	}"
+        printf '  %s,%s\n' "$(toon_val "$src")" "$(toon_val "$job")"
+    done
+}
+
+# --- arg parsing ----------------------------------------------------------
+want_pool=0 want_gate=0 want_crew=0 want_wake=0 any=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --pool) want_pool=1; any=1 ;;
+        --gate) want_gate=1; any=1 ;;
+        --crew) want_crew=1; any=1 ;;
+        --wake) want_wake=1; any=1 ;;
+        -h|--help) print_help; exit 0 ;;
+        --) shift; break ;;
+        -*)
+            printf 'error: unknown flag: %s\n' "$1"
+            printf 'help: kun-status [--pool] [--gate] [--crew] [--wake] | --help\n'
+            exit 2 ;;
+        *)
+            printf 'error: unexpected argument: %s\n' "$1"
+            printf 'help: kun-status [--pool] [--gate] [--crew] [--wake] | --help\n'
+            exit 2 ;;
+    esac
+    shift
+done
+
+# Default = all sections.
+if [[ $any -eq 0 ]]; then
+    want_pool=1 want_gate=1 want_crew=1 want_wake=1
+fi
+
+# --- home view header (identity, per AXI §10) -----------------------------
+printf 'bin: %s\n' "$(self_path)"
+printf 'description: %s\n' "$DESC"
+
+[[ $want_pool -eq 1 ]] && section_pool
+[[ $want_gate -eq 1 ]] && section_gate
+[[ $want_crew -eq 1 ]] && section_crew
+[[ $want_wake -eq 1 ]] && section_wake
+
+exit 0
