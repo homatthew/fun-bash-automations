@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..85"
+echo "1..90"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -363,6 +363,31 @@ echo "ok 59b - fun-bash-automations bare git push is blocked despite direct-push
 fba_main_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin HEAD:main")
 expect_contains "$fba_main_push_block" "pushing directly to origin/main is not allowed"
 echo "ok 60 - fun-bash-automations main push remains blocked"
+
+# Shell redirections must not confuse push-target parsing (regression: shlex
+# split "2>&1" into extra tokens that were counted as refspecs -> false
+# "bare push" block).
+fba_push_redir_allow=$(run_guard_with_workdir "$fba_repo" "git push origin mho/x 2>&1")
+[[ -z "$fba_push_redir_allow" ]] || fail "expected feature push with 2>&1 to be allowed, got: $fba_push_redir_allow"
+echo "ok 60b - git push of a feature branch with 2>&1 redirect is allowed"
+
+fba_push_redir_pipe_allow=$(run_guard_with_workdir "$fba_repo" "git push origin mho/x 2>&1 | tail -5")
+[[ -z "$fba_push_redir_pipe_allow" ]] || fail "expected feature push with 2>&1 | tail to be allowed, got: $fba_push_redir_pipe_allow"
+echo "ok 60c - git push of a feature branch with 2>&1 | tail is allowed"
+
+fba_main_redir_block=$(run_guard_with_workdir "$fba_repo" "git push origin main 2>&1")
+expect_contains "$fba_main_redir_block" "pushing directly to origin/main is not allowed"
+echo "ok 60d - git push origin main 2>&1 stays blocked (redirect stripped, not a bypass)"
+
+# Multi-line scripts: a git push on its own line must be isolated (regression:
+# newline-separated statements merged into one segment -> false 'bare push').
+fba_multiline_feature=$(run_guard_with_workdir "$fba_repo" $'echo prep\ngit push origin mho/x')
+[[ -z "$fba_multiline_feature" ]] || fail "expected multi-line feature push to be allowed, got: $fba_multiline_feature"
+echo "ok 60e - git push on its own line in a multi-line script is allowed"
+
+fba_multiline_main=$(run_guard_with_workdir "$fba_repo" $'echo prep\ngit push origin main')
+expect_contains "$fba_multiline_main" "pushing directly to origin/main is not allowed"
+echo "ok 60f - git push origin main on its own line in a multi-line script stays blocked"
 
 fake_bin="$TEST_TMP/fake-bin"
 mkdir -p "$fake_bin"
