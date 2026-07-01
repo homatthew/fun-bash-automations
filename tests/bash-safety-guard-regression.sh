@@ -486,17 +486,16 @@ echo "ok 74 - git commit --amend is allowed on a resolved yolo branch"
 feature_amend_repo="$TEST_TMP/feature-amend-repo"
 git init -q "$feature_amend_repo"
 git -C "$feature_amend_repo" checkout -q -b mho/feature-amend
-feature_amend_block=$(run_guard_with_parameters_workdir "$feature_amend_repo" "git commit --amend --no-edit")
-expect_contains "$feature_amend_block" "git commit --amend modifies previous commit"
-echo "ok 75 - git commit --amend stays blocked on non-yolo branches"
+feature_amend_allow=$(run_guard_with_parameters_workdir "$feature_amend_repo" "git commit --amend --no-edit")
+[[ -z "$feature_amend_allow" ]] || fail "expected git commit --amend on a feature branch to be allowed, got: $feature_amend_allow"
+echo "ok 75 - git commit --amend is allowed on feature branches"
 
-jq '.yolo_branches.enabled = false' "$ROOT/llm/agent-push-policy.json" >"$TEST_TMP/yolo-disabled-policy.json"
-yolo_amend_disabled=$(
-  export PG_AGENT_PUSH_POLICY="$TEST_TMP/yolo-disabled-policy.json"
-  run_guard_with_parameters_workdir "$yolo_amend_repo" "git commit --amend --no-edit"
-)
-expect_contains "$yolo_amend_disabled" "git commit --amend modifies previous commit"
-echo "ok 76 - yolo amend exemption fails closed when yolo_branches.enabled=false"
+main_amend_repo="$TEST_TMP/main-amend-repo"
+git init -q "$main_amend_repo"
+git -C "$main_amend_repo" checkout -q -b main
+main_amend_block=$(run_guard_with_parameters_workdir "$main_amend_repo" "git commit --amend --no-edit")
+expect_contains "$main_amend_block" "git commit --amend is not allowed on protected branches"
+echo "ok 76 - git commit --amend stays blocked on protected branches"
 
 base_branch_delete_block=$(run_guard "git branch -D main")
 expect_contains "$base_branch_delete_block" "force-deletes a branch"

@@ -163,6 +163,19 @@ Details live in `llm/command-guard-policy.md`.
 - If Sourcegraph MCP returns `502`, especially `downstream` or
   `ngp-mcp-sourcegraph`, treat it as likely auth expiry. Ask the user to open
   `http://go/authorize-sourcegraph`, then retry the Sourcegraph query.
+- Lavish (`lavish-axi`) runs ONE shared local server and watches each artifact
+  file (chokidar) to auto-reload the browser; there is no flag to disable the
+  watcher. To avoid disruptive reloads, lost annotations, and an EventEmitter
+  listener leak:
+  - Open a session once. Do NOT re-run `lavish-axi <file>` to push updates —
+    editing the file already triggers a reload. Repeated re-opens leak
+    `reload`/`agent-reply`/`agent-presence` listeners and trip Node's 10-listener
+    cap (`MaxListenersExceededWarning`).
+  - Don't edit the artifact while the user is actively annotating; batch edits
+    between review rounds so a reload can't drop in-progress (unsent) annotations.
+  - For heavy multi-agent use, raise the cap once via
+    `~/.lavish-axi/raise-listeners.cjs` + `NODE_OPTIONS=--require ...` on the
+    server (see the `reference-lavish-max-listeners` memory).
 
 ## Shared Skills
 

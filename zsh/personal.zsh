@@ -316,6 +316,39 @@ alias grbc='git rebase --continue'
 alias rbi='git rebase -i master'
 alias squash='rbi && gca'
 
+if [[ -n "$ZSH_VERSION" ]]; then
+    typeset -ga _fba_pending_compdefs
+
+    _fba_register_pending_compdefs() {
+        emulate -L zsh
+        (( $+functions[compdef] )) || return 1
+
+        local spec
+        for spec in "${_fba_pending_compdefs[@]}"; do
+            eval "compdef $spec"
+        done
+        _fba_pending_compdefs=()
+
+        if (( $+functions[add-zsh-hook] )); then
+            add-zsh-hook -d precmd _fba_register_pending_compdefs 2>/dev/null || true
+        fi
+    }
+
+    _fba_compdef() {
+        emulate -L zsh
+        if (( $+functions[compdef] )); then
+            compdef "$@"
+            return
+        fi
+
+        _fba_pending_compdefs+=("${(j: :)${(q)@}}")
+        autoload -Uz add-zsh-hook
+        if (( ! ${precmd_functions[(I)_fba_register_pending_compdefs]} )); then
+            add-zsh-hook precmd _fba_register_pending_compdefs
+        fi
+    }
+fi
+
 # rp - repository navigation (source function, then load completion)
 [ -f "$FBA_ROOT/rp/rp.sh" ] && source "$FBA_ROOT/rp/rp.sh"
 [ -f "$FBA_ROOT/rp/rp-completion.sh" ] && source "$FBA_ROOT/rp/rp-completion.sh"
@@ -744,33 +777,125 @@ bdc() {
 # ==============================================================================
 # Multi-Repo Project Bootstrap
 # ==============================================================================
-# A "project" is a folder under ~/proj/<name>/ holding one git worktree per repo,
-# each cut from the repo's clone in ~/repos/. Worktree branches are mho/<name>.
+# A "project" is a folder under ${PROJECTS_DIR:-~/proj}/<name>/ holding one git
+# worktree per repo, each cut from the repo's clone in ~/repos/. Worktree
+# branches are mho/<name>.
 
-# proj: Bootstrap a multi-repo project as git worktrees under ~/proj/<name>.
-# Usage:   proj <project-name> <repo> [<repo> ...]
-# Example: proj kv-billing antigravity-odsmeta antigravity-dabp
-# Each <repo> must already be cloned at ~/repos/<repo>. Adds a worktree at
-# ~/proj/<name>/<repo> on a fresh branch mho/<name> cut from origin's default
-# branch (fetched first). Missing clones abort with a /bootstrap-proj hint.
-proj() {
+_proj_root() {
     emulate -L zsh
-    local name="$1"; shift 2>/dev/null
-    if [[ -z "$name" || $# -eq 0 ]]; then
-        echo "Usage: proj <project-name> <repo> [<repo> ...]"
-        echo "  Creates ~/proj/<name>/ with a worktree of each repo on branch mho/<name>."
+    print -r -- "${PROJECTS_DIR:-$HOME/proj}"
+}
+
+_proj_repos_root() {
+    emulate -L zsh
+    print -r -- "${REPOS_DIR:-$HOME/repos}"
+}
+
+projl() {
+    emulate -L zsh
+    local root="$(_proj_root)"
+    if [[ ! -d "$root" ]]; then
+        echo "projl: no projects directory at $root" >&2
         return 1
     fi
 
-    local proj_dir="$HOME/proj/$name" branch="mho/$name" repo missing=()
+    local -a projects repos
+    projects=("$root"/*(/N:t))
+    if (( ${#projects[@]} == 0 )); then
+        echo "projl: no projects under $root"
+        return 0
+    fi
+
+    local name dir
+    for name in "${projects[@]}"; do
+        dir="$root/$name"
+        repos=("$dir"/*(/N))
+        printf "%-28s %2d repos  %s\n" "$name" "${#repos[@]}" "$dir"
+    done
+}
+
+_proj_usage() {
+    echo "Usage:"
+    echo "  proj                         select an existing project with fzf, or list projects"
+    echo "  proj -l|--list               list existing projects"
+    echo "  proj <project-name>          switch to an existing project"
+    echo "  proj <project-name> <repo>   create project worktrees from ${REPOS_DIR:-~/repos}/<repo>"
+}
+
+_proj_summary() {
+    emulate -L zsh
+    local proj_dir="$1" child repo branch dirty
+    echo "proj: $(basename "$proj_dir") -> $proj_dir"
+
+    local -a children
+    children=("$proj_dir"/*(/N))
+    for child in "${children[@]}"; do
+        git -C "$child" rev-parse --git-dir >/dev/null 2>&1 || continue
+        repo="$(basename "$child")"
+        branch="$(git -C "$child" branch --show-current 2>/dev/null)"
+        [[ -n "$branch" ]] || branch="detached"
+        dirty="$(git -C "$child" status --short 2>/dev/null | wc -l | tr -d ' ')"
+        if [[ "$dirty" == "0" ]]; then
+            printf "  %-28s %-24s clean\n" "$repo" "$branch"
+        else
+            printf "  %-28s %-24s %s changes\n" "$repo" "$branch" "$dirty"
+        fi
+    done
+}
+
+# proj: switch to, list, or bootstrap multi-repo projects.
+proj() {
+    emulate -L zsh
+    local name="$1"; shift 2>/dev/null
+
+    local root="$(_proj_root)"
+    if [[ -z "$name" ]]; then
+        if [[ -d "$root" ]] && command -v fzf >/dev/null 2>&1; then
+            local -a projects
+            projects=("$root"/*(/N:t))
+            if (( ${#projects[@]} )); then
+                name="$(printf "%s\n" "${projects[@]}" | fzf --prompt="proj> ")"
+                [[ -n "$name" ]] || return 1
+                cd "$root/$name" || return 1
+                _proj_summary "$root/$name"
+                return 0
+            fi
+        fi
+
+        _proj_usage
+        projl 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ "$name" == "-l" || "$name" == "--list" ]]; then
+        projl
+        return $?
+    fi
+
+    local proj_dir="$root/$name"
+    if (( $# == 0 )); then
+        if [[ -d "$proj_dir" ]]; then
+            cd "$proj_dir" || return 1
+            _proj_summary "$proj_dir"
+            return 0
+        fi
+
+        echo "proj: no project at $proj_dir" >&2
+        echo "proj: create it with: proj $name <repo> [<repo> ...]" >&2
+        return 1
+    fi
+
+    local branch="mho/$name" repo missing=()
+
+    local repos_root="$(_proj_repos_root)"
 
     # Validate all clones exist before touching anything.
     for repo in "$@"; do
-        git -C "$HOME/repos/$repo" rev-parse --git-dir >/dev/null 2>&1 || missing+=("$repo")
+        git -C "$repos_root/$repo" rev-parse --git-dir >/dev/null 2>&1 || missing+=("$repo")
     done
     if (( ${#missing[@]} )); then
-        echo "proj: no clone at ~/repos/ for: ${missing[*]}" >&2
-        echo "proj: clone them, or ask Claude (/bootstrap-proj) to resolve + clone." >&2
+        echo "proj: no clone at $repos_root for: ${missing[*]}" >&2
+        echo "proj: clone them before creating project worktrees." >&2
         return 1
     fi
 
@@ -778,7 +903,7 @@ proj() {
     mkdir -p "$proj_dir" || return 1
 
     for repo in "$@"; do
-        local src="$HOME/repos/$repo" dst="$proj_dir/$repo" ref
+        local src="$repos_root/$repo" dst="$proj_dir/$repo" ref
         git -C "$src" fetch --quiet origin || { echo "proj: fetch failed: $repo" >&2; return 1; }
         git -C "$src" remote set-head origin --auto >/dev/null 2>&1
         ref=$(git -C "$src" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
@@ -791,6 +916,95 @@ proj() {
     echo "proj: ready -> $proj_dir"
     cd "$proj_dir"
 }
+
+if [[ -n "$ZSH_VERSION" ]]; then
+    _proj_describe_projects() {
+        emulate -L zsh
+        local root="$(_proj_root)" name dir child repo_count dirty_count dirty desc
+        local -a projects
+
+        [[ -d "$root" ]] || return 1
+        for dir in "$root"/*(/N); do
+            name="${dir:t}"
+            repo_count=0
+            dirty_count=0
+            for child in "$dir"/*(/N); do
+                (( repo_count++ ))
+                git -C "$child" rev-parse --git-dir >/dev/null 2>&1 || continue
+                dirty="$(git -C "$child" status --short 2>/dev/null)"
+                [[ -n "$dirty" ]] && (( dirty_count++ ))
+            done
+
+            desc="$repo_count repos"
+            if (( dirty_count )); then
+                desc+=", $dirty_count dirty"
+            else
+                desc+=", clean"
+            fi
+            projects+=("$name:$desc")
+        done
+
+        (( ${#projects[@]} )) || return 1
+        _describe -t projects 'projects' projects
+    }
+
+    _proj_describe_source_repos() {
+        emulate -L zsh
+        local repos_root="$(_proj_repos_root)" dir repo branch dirty desc
+        local -a repos
+
+        [[ -d "$repos_root" ]] || return 1
+        for dir in "$repos_root"/*(/N); do
+            repo="${dir:t}"
+            desc="repo clone"
+            if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+                branch="$(git -C "$dir" branch --show-current 2>/dev/null)"
+                [[ -n "$branch" ]] || branch="detached"
+                dirty="$(git -C "$dir" status --short 2>/dev/null | wc -l | tr -d ' ')"
+                if [[ "$dirty" == "0" ]]; then
+                    desc="$branch, clean"
+                else
+                    desc="$branch, $dirty changes"
+                fi
+            fi
+            repos+=("$repo:$desc")
+        done
+
+        (( ${#repos[@]} )) || return 1
+        _describe -t repositories 'repo clones' repos
+    }
+
+    _proj_completion() {
+        local -a options
+        options=(
+            '-l:list existing projects'
+            '--list:list existing projects'
+        )
+
+        if (( CURRENT == 2 )); then
+            _describe -t options 'options' options
+            _proj_describe_projects
+            return
+        fi
+
+        if (( CURRENT >= 3 )); then
+            case "${words[2]}" in
+                -l|--list)
+                    return
+                    ;;
+            esac
+
+            if [[ -d "$(_proj_root)/${words[2]}" ]]; then
+                _message -e project-state "project exists; run 'proj ${words[2]}' to switch"
+                return
+            fi
+
+            _proj_describe_source_repos
+        fi
+    }
+
+    _fba_compdef _proj_completion proj
+fi
 
 # ==============================================================================
 # Functions
