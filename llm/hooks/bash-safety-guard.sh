@@ -353,6 +353,12 @@ git_branch_force_delete_targets() {
 import re, shlex, sys
 
 command = sys.argv[1]
+# Treat newlines as statement separators so a `git push` on its own line in a
+# multi-line script is isolated. shlex(whitespace_split) otherwise consumes
+# newlines as plain whitespace, merging statements into one segment and hiding
+# the push (which then reads as a bare push). Newlines inside quotes stay part
+# of their quoted token, so this only splits real statement boundaries.
+command = command.replace("\n", " ; ")
 try:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -449,6 +455,12 @@ import shlex
 import sys
 
 command = sys.argv[1]
+# Treat newlines as statement separators so a `git push` on its own line in a
+# multi-line script is isolated. shlex(whitespace_split) otherwise consumes
+# newlines as plain whitespace, merging statements into one segment and hiding
+# the push (which then reads as a bare push). Newlines inside quotes stay part
+# of their quoted token, so this only splits real statement boundaries.
+command = command.replace("\n", " ; ")
 try:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -506,6 +518,20 @@ if len(push_args) > 1:
     sys.exit(0)
 
 args = push_args[0]
+
+# Strip shell redirections (e.g. "2>&1", ">", "2>file", "<in", trailing "&")
+# that shlex splits into tokens; they are not push refspecs. Truncate the args
+# at the first redirection/background operator, dropping a leading file
+# descriptor number (the "2" in "2 >& 1").
+def _redir_start(toks):
+    for i, t in enumerate(toks):
+        if "<" in t or ">" in t or t == "&":
+            if i > 0 and re.fullmatch(r"\d+", toks[i - 1]):
+                return i - 1
+            return i
+    return len(toks)
+
+args = args[:_redir_start(args)]
 remote = None
 refspecs = []
 skip_next = False
