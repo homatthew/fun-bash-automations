@@ -139,4 +139,26 @@ if [ "${#FAILED[@]}" -gt 0 ]; then
   warn "required tools failed: ${FAILED[*]}"
   exit 1
 fi
+# Set the sanctioned no-mistakes default agent (codex — markedly faster than
+# claude for the gate steps; deep review still uses the dual code-review skill).
+# Only converts the "auto" default (or a missing config); an explicit non-codex
+# choice is left alone. Idempotent + portable (no sed -i).
+configure_no_mistakes_agent() {
+  local cfg="$HOME/.no-mistakes/config.yaml" want="codex" current
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  mkdir -p "$HOME/.no-mistakes"
+  if [ -f "$cfg" ] && grep -qE '^agent:' "$cfg"; then
+    current=$(grep -m1 -E '^agent:' "$cfg" | sed -E 's/^agent:[[:space:]]*//; s/[[:space:]]*$//')
+    if [ "$current" = "auto" ] || [ -z "$current" ]; then
+      awk -v a="$want" '/^agent:/{print "agent: " a; next} {print}' "$cfg" > "$cfg.tmp" \
+        && mv "$cfg.tmp" "$cfg" && log "no-mistakes default agent: auto -> $want"
+    else
+      log "no-mistakes agent left as '$current' (explicit choice)"
+    fi
+  else
+    printf 'agent: %s\n' "$want" >> "$cfg" && log "no-mistakes default agent -> $want"
+  fi
+}
+configure_no_mistakes_agent
+
 log "kun-stack install complete (drive_bootstrap=false: run treehouse init / no-mistakes init per-repo as needed)"

@@ -52,5 +52,9 @@ no-mistakes axi abort    # cancel the active run
   do not hand-roll `git push` + `gh pr create`.
 - Pipeline stages are configured in `.no-mistakes.yaml` (sanctioned baseline at
   the FBA repo root; stage reference in `llm/no-mistakes-stages.md`).
+- Default gate agent is **codex** (chosen for speed; set globally in
+  `~/.no-mistakes/config.yaml`, seeded by `kun-stack-install`). Deep review still
+  uses the dual Claude+Codex `code-review` skill. Override per-repo with `agent:`
+  in `.no-mistakes.yaml`.
 - If a step fails, fix and `rerun` — do **not** `--skip` a real failure to fake a
   green run.
