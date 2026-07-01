@@ -247,6 +247,12 @@ current_branch_is_yolo() {
   is_yolo_branch_token "$branch"
 }
 
+current_branch_is_protected() {
+  local branch
+  branch=$(git_context symbolic-ref --quiet --short HEAD 2>/dev/null || git_context branch --show-current 2>/dev/null || true)
+  [[ "$branch" == "main" || "$branch" == "master" ]]
+}
+
 has_git_commit_amend_command() {
   python3 - "$COMMAND" <<'PY'
 import re
@@ -1762,8 +1768,8 @@ PY
   [[ -n "$git_config_block" ]] && deny "$git_config_block"
   echo "$COMMAND" | grep -qE -- '--no-verify' &&
     deny "Blocked: --no-verify bypasses safety hooks."
-  if has_git_commit_amend_command && ! current_branch_is_yolo; then
-    deny "Blocked: git commit --amend modifies previous commit."
+  if has_git_commit_amend_command && current_branch_is_protected; then
+    deny "Blocked: git commit --amend is not allowed on protected branches."
   fi
   echo "$COMMAND" | grep -qE 'commit\.gpgsign=false' &&
     deny "Blocked: disabling GPG signing is not allowed."
@@ -1964,6 +1970,22 @@ run_guard_extensions() {
     done
   done < <(guard_extension_dirs)
 }
+
+# --- Trusted dev-workspace bypass (scoped to *.work ssh) ---
+# An ssh invocation whose target host ends in ".work" runs its command on a
+# sandboxed Netflix dev workspace, not on this machine, so the content guards
+# below (rm/kill/eval/wrappers/sensitive-command lease/etc.) do not apply. The
+# host lease (ssh-gate) is still required. Intentionally loosened for hands-on
+# dev-workspace bring-up; delete this block to restore full guarding.
+_dotwork_target=$(extract_ssh_target)
+case "$_dotwork_target" in
+  *.work)
+    if has_valid_ssh_lease "$_dotwork_target"; then
+      exit 0
+    fi
+    deny "Blocked: ssh to '$_dotwork_target' requires a lease. Ask the user to run: ssh-gate $_dotwork_target"
+    ;;
+esac
 
 # --- Run all checks ---
 check_git_force

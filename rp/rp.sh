@@ -7,9 +7,9 @@
 #   rp list                - list all repos
 #   rp archived            - list archived repos
 
-_rp_home="/Users/matthewho"
-_rp_repos="$_rp_home/repos"
-_rp_archive="$_rp_home/repos-archive"
+_rp_home="${HOME}"
+_rp_repos="${REPOS_DIR:-$_rp_home/repos}"
+_rp_archive="${REPOS_ARCHIVE_DIR:-$_rp_home/repos-archive}"
 
 _rp_error() {
     echo "rp: $1" >&2
