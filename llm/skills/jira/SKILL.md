@@ -48,6 +48,7 @@ echo "YOUR_API_TOKEN" | acli jira auth login --token --email your-email@netflix.
 | Update comment (ADF) | `acli jira workitem comment update --key PROJ-123 --id 12345 --body-adf comment.json` |
 | List comments | `acli jira workitem comment list --key PROJ-123 --json` |
 | Assign issue | `acli jira workitem assign --key PROJ-123 --assignee "username"` |
+| Link issues | `acli jira workitem link create --out PROJ-123 --in PROJ-456 --type Relates --yes` |
 | Transition | `acli jira workitem transition --key PROJ-123 --status "Done"` |
 | Edit issue | `acli jira workitem edit --key PROJ-123 --summary "New title"` |
 | List projects | `acli jira project list` |
@@ -69,6 +70,11 @@ acli jira workitem create --project PROJ --type Task --summary "Title" \
   --description "Description"
 ```
 
+For ODS-style tickets, inspect nearby examples before adding labels. Keep labels
+minimal; common ODS labels include quarter labels such as `2026-Q2`, domain
+labels such as `KeyValue`, and one or two work-type labels such as `dgw-kv` or
+`capacity-planning`.
+
 ### Search Issues
 
 ```bash
@@ -84,6 +90,19 @@ acli jira workitem transition --key PROJ-123 --status "Done"              # Tran
 acli jira workitem assign --key PROJ-123 --assignee "user@netflix.com"    # Assign to user
 acli jira workitem edit --key PROJ-123 --summary "Updated title"          # Edit fields
 ```
+
+### Link Issues
+
+Use issue links when splitting related work:
+
+```bash
+acli jira workitem link type --json
+acli jira workitem link create --out PROJ-123 --in PROJ-456 --type Relates --yes
+acli jira workitem link list --key PROJ-123 --json
+```
+
+`acli jira workitem link create` does **not** support `--json`; verify with
+`link list --json` after creation.
 
 ### Comment Operations
 

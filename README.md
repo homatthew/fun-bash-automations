@@ -68,6 +68,27 @@ Do not use this repository as the final MacBook install if the private
 `setupPermissions.sh` remains a legacy local bootstrap script. Prefer the
 `dotfiles` install guide for current machine setup.
 
+## Project Worktrees
+
+The shared zsh layer includes a generic `proj` helper for switching between
+multi-repo worktree projects:
+
+```bash
+proj                         # select an existing project with fzf, or list them
+proj --list                  # list existing projects
+proj my-project              # cd to ${PROJECTS_DIR:-~/proj}/my-project
+proj my-project api worker   # create worktrees from ~/repos/api and ~/repos/worker
+```
+
+Set `PROJECTS_DIR` to move project folders somewhere other than `~/proj`.
+Set `REPOS_DIR` if your source clones live somewhere other than `~/repos`.
+Zsh completion for `proj` shows existing projects with repo counts and source
+repo candidates with branch/dirty status. The `rp` completion uses the same
+`REPOS_DIR` source and shows command, repository, and archived-repository
+candidates with descriptions.
+Private repo discovery, internal clone URLs, and workspace-specific bootstrap
+logic belong in the `dotfiles` overlay.
+
 ## Contribution Guide
 
 1. Put reusable behavior in this repository first.

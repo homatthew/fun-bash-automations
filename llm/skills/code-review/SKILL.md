@@ -252,6 +252,9 @@ Review this code for:
 4. **Assumptions**: List every assumption the code makes. What breaks if each is wrong?
 5. **Magic values**: Flag any literals/defaults without justification
 6. **Simplicity**: Could this be done with less code? Unnecessary indirection?
+   Watch especially for validations that enforce one business invariant but are
+   scattered across generic control flow; prefer one named policy/validation
+   helper that owns the invariant and its failure modes.
 7. **Hidden state machines**: Flag nested helpers or closures that combine lazy loading, caching, sentinel flags, `nonlocal` mutation, and swallowed failures. Prefer an explicit state object, clear return contract, or simpler phase ordering.
 8. **Silent failures**: What could break elsewhere with no test failing?
 9. **Unrelated diff churn**: Flag cosmetic edits to code the change didn't need to touch — dropped/reworded docstrings or comments that still applied, conditionals reflowed with identical behavior (e.g. `if/else` → ternary), casing-only changes, or local-variable renames. Each looks harmless but together they bury the real change and risk silent regressions; they belong in a separate cleanup commit, not this one.
@@ -462,8 +465,13 @@ Which findings should I fix? (e.g., "1,3" or "all" or "none")
 
 After user selects findings to fix:
 - Implement fixes one at a time using the Minimal-Diff Fix Protocol below
+- Apply the Simplification heuristics and (for any test finding) the Test
+  compression rubric below
 - Run tests after each fix
 - Report results
+
+If the diff is large, also produce a reviewer's guide per the Large-PR review
+aids below and offer to post it as a PR comment.
 
 ## Minimal-Diff Fix Protocol
 
@@ -485,6 +493,78 @@ that fixes the selected finding.
    radius justifies it.
 8. If multiple fixes touch the same area, combine them only when that reduces
    review complexity. Otherwise keep them separate and explain the boundary.
+
+## Simplification heuristics
+
+Apply to the code *under change* (consistent with the Minimal-Diff Fix Protocol —
+do not sprawl into untouched code), and flag violations in review dimension #6.
+Bias toward less code that reads like its surroundings.
+
+- **Fewer helper methods.** Inline a single-use, one-line wrapper. Collapse a
+  chain of thin helpers that each just forward to the next. A helper earns its
+  place only if it removes real duplication or names a non-obvious step.
+- **A new class must earn its keep.** Justify a type by behavior or by removing
+  repeated multi-argument threading (a window/config bundle passed through ~10
+  functions beats threading 4 args everywhere). A pure data bag passed once is
+  not worth a class — inline it. If the type already exists, fold related free
+  helpers into it as named constructors/methods instead of leaving parallel
+  module-level functions.
+- **Delete dead branches.** A code path no caller exercises (e.g. a generic
+  resolver branch when every call site passes one form) is dead — remove it,
+  don't keep it "for generality."
+- **Dedup repeated incantations.** A default re-spelled at every call site
+  (`now=datetime.now(UTC)` at 9 callers) → default it once inside the
+  constructor/helper; pass the explicit value only where it must be shared.
+- **Prove behavior is identical.** Re-run the existing suite; for value-producing
+  changes, spot-check that outputs are byte-identical before/after.
+
+## Test compression rubric
+
+The "Test compression" mandatory finding is not a vibe — produce it with this
+method, and apply it when the user asks to compress tests. **Hard rule: no
+coverage loss.** Every behavior asserted before must still be asserted after.
+
+1. **Map first.** One line per test: `test_name → behavior it locks`. The map is
+   itself a deliverable for large suites (it compresses the *cognitive* cost of
+   reading 1k+ test lines) and exposes duplication.
+2. **Cut strict subsets.** A test exercising the same path as another, differing
+   only in an incidental parameter (a different enum, account, or source key that
+   routes through identical code), is redundant — remove it. (e.g. an "empty
+   result" test for `max_disk` when the `cpu` fetcher test already covers the
+   empty-`SignalResult` path.)
+3. **Parametrize near-duplicates.** Two+ tests with identical setup differing
+   only in input/expected → one `@pytest.mark.parametrize`. (e.g. separate 404
+   and 424 error-path tests sharing a 4-mock setup → one parametrized test.)
+4. **Prune fixtures, not coverage.** Shrink verbose builders, share helpers, drop
+   assertions duplicated elsewhere — but never drop the one test that locks a
+   stated requirement/defect.
+5. **Keep happy path + realistic unhappy paths; cut hypothetical edge cases**
+   that can't occur given the input contract.
+6. **Verify.** Re-run the full suite; confirm green and that the line delta came
+   from duplication, not lost assertions. Report `N lines → M lines` and what was
+   removed/merged.
+
+## Large-PR review aids
+
+When a PR is large (~1k+ changed lines) or adds a new service plus its tests,
+produce a reviewer's guide (post it as a PR comment) so review is navigable, not
+linear:
+
+- **Size triage.** Split the diff into source / tests / dep-lock; name the few
+  files that need a deep read vs. the bulk that's deletion, generated, or
+  mechanical. Squashing never changes net diff size — say so if asked.
+- **Review order: lowest-context → highest-weight.** deps/lock (skim) → the
+  HTTP/contract layer (frames what the core must provide) → the core logic read
+  as a *new file*, top-down → "logic extracted" deletions (confirm nothing was
+  silently dropped) → supporting wiring.
+- **Requirement/defect-driven verification.** For each stated goal or fixed
+  defect, give three anchors: the fix, the test that locks it, and (when
+  feasible) live/e2e evidence — not just that a mocked unit test passes.
+- **Test map.** One line per test (see the Test compression rubric) so coverage
+  is visible at a glance.
+- **Scrutinize-hardest callouts.** Name the highest-risk spots explicitly:
+  cache-key semantics, aggregation/percentile math, deletions in "move logic to
+  a service" refactors, and anything with silent fallbacks.
 
 ## Anti-Rationalization Rules
 
