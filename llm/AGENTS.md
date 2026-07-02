@@ -126,13 +126,15 @@ For parallel agents on the same repository, treehouse worktrees are necessary
 but not sufficient: each concurrent no-mistakes run must also have its own
 `NM_HOME` before `no-mistakes init`, `no-mistakes axi run`, or `/no-mistakes`.
 `NM_HOME` is the isolation boundary for no-mistakes state, socket, gate repos,
-database, and daemon. firstmate sets a per-worktree `NM_HOME` for crewmates and
+database, and daemon, and `nm-home --activate` writes the `no-mistakes` git
+remote into worktree-local config so concurrent worktrees do not race on a
+shared gate remote. firstmate sets a per-worktree `NM_HOME` for crewmates and
 records it as `nm_home=` in task metadata; manual treehouse shells are
 auto-scoped by the zsh hook under `~/.treehouse`, or can be made explicit with
-`eval "$(nm-home --for "$PWD" --mkdir --export)"`. Do not unset a crewmate's
-inherited `NM_HOME`. Also keep branch names unique per concurrent task: separate
-homes isolate local gate state, but the remote branch and PR namespace are still
-shared by the git host.
+`eval "$(nm-home --for "$PWD" --mkdir --activate --export)"`. Do not unset a
+crewmate's inherited `NM_HOME`. Also keep branch names unique per concurrent
+task: separate homes isolate local gate state, but the remote branch and PR
+namespace are still shared by the git host.
 
 Never bypass the gate or the guard. Do not suggest, run, or document
 `--no-verify`, piping `yes` / `echo y` into a prompt, `no-mistakes --skip <step>`

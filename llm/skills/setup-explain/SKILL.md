@@ -32,8 +32,9 @@ the PR**. Everything between those is automated.
    first mate as captain. It spawns crewmates in tmux windows, each in its own
    **treehouse** worktree, supervises them, and ships each through the same
    no-mistakes policy. For parallel gate runs, firstmate gives every crewmate a
-   per-worktree `NM_HOME`, so no-mistakes state/socket/gate-repos/database/daemon
-   data stays isolated even when tasks target the same repo.
+   per-worktree `NM_HOME`, and activates the worktree-local `no-mistakes`
+   remote, so no-mistakes state/socket/gate-repos/database/daemon data stays
+   isolated even when tasks target the same repo.
 4. **One deep/long objective → `gnhf`.** For "keep going until X" work; always
    bound it (`--max-iterations` / `--max-tokens`). Per-repo tuning via a
    committed `.gnhf.yml` + `gnhf-here`.
@@ -70,7 +71,7 @@ gnhf "objective" --max-iterations N     bounded long-run loop
 treehouse get [--lease]   acquire an isolated worktree
 no-mistakes / no-mistakes axi run        run the gate
 nm-ghes-pr                legacy fallback if GHES PR creation is skipped
-eval "$(nm-home --for "$PWD" --mkdir --export)"    explicit per-worktree NM_HOME for manual gates
+eval "$(nm-home --for "$PWD" --mkdir --activate --export)"    explicit per-worktree NM_HOME + gate remote for manual gates
 kun-status                one-glance TOON status of the stack
 bd ready                  your task queue (source of truth)
 bd-firstmate-bridge       project bd ready -> firstmate backlog (one-way)

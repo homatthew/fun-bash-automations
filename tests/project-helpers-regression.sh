@@ -49,10 +49,19 @@ nm_home_created="$("$ROOT/bin/nm-home" --for "$TMP_HOME/.treehouse/worktrees/dem
 [[ "$nm_home_created" == "$nm_home_one" ]]
 grep -qx 'agent: codex' "$nm_home_created/config.yaml"
 
+nm_home_activated="$("$ROOT/bin/nm-home" --for "$TMP_HOME/.treehouse/worktrees/demo" --activate)"
+[[ "$nm_home_activated" == "$nm_home_one" ]]
+[[ "$(git -C "$TMP_HOME/.treehouse/worktrees/demo" config --get extensions.worktreeConfig)" == "true" ]]
+nm_remote="$(git -C "$TMP_HOME/.treehouse/worktrees/demo" config --worktree --get remote.no-mistakes.url)"
+[[ "$nm_remote" == "$nm_home_created/repos/"*".git" ]]
+[[ "$(git -C "$TMP_HOME/.treehouse/worktrees/demo" config --worktree --get remote.no-mistakes.fetch)" == "+refs/heads/*:refs/remotes/no-mistakes/*" ]]
+
 treehouse_nm_output="$(zsh -fc "$source_personal; cd '$TMP_HOME/.treehouse/worktrees/demo'; print -- \${NM_HOME:t}; print -- \${NM_HOME_AUTO:-}")"
 [[ "$treehouse_nm_output" == *$'\n'"1" ]]
 [[ "$treehouse_nm_output" == *"demo-"* ]]
 grep -qx 'agent: codex' "$nm_home_created/config.yaml"
+treehouse_nm_remote="$(git -C "$TMP_HOME/.treehouse/worktrees/demo" config --worktree --get remote.no-mistakes.url)"
+[[ "$treehouse_nm_remote" == "$nm_home_created/repos/"*".git" ]]
 
 outside_nm_output="$(zsh -fc "$source_personal; cd '$TMP_HOME/outside-repo'; print -- \${NM_HOME:-unset}; print -- \${NM_HOME_AUTO:-unset}")"
 [[ "$outside_nm_output" == *$'\n'"unset"$'\n'"unset" ]]

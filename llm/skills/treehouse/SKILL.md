@@ -41,12 +41,13 @@ treehouse destroy              # remove worktrees from the pool
   `treehouse get --lease` when a script/agent needs the path without a subshell.
 - **no-mistakes isolation**: `nm-home` derives a stable `NM_HOME` from a
   worktree path. The shell hook auto-scopes manual shells inside `~/.treehouse`,
-  and firstmate sets `NM_HOME` explicitly for crewmates.
+  activates the worktree-local `no-mistakes` git remote, and firstmate sets
+  `NM_HOME` explicitly for crewmates.
 - **Important**: a separate worktree alone does not isolate no-mistakes. Before
   manually running `no-mistakes init`, `/no-mistakes`, or
   `no-mistakes axi run` in a worktree, confirm `echo "$NM_HOME"` matches
   `nm-home --for "$PWD"` or set it with
-  `eval "$(nm-home --for "$PWD" --mkdir --export)"`.
+  `eval "$(nm-home --for "$PWD" --mkdir --activate --export)"`.
 - Always `treehouse return <path>` (or let prune reclaim it) when done so the pool
   stays healthy.
 

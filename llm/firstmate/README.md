@@ -71,7 +71,9 @@ firstmate clone and (for `no-mistakes`) initialize it per AGENTS.md section 6.
 
 For parallel `no-mistakes` work, firstmate spawns each crewmate with a
 per-worktree `NM_HOME` derived by `nm-home`, so every gate run gets isolated
-state, socket, gate repos, database, and daemon. Manual `treehouse get` shells
-are auto-scoped by the zsh hook when they live under `~/.treehouse`; explicit
-`NM_HOME` values are left alone. Branch names must still be unique per task
-because the remote git host and PR namespace are shared.
+state, socket, gate repos, database, and daemon. `nm-home --activate` also
+scopes the `no-mistakes` git remote into worktree-local config, because linked
+worktrees otherwise share remotes. Manual `treehouse get` shells are auto-scoped
+by the zsh hook when they live under `~/.treehouse`; explicit `NM_HOME` values
+are left alone. Branch names must still be unique per task because the remote
+git host and PR namespace are shared.

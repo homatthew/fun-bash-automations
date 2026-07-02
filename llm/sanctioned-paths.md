@@ -30,8 +30,9 @@ beside it. When two tools could plausibly fit, this doc is the tiebreaker.
 - **`firstmate`** — the orchestrator defined by `~/repos/firstmate` `AGENTS.md`.
   You are the captain; crewmates run in treehouse worktrees. Use it for breadth
   across many independent tasks. firstmate also gives each crewmate a
-  per-worktree `NM_HOME` so parallel no-mistakes runs do not share state,
-  sockets, gate repos, databases, or daemons.
+  per-worktree `NM_HOME` and worktree-local `no-mistakes` remote so parallel
+  no-mistakes runs do not share state, sockets, gate repos, databases, daemons,
+  or gate remotes.
 - **`/loop` skill** — recurring checks on a fixed interval. Not for one-shot
   work and not for single-objective depth.
 - **`ScheduleWakeup`** — one deferred wake-up, once. Not a substitute for a
@@ -43,7 +44,8 @@ beside it. When two tools could plausibly fit, this doc is the tiebreaker.
   `proj()` / `bootstrap-proj` is for multi-repo project layout, NOT agent
   isolation — do not use it to isolate agents. A worktree alone does not isolate
   no-mistakes; manual parallel gate runs need the matching per-worktree
-  `NM_HOME`, e.g. `eval "$(nm-home --for "$PWD" --mkdir --export)"`.
+  `NM_HOME` and worktree-local gate remote, e.g.
+  `eval "$(nm-home --for "$PWD" --mkdir --activate --export)"`.
 - **`/ship` skill** — finish-the-job for a single change. Drives the
   no-mistakes gate: review / test / lint / docs → push → PR. Replaced `/go`
   and push-gate.

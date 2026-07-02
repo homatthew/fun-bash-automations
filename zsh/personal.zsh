@@ -296,6 +296,8 @@ export BD_DB=$BEADS_DIR/beads.db
 # no-mistakes: automatically isolate gate state inside manual treehouse
 # worktrees. firstmate sets NM_HOME explicitly for crewmates; this hook covers
 # ad hoc `treehouse get` shells without overriding a user-chosen NM_HOME.
+# `--activate` also scopes the no-mistakes git remote into worktree-local config
+# so concurrent worktrees do not race on a shared gate remote.
 if [[ -n "$ZSH_VERSION" ]]; then
     _fba_nm_home_chpwd() {
         emulate -L zsh
@@ -323,7 +325,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
             return 0
         fi
 
-        nmh=$(nm-home --for "$root" --mkdir 2>/dev/null) || return 0
+        nmh=$(nm-home --for "$root" --mkdir --activate 2>/dev/null) || return 0
         export NM_HOME="$nmh"
         export NM_HOME_AUTO=1
     }
