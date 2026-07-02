@@ -263,6 +263,98 @@ sys.exit(0 if any(is_push_segment(segment) for segment in segments) else 1)
 PY
 }
 
+git_push_has_plain_force_from_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if any(token.startswith(prefix) for prefix in (
+            "--git-dir=",
+            "--work-tree=",
+            "--namespace=",
+            "--exec-path=",
+            "--super-prefix=",
+        )):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+def redir_start(args):
+    for i, token in enumerate(args):
+        if "<" in token or ">" in token or token == "&":
+            if i > 0 and re.fullmatch(r"\d+", args[i - 1]):
+                return i - 1
+            return i
+    return len(args)
+
+def has_plain_force(args):
+    args = args[:redir_start(args)]
+    for token in args:
+        if token == "--":
+            return False
+        if token == "--force" or token.startswith("--force="):
+            return True
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") and "f" in token[1:]:
+            return True
+    return False
+
+for segment in segments:
+    args = push_args_for_segment(segment)
+    if args is not None and has_plain_force(args):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 agent_push_policy_path() {
   printf '%s\n' "${PG_AGENT_PUSH_POLICY:-$SCRIPT_DIR/../agent-push-policy.json}"
 }
@@ -985,6 +1077,46 @@ sys.exit(1)
 PY
 }
 
+is_pure_ssh_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+if len(segments) != 1:
+    sys.exit(1)
+
+segment = strip_env_assignments(segments[0])
+sys.exit(0 if segment and segment[0] == "ssh" else 1)
+PY
+}
+
 ssh_remote_safety_violation() {
   python3 - "$COMMAND" <<'PY'
 import re
@@ -1691,9 +1823,7 @@ EOF
 
 # --- 1. Git Force/Destructive ---
 check_git_force() {
-  # Allow --force-with-lease (safe for stacked PRs — fails if remote diverged)
-  echo "$COMMAND" | grep -qE -- 'git\s+push\s+.*--force-with-lease' && return
-  echo "$COMMAND" | grep -qE -- 'git\s+push\s+.*(-f |--force)' &&
+  git_push_has_plain_force_from_command &&
     deny "Blocked: git push --force rewrites remote history. Use --force-with-lease."
   echo "$COMMAND" | grep -qE -- 'git\s+reset\s+--hard' &&
     deny "Blocked: git reset --hard discards all uncommitted changes."
@@ -2233,10 +2363,12 @@ run_guard_extensions() {
 _dotwork_target=$(extract_ssh_target)
 case "$_dotwork_target" in
   *.work)
-    if has_valid_ssh_lease "$_dotwork_target"; then
+    if is_pure_ssh_command && has_valid_ssh_lease "$_dotwork_target"; then
       exit 0
     fi
-    deny "Blocked: ssh to '$_dotwork_target' requires a lease. Ask the user to run: ssh-gate $_dotwork_target"
+    if is_pure_ssh_command; then
+      deny "Blocked: ssh to '$_dotwork_target' requires a lease. Ask the user to run: ssh-gate $_dotwork_target"
+    fi
     ;;
 esac
 

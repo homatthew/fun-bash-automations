@@ -67,6 +67,20 @@ run_deploy() {
 
 # --- Phase 1: full projection ---
 echo "== Phase 1: fba-deploy (full) =="
+mkdir -p "$TMP_HOME/.claude/skills/commit-push-pr" "$TMP_HOME/.claude/skills/worktree-dev" "$TMP_HOME/.codex/skills"
+cat > "$TMP_HOME/.claude/skills/commit-push-pr/SKILL.md" <<'EOF'
+---
+name: commit-push-pr
+description: Commit, push, and create a PR in one workflow
+---
+EOF
+cat > "$TMP_HOME/.claude/skills/worktree-dev/SKILL.md" <<'EOF'
+---
+name: worktree-dev
+description: Local custom replacement
+---
+EOF
+ln -s "$ROOT/claude/skills/create-nflx-pr" "$TMP_HOME/.codex/skills/create-nflx-pr"
 mkdir -p "$TMP_HOME/.codex"
 cat > "$TMP_HOME/.codex/config.toml" <<'EOF'
 [hooks.state]
@@ -204,6 +218,22 @@ if [[ ${#missing_skills[@]} -eq 0 ]]; then
   pass "all llm/skills/* projected to both runtimes"
 else
   fail "skills missing: ${missing_skills[*]}"
+fi
+if [[ ! -e "$TMP_HOME/.claude/skills/commit-push-pr" && ! -L "$TMP_HOME/.claude/skills/commit-push-pr" ]]; then
+  pass "retired repo-managed skill directory pruned"
+else
+  fail "retired repo-managed skill directory pruned"
+fi
+if [[ ! -e "$TMP_HOME/.codex/skills/create-nflx-pr" && ! -L "$TMP_HOME/.codex/skills/create-nflx-pr" ]]; then
+  pass "retired repo-managed skill symlink pruned"
+else
+  fail "retired repo-managed skill symlink pruned"
+fi
+if [[ -f "$TMP_HOME/.claude/skills/worktree-dev/SKILL.md" ]] \
+  && grep -Fq "Local custom replacement" "$TMP_HOME/.claude/skills/worktree-dev/SKILL.md"; then
+  pass "unmanaged local retired-name skill preserved"
+else
+  fail "unmanaged local retired-name skill preserved"
 fi
 
 echo "-- CLI wrappers --"

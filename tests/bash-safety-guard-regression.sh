@@ -364,6 +364,23 @@ fba_main_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin HEAD:m
 expect_contains "$fba_main_push_block" "pushing directly to origin/main is not allowed"
 echo "ok 60 - fun-bash-automations main push remains blocked"
 
+printf 'builder.work %s\n' "$future_expiry" >>"$SSH_LEASE_FILE"
+dotwork_pure_allow=$(run_guard "ssh builder.work 'sudo systemctl restart test-service'")
+[[ -z "$dotwork_pure_allow" ]] || fail "expected pure leased .work ssh to short-circuit, got: $dotwork_pure_allow"
+echo "ok 60a - pure leased .work ssh can short-circuit local content guards"
+
+dotwork_compound_remote_block=$(run_guard "ssh builder.work 'sudo systemctl restart test-service'; printf done")
+expect_contains "$dotwork_compound_remote_block" "dangerous remote ssh command: sudo"
+echo "ok 60a2 - compound .work ssh does not bypass later guard checks"
+
+dotwork_compound_push_block=$(run_guard_with_workdir "$fba_repo" "ssh builder.work uptime; git push origin main")
+expect_contains "$dotwork_compound_push_block" "pushing directly to origin/main is not allowed"
+echo "ok 60a3 - compound .work ssh does not bypass push guard"
+
+dotwork_multiline_push_block=$(run_guard_with_workdir "$fba_repo" $'ssh builder.work uptime\ngit push origin main')
+expect_contains "$dotwork_multiline_push_block" "pushing directly to origin/main is not allowed"
+echo "ok 60a4 - newline-separated .work ssh does not bypass push guard"
+
 # Shell redirections must not confuse push-target parsing (regression: shlex
 # split "2>&1" into extra tokens that were counted as refspecs -> false
 # "bare push" block).
@@ -581,6 +598,18 @@ echo "ok 79 - git branch -D of an ordinary feature branch stays blocked"
 yolo_plain_force_block=$(run_guard "git push --force origin mho-yolo/quick")
 expect_contains "$yolo_plain_force_block" "Use --force-with-lease"
 echo "ok 80 - plain git push --force of a yolo branch stays blocked"
+
+force_with_lease_allow=$(run_guard "git push --force-with-lease origin mho-yolo/quick")
+[[ -z "$force_with_lease_allow" ]] || fail "expected git push --force-with-lease to be allowed, got: $force_with_lease_allow"
+echo "ok 80a - git push --force-with-lease stays allowed"
+
+git_c_plain_force_block=$(run_guard "git -C /tmp/repo push --force origin mho-yolo/quick")
+expect_contains "$git_c_plain_force_block" "Use --force-with-lease"
+echo "ok 80b - git -C push --force is blocked"
+
+mixed_plain_force_block=$(run_guard "git push --force-with-lease origin mho-yolo/quick; git -C /tmp/repo push -f origin mho-yolo/other")
+expect_contains "$mixed_plain_force_block" "Use --force-with-lease"
+echo "ok 80c - later plain force push is blocked even after force-with-lease"
 
 # Fail-closed: if the yolo class is disabled in policy, the branch -D exemption
 # must not apply.
