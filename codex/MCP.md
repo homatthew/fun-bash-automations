@@ -14,6 +14,8 @@ project trust, plugin marketplaces, and unmanaged local MCPs.
 portable MCP set. Existing local tables with the same names, or child tables
 under those names such as `mcp_servers.sourcegraph.env`, are replaced during
 projection. Local MCPs with different names are preserved by default.
+Set `FBA_DEPLOY_PRESERVE_CODEX_MCP=0` when you want projection to omit
+unmanaged local `mcp_servers.*` tables instead.
 
 The private dotfiles workspace installer layers its internal MCP/plugin overlay
 after `fba-deploy`. It strips tables owned by that overlay before appending it,

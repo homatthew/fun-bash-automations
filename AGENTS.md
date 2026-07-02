@@ -36,8 +36,8 @@ canonical instruction entrypoint.
 - `CLAUDE.md` at repo root is a compatibility shim for Claude.
 - `claude/CLAUDE.md` contains Claude-only runtime behavior and imports the
   shared instructions.
-- Claude-only runtime assets remain in `claude/` (`settings.json`, hooks,
-  statusline, agents).
+- Claude-only runtime assets remain in `claude/` (`settings.json`, `statusline.sh`,
+  agents, and optional Claude-only hooks if present).
 
 ## LLM Config Maintenance
 

@@ -108,6 +108,9 @@ manual approval CLI:
 | `firstmate` | Orchestrates a crew of agents for breadth across many tasks |
 | `gnhf` | Long-run single-objective loop for depth on one goal |
 | `treehouse` | Provides isolated, pooled worktrees for parallel agent work |
+| `kun-status` | Shows treehouse pool, no-mistakes gate, firstmate crew, and wake state as TOON |
+| `kun-stack-verify` | Checks that required Kun-stack tools match the pinned manifest |
+| `nm-home` | Derives per-worktree `NM_HOME` and activates the worktree-local no-mistakes remote |
 
 Local review still uses Neovim Diffview and the optional 99/Codex helper:
 
@@ -121,9 +124,10 @@ Local review still uses Neovim Diffview and the optional 99/Codex helper:
 | `Space 9 v` | In visual mode, ask Codex for a suggested edit and store it as a local review comment |
 
 Protected-branch pushes (main/master/develop/trunk), bare/ambiguous
-`git push`, plain `git push --force`, and `git add -A` are blocked by the git
-main pre-push hook plus `bash-safety-guard.sh`; `--force-with-lease` is still
-allowed where appropriate.
+`git push`, plain `git push --force`, `--no-verify`, and `git add -A` are
+blocked by the git main pre-push hook plus `bash-safety-guard.sh`. Scratch
+branches never allow force updates; yolo branches allow `--force-with-lease`
+and remote delete only when the explicit push target is `mho-yolo/*`.
 
 Requires: `jq`, `yq` (mikefarah), `gh`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
 

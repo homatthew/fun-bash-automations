@@ -7,7 +7,8 @@ plugin behavior.
 
 - Shared command safety policy lives in `llm/command-guard-policy.md`.
 - Claude currently enforces part of that policy with native `PreToolUse` hook
-  scripts under `claude/hooks/`.
+  entries in `claude/settings.json` that point at projected shared scripts from
+  `llm/hooks/`.
 - Codex in this repo uses experimental native hooks via `codex/hooks.json`.
 - The current Codex parity target is Bash `PreToolUse` guardrails using the
   same guard script implementations that Claude uses.

@@ -1,8 +1,8 @@
 #!/bin/bash
 # dgw-write-guard.sh
-# Claude-native implementation of the shared policy in:
-#   ~/repos/fun-bash-automations/llm/command-guard-policy.md
-# PreToolUse hook: blocks dgw-cli kv put/delete against any environment
+# Shared Claude/Codex implementation of the policy in
+# llm/command-guard-policy.md. PreToolUse hook: blocks dgw-cli kv put/delete
+# against any environment
 # unless the matching authorization flag is present:
 #   DGW_TEST_WRITE_AUTHORIZED=1  for -e test
 #   DGW_PROD_WRITE_AUTHORIZED=1  for -e prod

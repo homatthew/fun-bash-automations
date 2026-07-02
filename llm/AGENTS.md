@@ -211,9 +211,10 @@ the user. Details live in `llm/command-guard-policy.md`.
 
 - Claude-only runtime files live under `claude/`:
   - `claude/settings.json`
-  - `claude/hooks/*.sh`
   - `claude/statusline.sh`
   - `claude/agents/*.md`
+  - `claude/hooks/*.sh` when a hook is truly Claude-only; shared hooks live in
+    `llm/hooks/*.sh`
 - `claude/CLAUDE.md` is a Claude adapter and should not duplicate shared policy.
 
 ## LLM Config Maintenance

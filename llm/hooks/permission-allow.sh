@@ -4,7 +4,7 @@
 # PermissionRequest only fires when Codex was already going to prompt for
 # approval (e.g. shell escalation, network). PreToolUse guards already ran.
 # This hook adds a narrow safelist of unambiguously read-only, side-effect-
-# free invocations so Julia doesn't have to approve `git status` for the
+# free invocations so the user does not have to approve `git status` for the
 # hundredth time.
 #
 # Default is to decline (emit {}); Codex then falls through to the normal

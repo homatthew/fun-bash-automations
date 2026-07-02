@@ -4,32 +4,36 @@ Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 `*.sh` here into `~/.claude/hooks/` and `~/.codex/hooks/`.
 Custom Claude and Codex alert hooks are currently disabled in
 `claude/settings.json` and `codex/hooks.json`; the scripts remain for manual use
-or future opt-in.
+or future opt-in. The currently wired hooks are safety/context hooks:
+`beads-prime.sh`, `bash-safety-guard.sh`, `dgw-write-guard.sh`,
+`permission-allow.sh`, `post-tool-audit.sh`, and `sourcegraph-auth-hint.sh`.
 
 ## Scripts
 
 | Script | Event(s) | What it does |
 |---|---|---|
-| `notify.sh` | UserPromptSubmit, Stop, Notification | macOS notification only. Used when Slack is disabled. |
+| `bash-safety-guard.sh` | PreToolUse / Bash | Blocks unsafe git, filesystem, SSH, GitHub, Docker, package-publish, and bypass commands. |
+| `dgw-write-guard.sh` | PreToolUse / Bash | Blocks `dgw-cli kv put/delete` unless the matching same-segment authorization flag is present. |
+| `permission-allow.sh` | PermissionRequest / Bash | Auto-allows read-only Bash commands where the harness asks for permission. |
+| `post-tool-audit.sh` | PostToolUse / Bash | Records lightweight post-command audit context. |
+| `sourcegraph-auth-hint.sh` | PostToolUse, PostToolUseFailure | Adds the `http://go/authorize-sourcegraph` recovery hint when Sourcegraph MCP returns a 502. |
+| `beads-prime.sh` | SessionStart, PreCompact | Emits `bd prime` task context when the shared Beads DB exists. This is context plumbing, not a style/personality hook. |
+| `notify.sh` | UserPromptSubmit, Stop, Notification | Optional alert hook. On Darwin it uses allowlisted terminal backends; on Linux it delegates to executable `notify-slack.sh` when present and otherwise no-ops. |
 | `notify-dispatch.sh` | (helper) | Detached `alerter --json` runner. Owns click handling so hooks return quickly. |
 | `notify-metrics.sh` | (helper) | Shared JSONL timing helpers for notification click-to-editor-open paths. |
 | `notify-working-summary.sh` | (helper) | Detached Codex summarizer for `UserPromptSubmit`; replaces the initial local context/message with generated text only if the same task is still active. |
 | `notify-final-summary.sh` | (helper) | Detached Codex summarizer for `Stop`; replaces generic or verbose final context/message with generated text only if the same task is still final. |
 | `notify-input-summary.sh` | (helper) | Detached Codex classifier for input-needed notifications; replaces provisional question alerts with generated kind/context/summary only if the same input state is still active. |
-| `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
-| `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on a push/delivery event. |
-| `beads-prime.sh` | SessionStart, PreCompact | Emits `bd prime` task context when the shared Beads DB exists. This is context plumbing, not a style/personality hook. |
-| `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
-| `sourcegraph-auth-hint.sh` | PostToolUse, PostToolUseFailure | Adds the `http://go/authorize-sourcegraph` recovery hint when Sourcegraph MCP returns a 502. |
-| `slack-push-event.sh` | (off by default) | Slack variant of notify-push-event; disabled pending explicit opt-in. |
+| `notify-slack.sh` | Stop, Notification | Optional Slack `chat.postMessage` alert helper. Threads by repo and branch when configured. |
+| `slack-push-event.sh` | (off by default) | Slack push/delivery acknowledgement helper; disabled pending explicit opt-in. |
 
 `bash-safety-guard.sh` also runs optional private extensions from
 `bash-safety-guard.d/*.sh` next to the projected hook. Keep confidential
 hostnames, service-specific allowlists, and private lease policy in those
 dotfiles-owned extensions rather than in this shared repository.
 
-Only one of `notify.sh` / `notify-slack.sh` is referenced from
-`settings.json` at a time — don't route both at once.
+If notification hooks are re-enabled, route one top-level alert hook at a time:
+wire `notify.sh` or `notify-slack.sh`, not both.
 
 ## Current Notify Architecture
 
@@ -53,6 +57,10 @@ pick_backend()
   TERM_PROGRAM=vscode         → vscode    (PID scrape + alerter)
   else                        → suppressed
 ```
+
+On non-Darwin hosts, allowed notification contexts delegate to executable
+`notify-slack.sh` before the Darwin backend selection above; if that helper is
+absent, `notify.sh` exits successfully without posting.
 
 | Backend | Signature | Notes |
 |---|---|---|

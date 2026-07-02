@@ -14,7 +14,8 @@ Use this repository for behavior that is broadly reusable:
 - shared hooks in `llm/hooks/*.sh`
 - portable Codex config in `codex/config.toml`
 - portable Codex MCP definitions in `codex/mcp.toml`
-- local workflow helpers in `bin/` such as `fba-deploy` and notification tooling
+- local workflow helpers in `bin/` such as `fba-deploy`, `kun-status`, and
+  notification tooling
 
 Do not put confidential or machine-specific details here. Jira board topology,
 private field IDs, internal service URLs, private Slack lore, team-specific
@@ -47,10 +48,32 @@ refresh local Claude/Codex homes:
 bin/fba-deploy
 bin/fba-deploy --codex-only
 bin/fba-deploy --claude-only
+bin/fba-deploy --shared-only
 ```
 
 `fba-deploy` renders shared config into `~/.claude` and `~/.codex`. It does not
-install private dotfiles overlays.
+install private dotfiles overlays. The shared-only mode refreshes shared
+`AGENTS.md`, push-policy JSON, and `llm/skills/*` links without rewriting
+harness-specific runtime config.
+
+### Kun Stack Helpers
+
+The repo includes helper commands for the pinned Kun-stack agent workflow:
+
+```bash
+bin/kun-stack-install      # install/refresh pinned treehouse/no-mistakes/gnhf tooling
+bin/kun-stack-verify       # verify required tools match the pinned policy
+bin/kun-status             # print pool/gate/crew/wake state as TOON
+bin/nm-home --activate     # isolate no-mistakes state for one git worktree
+```
+
+`llm/kun-stack/manifest.json` is the source of truth for pinned tool versions.
+`kun-stack-install` is idempotent and does not run per-repo bootstraps such as
+`treehouse init`, `no-mistakes init`, or firstmate setup. The no-mistakes pin
+accepts the pinned minor with the same or newer patch version and ignores
+update-banner semvers when probing tool output; `kun-stack-install` also sets
+the global no-mistakes default agent to `codex` only when the existing setting
+is missing or `auto`.
 
 ### Full Netflix Workspace Install
 
@@ -113,11 +136,12 @@ push or invokes an explicit finish workflow. The finish-the-job entrypoint is th
 `/ship` skill, which runs the `no-mistakes` gate (automated code review, tests,
 lint, docs) before pushing. Do not create PRs from `mh-netflix` to `main`.
 
-The shared push policy (`llm/agent-push-policy.json`) defines four branch
-classes: **delivery** (no-mistakes gate), **scratch** (`wip/agent/`,
-`scratch/agent/` — opt-in Remote Scratch Mode for backup/handoff, not
-PR-eligible; promotion to a delivery branch goes through the no-mistakes gate),
-**direct-push exceptions** (`fun-bash-automations`, `dotfiles`), and **yolo**
-(`mho-yolo/*` — raw explicit-branch push + PR fast path on any repo,
-force-with-lease and delete allowed, and structurally unable to target or track
-a base ref).
+The shared push policy (`llm/agent-push-policy.json`) defines five branch
+classes: **no-mistakes delivery** (`mho/`, `feature/`, `fix/`), **gnhf**
+(`gnhf/`, shipped through the same no-mistakes gate), **scratch**
+(`wip/agent/`, `scratch/agent/` — opt-in Remote Scratch Mode for
+backup/handoff, not PR-eligible; promotion to a delivery branch goes through the
+no-mistakes gate), **direct-push exceptions** (`fun-bash-automations`,
+`dotfiles`), and **yolo** (`mho-yolo/*` — raw explicit-branch push + PR fast
+path on any repo, force-with-lease and delete allowed, and structurally unable
+to target or track a base ref).

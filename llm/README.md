@@ -10,8 +10,14 @@ harnesses.
   opt-in non-delivery scratch pushes
 - `skills/*/SKILL.md` shared skills
 - `hooks/*.sh` shared hooks (projected to both harnesses)
+- `kun-stack/manifest.json` pinned Kun-stack tool versions for
+  `kun-stack-install` / `kun-stack-verify`
+- `no-mistakes-stages.md` no-mistakes stage and skip semantics
+- `sanctioned-paths.md` one sanctioned tool per agent workflow function
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
+- `firstmate/` checked-in firstmate preset baselines
+- `gnhf-per-repo-config.md` `.gnhf.yml` + `gnhf-here` convention
 - `../codex/config.toml` portable Codex config template
 - `../codex/mcp.toml` explicit portable Codex MCP allowlist
 - `../codex/MCP.md` Codex MCP install/auth notes
@@ -48,7 +54,8 @@ LLM skills, use `config/llm/skills-internal/`; for private shell config, use
   - `~/.claude/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.claude/agent-push-policy*.json` -> `llm/agent-push-policy*.json`
   - `~/.claude/skills/*` -> `llm/skills/*`
-  - `~/.claude/hooks/*.sh` -> `llm/hooks/*.sh` + `claude/hooks/*.sh`
+  - `~/.claude/hooks/*.sh` -> copied shared hooks from `llm/hooks/*.sh` plus
+    optional Claude-only hooks from `claude/hooks/*.sh`
 - Codex:
   - `~/.codex/auth.json` -> copied from `codex/auth.json`
   - `~/.codex/config.toml` -> rendered from `codex/config.toml` plus
@@ -67,10 +74,37 @@ then wire it into each harness's config (`claude/settings.json`,
   - Venv: `~/.claude/google-workspace-venv` (shared, scripts bootstrap into it)
   - Creds: `~/.claude/google_credentials.json` (shared across harnesses)
 
+## Projection Behavior
+
+`bin/fba-deploy` has four modes: full projection, `--claude-only`,
+`--codex-only`, and `--shared-only`. Full/Claude/Codex modes copy shared hooks,
+project shared skills, prune retired repo-managed skill links when they still
+match the old repo-managed content, and render harness-specific config.
+`--shared-only` refreshes shared `AGENTS.md`, push-policy JSON, and skill links
+in both homes without rewriting harness-specific settings.
+
+Codex config rendering preserves user-local sections that are not managed by
+FBA: hook trust state, model NUX state, project trust, plugin/marketplace
+sections, and unmanaged `mcp_servers.*` tables by default. Set
+`FBA_DEPLOY_PRESERVE_CODEX_MCP=0` to stop preserving unmanaged local Codex MCP
+tables during projection.
+
+Other projection knobs:
+
+- `USER_NETFLIX_EMAIL` overrides the email substituted into
+  `claude/settings.json`; otherwise `fba-deploy` uses `git config user.email`
+  when it is a Netflix address.
+- `MODEL_GATEWAY_PROJECT_ID` switches the rendered Codex base URL from the
+  local default project to the secure project proxy.
+- `FBA_DEPLOY_SKIP_MAC_EXTRAS=1` skips macOS-only Claude Notify.app and VS Code
+  OSC notifier installation.
+- `FBA_DEPLOY_LOG=<path>` appends projection actions to a shared installer log.
+
 ## Guardrail Sync
 
 - Shared command guard intent lives in `llm/command-guard-policy.md`.
-- Claude has native command-hook enforcement.
+- Claude has native command-hook enforcement wired through `claude/settings.json`
+  to shared scripts in `llm/hooks/*.sh`.
 - Codex has experimental native command-hook enforcement for supported events.
 - Both harnesses use the same guard script implementations for Bash pre-tool
   checks.

@@ -14,8 +14,10 @@ Codex, and future harnesses.
 ## Current Enforcement Model
 
 - Claude:
-  - Native enforcement via `claude/hooks/bash-safety-guard.sh`
-  - Native enforcement via `claude/hooks/dgw-write-guard.sh`
+  - Native enforcement via `claude/settings.json` entries that run projected
+    shared hooks from `llm/hooks/bash-safety-guard.sh`
+  - Native enforcement via `claude/settings.json` entries that run projected
+    shared hooks from `llm/hooks/dgw-write-guard.sh`
 - Codex:
   - Native enforcement via `codex/hooks.json`
   - Current Codex runtime support is experimental and currently Bash-focused
@@ -177,6 +179,10 @@ through to the delivery default-deny.
   segment in a compound command must independently satisfy host lease checks.
 - Block interactive SSH from agents; SSH must include an explicit remote
   command.
+- Block unsafe host-key bypass options such as `StrictHostKeyChecking=no`; use
+  `StrictHostKeyChecking=accept-new` instead.
+- Treat remote `scp` and `rsync` endpoints like SSH access: local-only copies
+  are allowed, but remote hosts require a valid SSH host lease.
 - Block obvious dangerous remote SSH commands such as `sudo`, `su`,
   `systemctl`, `service`, process kills, broad file mutation commands,
   `cqlsh`, and shell/code wrappers such as `bash -c` or `python -c`.
@@ -192,11 +198,19 @@ through to the delivery default-deny.
 - Allow lower-risk read-only diagnostics such as `tpstats`,
   `proxyhistograms`, `tablestats`, `tablehistograms`, `gcstats`, and
   `compactionstats` with only a valid SSH host lease.
+- Pure SSH commands to leased `*.work` development-workspace hosts bypass the
+  remote-command content guards because the command executes in the sandboxed
+  workspace, not on this machine. The SSH host lease is still required.
 
 ### Package publishing
 
 - Block publishing commands such as `npm publish`, `twine upload`,
   `cargo publish`, `gem push`
+
+### Docker destructive actions
+
+- Block `docker push`, `docker system prune`, and forced container removal with
+  `docker rm -f`.
 
 ### GitHub destructive actions
 
