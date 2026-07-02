@@ -116,11 +116,21 @@ done < <(jq -r '
 ' "$ROOT/codex/hooks.json")
 # Canary: the hooks the dotfiles installer used to miss
 echo "-- hook drift canaries --"
-assert_executable "$TMP_HOME/.claude/hooks/notify.sh" "claude notify.sh present"
 assert_executable "$TMP_HOME/.claude/hooks/beads-prime.sh" "claude beads-prime.sh present"
 assert_executable "$TMP_HOME/.claude/hooks/bash-safety-guard.sh" "claude bash-safety-guard.sh present"
-assert_executable "$TMP_HOME/.codex/hooks/notify.sh" "codex notify.sh present"
 assert_executable "$TMP_HOME/.codex/hooks/permission-allow.sh" "codex permission-allow.sh present"
+
+if jq -e '
+  [.hooks // {} | to_entries[]
+    | .value[]?
+    | .hooks[]?
+    | .command // empty]
+  | all(. != "~/.claude/hooks/notify.sh")
+' "$ROOT/claude/settings.json" >/dev/null; then
+  pass "claude custom notify hook disabled"
+else
+  fail "claude custom notify hook disabled"
+fi
 
 # AGENTS.md and skills projection
 echo "-- AGENTS + skills projection --"
@@ -216,6 +226,22 @@ if grep -Eq '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP
   pass "codex hooks feature enabled"
 else
   fail "codex hooks feature enabled"
+fi
+if grep -Fq 'notifications = []' "$TMP_HOME/.codex/config.toml"; then
+  pass "codex TUI notifications disabled"
+else
+  fail "codex TUI notifications disabled"
+fi
+if jq -e '
+  [.hooks // {} | to_entries[]
+    | .value[]?
+    | .hooks[]?
+    | .command // empty]
+  | all(. != "~/.codex/hooks/notify.sh")
+' "$ROOT/codex/hooks.json" >/dev/null; then
+  pass "codex custom notify hook disabled"
+else
+  fail "codex custom notify hook disabled"
 fi
 if grep -Fq '[hooks.state."sentinel-hook"]' "$TMP_HOME/.codex/config.toml" \
   && grep -Fq 'trusted_hash = "sha256:sentinel"' "$TMP_HOME/.codex/config.toml"; then

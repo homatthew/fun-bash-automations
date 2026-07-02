@@ -35,6 +35,28 @@ completion_output="$(zsh -fc 'autoload -Uz compinit; compinit -C; source "$FBA_R
 deferred_completion_output="$(zsh -fc 'source "$FBA_ROOT/zsh/personal.zsh"; autoload -Uz compinit; compinit -C; _fba_register_pending_compdefs; print -- "${_comps[proj]} ${_comps[rp]}"')"
 [[ "$deferred_completion_output" == "_proj_completion _rp_completion" ]]
 
+mkdir -p "$TMP_HOME/.treehouse/worktrees/demo" "$TMP_HOME/outside-repo"
+git -C "$TMP_HOME/.treehouse/worktrees/demo" init -q
+git -C "$TMP_HOME/outside-repo" init -q
+
+nm_home_one="$("$ROOT/bin/nm-home" --for "$TMP_HOME/.treehouse/worktrees/demo")"
+nm_home_two="$("$ROOT/bin/nm-home" --for "$TMP_HOME/.treehouse/worktrees/demo")"
+[[ "$nm_home_one" == "$nm_home_two" ]]
+[[ "$nm_home_one" == "$TMP_HOME/.no-mistakes-homes/demo-"* ]]
+[[ ! -e "$nm_home_one/config.yaml" ]]
+
+nm_home_created="$("$ROOT/bin/nm-home" --for "$TMP_HOME/.treehouse/worktrees/demo" --mkdir)"
+[[ "$nm_home_created" == "$nm_home_one" ]]
+grep -qx 'agent: codex' "$nm_home_created/config.yaml"
+
+treehouse_nm_output="$(zsh -fc "$source_personal; cd '$TMP_HOME/.treehouse/worktrees/demo'; print -- \${NM_HOME:t}; print -- \${NM_HOME_AUTO:-}")"
+[[ "$treehouse_nm_output" == *$'\n'"1" ]]
+[[ "$treehouse_nm_output" == *"demo-"* ]]
+grep -qx 'agent: codex' "$nm_home_created/config.yaml"
+
+outside_nm_output="$(zsh -fc "$source_personal; cd '$TMP_HOME/outside-repo'; print -- \${NM_HOME:-unset}; print -- \${NM_HOME_AUTO:-unset}")"
+[[ "$outside_nm_output" == *$'\n'"unset"$'\n'"unset" ]]
+
 mkdir -p "$TMP_HOME/source" "$TMP_HOME/remotes"
 git -C "$TMP_HOME/source" init -b main service-b >/dev/null
 git -C "$TMP_HOME/source/service-b" config user.email "test@example.com"

@@ -30,15 +30,19 @@ the PR**. Everything between those is automated.
    test → lint → docs → push → PR). Never push straight to `main`.
 3. **Many tasks → firstmate (`fm`).** Launch the crew with `fm`; talk to the
    first mate as captain. It spawns crewmates in tmux windows, each in its own
-   **treehouse** worktree, supervises them, and ships each through the same gate.
+   **treehouse** worktree, supervises them, and ships each through the same
+   no-mistakes policy. For parallel gate runs, firstmate gives every crewmate a
+   per-worktree `NM_HOME`, so no-mistakes state/socket/gate-repos/database/daemon
+   data stays isolated even when tasks target the same repo.
 4. **One deep/long objective → `gnhf`.** For "keep going until X" work; always
    bound it (`--max-iterations` / `--max-tokens`). Per-repo tuning via a
    committed `.gnhf.yml` + `gnhf-here`.
 5. **Review before the gate → the `code-review` skill.** The one deep-review
    entrypoint (dual Claude+Codex). `no-mistakes` is the automated gate on top.
-6. **Netflix GHE repos:** the gate validates + pushes but doesn't open the PR
-   there — run `nm-ghes-pr` after it to open the PR on `git.netflix.net`.
-   github.com repos get the PR from no-mistakes directly.
+6. **Self-hosted GitHub / Netflix GHE repos:** authenticate `gh` for the host
+   (`gh auth login --hostname git.netflix.net`) and let no-mistakes own PR
+   creation/CI. `nm-ghes-pr` is only a legacy fallback if a run explicitly skips
+   PR creation after the branch was validated and pushed.
 
 ## Which tool for which job
 
@@ -65,7 +69,8 @@ fm                        launch firstmate (the crew), you = captain
 gnhf "objective" --max-iterations N     bounded long-run loop
 treehouse get [--lease]   acquire an isolated worktree
 no-mistakes / no-mistakes axi run        run the gate
-nm-ghes-pr                open the PR on git.netflix.net after the gate
+nm-ghes-pr                legacy fallback if GHES PR creation is skipped
+eval "$(nm-home --for "$PWD" --mkdir --export)"    explicit per-worktree NM_HOME for manual gates
 kun-status                one-glance TOON status of the stack
 bd ready                  your task queue (source of truth)
 bd-firstmate-bridge       project bd ready -> firstmate backlog (one-way)

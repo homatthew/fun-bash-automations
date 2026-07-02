@@ -72,20 +72,22 @@ churn). Re-run the relevant verification afterward.
 
 ## Step 6 — Ship through the gate
 
-Hand the change to the **no-mistakes** gate. Invoke the `no-mistakes` skill (or
-run `no-mistakes`), which validates the change — automated code review, tests,
-lint, docs — and only then pushes to the configured target and opens/updates
-the PR. Do not hand-roll `git push` + `gh pr create`; the gate owns the push so
-the pipeline runs.
+Hand the change to the **no-mistakes** gate. Invoke the `no-mistakes` skill or,
+for agent-driven work, drive `no-mistakes axi run --intent "..."`. It validates
+the change — automated code review, tests, lint, docs — and only then pushes to
+the configured target and opens/updates the PR. Do not hand-roll `git push` +
+`gh pr create`; the gate owns the push so the pipeline runs.
 
 - First time in a repo: `no-mistakes init` (one-time; sets up the gate).
-- Then: `no-mistakes` to run the pipeline for the current branch.
+- Then: `/no-mistakes` or `no-mistakes axi run --intent "..."` for agents;
+  humans may use the bare `no-mistakes` TUI.
 - Re-run after fixes: `no-mistakes rerun`.
-- **Netflix GHE (`git.netflix.net`) repos:** no-mistakes validates and pushes the
-  branch but **skips PR creation** (its PR step has no `git.netflix.net` provider
-  yet — it logs `provider unknown is not supported yet`). After the gate's push
-  completes, run **`nm-ghes-pr`** to open the PR. `github.com` repos get the PR
-  from no-mistakes directly, so this extra step is GHES-only.
+- **Self-hosted GitHub / Netflix GHE:** upstream no-mistakes routes through the
+  `gh` CLI. Authenticate the host first, e.g.
+  `gh auth login --hostname git.netflix.net`; the gate should then own PR
+  creation and CI polling. Use `nm-ghes-pr` only as a legacy fallback when a
+  specific run's PR step explicitly reports that the provider was skipped or
+  unsupported after the branch was validated and pushed.
 
 If a step fails, fix it and re-run — do not `--skip` a real failure to get
 green.
@@ -94,9 +96,12 @@ green.
 
 `/ship` lands **one** change. When the work is a set of independent tasks (e.g.
 draining `bd ready`), let **firstmate** orchestrate: it pulls the backlog, runs
-each task in a treehouse worktree, and ships each through this same
-no-mistakes gate. `/ship` is the single-task path; firstmate is the breadth
-path. They share the same gate, so the contract is identical.
+each task in a treehouse worktree, and ships each through the same no-mistakes
+policy. For parallel tasks, firstmate also gives each crewmate a distinct
+per-worktree `NM_HOME`, which isolates no-mistakes state, sockets, gate repos,
+database, and daemon. `/ship` is the single-task path; firstmate is the breadth
+path. Keep branch names unique per task because remote branches and PRs are
+still shared at the git host.
 
 ## What `/ship` does NOT do
 

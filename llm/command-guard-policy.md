@@ -51,7 +51,8 @@ Codex, and future harnesses.
 - Deliver feature branches through the **no-mistakes** gate: it runs automated
   review/tests/lint/docs, then pushes to the configured target and opens or
   updates the PR. Drive it with the `/ship` skill or the `no-mistakes` skill;
-  for breadth, firstmate ships each crew task through the same gate.
+  for breadth, firstmate ships each crew task through the same no-mistakes
+  policy with separate per-worktree `NM_HOME` state.
 - Do not hand-roll `git push` + `gh pr create` for delivery work — let the gate
   own the push so the pipeline runs.
 

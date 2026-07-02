@@ -68,3 +68,10 @@ customized file without `--reseed`. To change the shared baseline for everyone,
 edit the files here and ship through the no-mistakes gate. Adding a project:
 add a registry line in the format above with the chosen mode, then have
 firstmate clone and (for `no-mistakes`) initialize it per AGENTS.md section 6.
+
+For parallel `no-mistakes` work, firstmate spawns each crewmate with a
+per-worktree `NM_HOME` derived by `nm-home`, so every gate run gets isolated
+state, socket, gate repos, database, and daemon. Manual `treehouse get` shells
+are auto-scoped by the zsh hook when they live under `~/.treehouse`; explicit
+`NM_HOME` values are left alone. Branch names must still be unique per task
+because the remote git host and PR namespace are shared.

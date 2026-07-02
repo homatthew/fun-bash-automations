@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# nm-home — derive a stable per-worktree NM_HOME path.
+#
+# By default prints the home for the current git worktree. Use --for <path> to
+# compute for another path, --mkdir to create it, and --export to print shell
+# exports suitable for eval.
+set -euo pipefail
+
+START="."
+MKDIR=0
+EXPORT=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: nm-home [--for <path>] [--mkdir] [--export]
+
+Print a deterministic NM_HOME under ${NM_HOME_BASE:-~/.no-mistakes-homes}
+for the resolved git worktree containing <path> (or the current directory).
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --for)
+      [ "$#" -ge 2 ] || { echo "nm-home: --for needs a path" >&2; exit 2; }
+      START=$2
+      shift 2
+      ;;
+    --mkdir)
+      MKDIR=1
+      shift
+      ;;
+    --export|--print-env)
+      EXPORT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "nm-home: unknown arg $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[ -d "$START" ] || { echo "nm-home: not a directory: $START" >&2; exit 1; }
+ROOT=$(git -C "$START" rev-parse --show-toplevel 2>/dev/null) || {
+  echo "nm-home: not inside a git worktree: $START" >&2
+  exit 1
+}
+ROOT=$(cd "$ROOT" && pwd -P)
+
+BASE="${NM_HOME_BASE:-$HOME/.no-mistakes-homes}"
+LABEL=$(basename "$ROOT" | tr -c '[:alnum:]._-' '-' | sed -E 's/^-+//; s/-+$//')
+[ -n "$LABEL" ] || LABEL=worktree
+
+if command -v shasum >/dev/null 2>&1; then
+  HASH=$(printf '%s' "$ROOT" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+elif command -v sha256sum >/dev/null 2>&1; then
+  HASH=$(printf '%s' "$ROOT" | sha256sum | awk '{print substr($1, 1, 16)}')
+else
+  HASH=$(printf '%s' "$ROOT" | cksum | awk '{print $1}')
+fi
+
+HOME_PATH="$BASE/$LABEL-$HASH"
+if [ "$MKDIR" -eq 1 ]; then
+  mkdir -p "$HOME_PATH"
+  if [ ! -f "$HOME_PATH/config.yaml" ]; then
+    cat > "$HOME_PATH/config.yaml" <<'EOF'
+# no-mistakes home-scoped configuration
+agent: codex
+EOF
+  fi
+fi
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+if [ "$EXPORT" -eq 1 ]; then
+  printf 'export NM_HOME=%s\n' "$(shell_quote "$HOME_PATH")"
+  printf 'export NM_HOME_AUTO=1\n'
+else
+  printf '%s\n' "$HOME_PATH"
+fi

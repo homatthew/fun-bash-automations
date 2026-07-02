@@ -2,6 +2,9 @@
 
 Hook scripts shared across Claude and Codex. `bin/fba-deploy` copies each
 `*.sh` here into `~/.claude/hooks/` and `~/.codex/hooks/`.
+Custom Claude and Codex alert hooks are currently disabled in
+`claude/settings.json` and `codex/hooks.json`; the scripts remain for manual use
+or future opt-in.
 
 ## Scripts
 

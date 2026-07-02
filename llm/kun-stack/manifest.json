@@ -18,10 +18,11 @@
     "no-mistakes": {
       "kind": "go",
       "module": "github.com/kunchenguid/no-mistakes/cmd/no-mistakes",
-      "version": "v1.30.1",
+      "version": "v1.32.2",
       "bin": "no-mistakes",
       "version_args": ["--version"],
-      "version_match": "1.30.1",
+      "version_match": "1.32.0",
+      "version_policy": "same_minor_or_newer_patch",
       "self_update": "no-mistakes update",
       "role": "The automated delivery gate (review/test/lint/docs -> push -> PR).",
       "required": true

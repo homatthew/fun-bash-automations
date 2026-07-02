@@ -1,9 +1,8 @@
 # no-mistakes per-repo config (RepoConfig) — sanctioned FBA baseline.
 #
-# This is the default "no mistakes" pipeline config other repos copy. It is
-# faithful to the real tool (no-mistakes v1.30.x, schema verified against
-# internal/config/config.go). Only the keys below exist in a repo-level config;
-# anything not listed here is set globally in ~/.no-mistakes/config.yaml.
+# This is the default no-mistakes pipeline config other repos copy. Keep it
+# aligned with upstream no-mistakes v1.32.x RepoConfig docs. Anything not listed
+# here inherits from ~/.no-mistakes/config.yaml or the built-in defaults.
 #
 # Pipeline order (fixed, not configurable):
 #   intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci
@@ -18,16 +17,25 @@
 
 # Agent for code generation / fixes. Usually omit here and inherit the global
 # `agent` (default: auto). Override per-repo only if this repo needs a specific
-# one. Options: auto, claude, codex, rovodev, opencode, pi, acp:<target>.
+# one. Options: auto, claude, codex, rovodev, opencode, pi, copilot,
+# acp:<target>.
 # agent: auto
 
-# Per-repo command overrides. Leave blank to let no-mistakes auto-detect from
-# the repo (package.json scripts, Makefile, etc.). Set explicitly when the repo
-# has a non-obvious lint/test/format command. Empty string = auto-detect.
+# Per-repo command overrides. Empty string = auto-detect. These run shell
+# commands on the no-mistakes daemon host, so upstream no-mistakes reads
+# `commands.*` and `agent` from the trusted default-branch copy of this file by
+# default, not from the pushed feature-branch SHA. If the default-branch fetch
+# fails, those fields fail closed to empty values.
 commands:
   lint: ""    # command the lint stage runs
   test: ""    # command the test stage runs
   format: ""  # formatter the push stage runs before pushing
+
+# Leave this false unless every pushed branch is trusted. When true, no-mistakes
+# honors `commands.*` and `agent` from the pushed branch instead of the
+# default-branch copy. This switch itself is read only from the trusted
+# default-branch copy, so a contributor cannot self-enable it from a branch.
+# allow_repo_commands: false
 
 # Paths the gate should not treat as source for review/findings (generated code,
 # vendored deps, fixtures). Gitignore-style globs.

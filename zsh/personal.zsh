@@ -293,6 +293,46 @@ export PATH=$PATH:/Users/matthewho/.temporal
 export BEADS_DIR=$HOME/repos/dump/.beads
 export BD_DB=$BEADS_DIR/beads.db
 
+# no-mistakes: automatically isolate gate state inside manual treehouse
+# worktrees. firstmate sets NM_HOME explicitly for crewmates; this hook covers
+# ad hoc `treehouse get` shells without overriding a user-chosen NM_HOME.
+if [[ -n "$ZSH_VERSION" ]]; then
+    _fba_nm_home_chpwd() {
+        emulate -L zsh
+        [[ "${NM_HOME_AUTOSCOPE:-1}" == "1" ]] || return 0
+        command -v nm-home >/dev/null 2>&1 || return 0
+
+        local root treehouse_root nmh
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+            if [[ -n "${NM_HOME_AUTO:-}" ]]; then
+                unset NM_HOME NM_HOME_AUTO
+            fi
+            return 0
+        }
+        root=${root:A}
+        treehouse_root="${TREEHOUSE_HOME:-$HOME/.treehouse}"
+        treehouse_root=${treehouse_root:A}
+
+        if [[ "${NM_HOME_AUTOSCOPE_ALL:-0}" != "1" && "$root" != "$treehouse_root"/* ]]; then
+            if [[ -n "${NM_HOME_AUTO:-}" ]]; then
+                unset NM_HOME NM_HOME_AUTO
+            fi
+            return 0
+        fi
+        if [[ -n "${NM_HOME:-}" && -z "${NM_HOME_AUTO:-}" ]]; then
+            return 0
+        fi
+
+        nmh=$(nm-home --for "$root" --mkdir 2>/dev/null) || return 0
+        export NM_HOME="$nmh"
+        export NM_HOME_AUTO=1
+    }
+
+    autoload -Uz add-zsh-hook
+    add-zsh-hook chpwd _fba_nm_home_chpwd
+    _fba_nm_home_chpwd
+fi
+
 # ==============================================================================
 # Aliases
 # ==============================================================================

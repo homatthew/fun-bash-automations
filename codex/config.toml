@@ -23,7 +23,7 @@ hooks = true
 remote_connections = true
 
 [tui]
-notifications = [ "agent-turn-complete", "approval-requested" ]
+notifications = []
 status_line = [
   "model-with-reasoning",
   "git-branch",

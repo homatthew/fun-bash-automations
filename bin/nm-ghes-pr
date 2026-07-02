@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# nm-ghes-pr — open a PR on Netflix GHE (git.netflix.net) after the no-mistakes
-# gate has validated and pushed the branch.
+# nm-ghes-pr — legacy fallback to open a PR on Netflix GHE (git.netflix.net)
+# after the no-mistakes gate has validated and pushed the branch.
 #
-# Why this exists: no-mistakes runs its full pipeline against git.netflix.net
-# repos and pushes the feature branch fine, but its built-in `pr` step skips
-# with "provider unknown is not supported yet" — it has no GHES provider handler
-# yet. This shim fills that one gap. On github.com origins no-mistakes opens the
-# PR itself, so this no-ops there.
+# Upstream no-mistakes supports self-hosted GitHub through the gh CLI when the
+# host is authenticated (`gh auth login --hostname git.netflix.net`). Prefer the
+# built-in PR step. This shim is only for a run that explicitly skipped PR
+# creation after the gate validated and pushed the branch. On github.com origins
+# no-mistakes opens the PR itself, so this no-ops there.
 #
 # Idempotent: if a PR for the head branch already exists, it prints that URL.
 # stdout = PR URL only; everything else goes to stderr.
@@ -65,7 +65,7 @@ if [ -n "$existing" ]; then
 fi
 
 TITLE="${TITLE:-$(git log -1 --format=%s 2>/dev/null)}"
-BODY="${BODY:-"Validated and pushed by the no-mistakes gate. PR opened by nm-ghes-pr because no-mistakes' built-in PR step does not yet support the git.netflix.net provider."}"
+BODY="${BODY:-"Validated and pushed by the no-mistakes gate. PR opened by nm-ghes-pr as a fallback because this run's built-in PR step skipped git.netflix.net."}"
 
 echo "nm-ghes-pr: opening PR $slug $HEAD -> $BASE" >&2
 gh pr create --repo "$slug" --base "$BASE" --head "$HEAD" --title "$TITLE" --body "$BODY" $DRAFT

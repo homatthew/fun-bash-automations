@@ -6,7 +6,7 @@ This file is Claude-specific runtime guidance layered on top of shared policy.
 
 ## Notifications
 
-- Notifications are handled by `~/.claude/hooks/notify.sh`.
+- Custom Claude alert hooks are disabled in `claude/settings.json`.
 - Do not call `terminal-notifier` manually.
 
 ## Claude Runtime Files

@@ -45,18 +45,6 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.codex/hooks/notify.sh",
-            "statusMessage": "Marking task active",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
@@ -76,18 +64,6 @@
             "command": "~/.codex/hooks/sourcegraph-auth-hint.sh",
             "statusMessage": "Checking Sourcegraph auth failure",
             "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.codex/hooks/notify.sh",
-            "statusMessage": "Sending notification",
-            "timeout": 10
           }
         ]
       }

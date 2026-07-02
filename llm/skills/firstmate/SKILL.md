@@ -40,6 +40,11 @@ clones/locates projects under `projects/`, and spawns crewmates
 - **Gate**: ship tasks follow each project's delivery mode — for our repos that is
   the **no-mistakes** gate. Scout/investigation tasks produce local reports and
   push nothing.
+- **Gate isolation**: each crewmate worktree gets its own `NM_HOME` (derived by
+  `nm-home`) so parallel no-mistakes runs use separate state, sockets, and
+  daemons instead of serializing or contaminating each other. Branch names must
+  still be unique per task because the remote git host and PR namespace are
+  shared.
 - **Read-only by construction** over your projects except clean default-branch
   refreshes, safe local-branch pruning, and approved `local-only` fast-forward
   merges.

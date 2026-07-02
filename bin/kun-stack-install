@@ -43,15 +43,52 @@ want_tool() {
   return 1
 }
 
-# Probe whether <bin> reports a version containing <match>. Returns 0 if matched.
+# Probe whether <bin> reports a version matching <match>. Returns 0 if matched.
 # Capture fully before grepping so an early update banner + grep -q early exit
 # cannot SIGPIPE the tool (which pipefail would surface as a false mismatch).
+semver_triplet() {
+  local text="$1"
+  if [[ "$text" =~ v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    printf '%s %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    return 0
+  fi
+  return 1
+}
+
+first_semver_triplet() {
+  local line
+  while IFS= read -r line; do
+    semver_triplet "$line" && return 0
+  done
+  return 1
+}
+
+version_output_matches() {
+  local out="$1" match="$2" policy="${3:-}" want have want_major want_minor want_patch have_major have_minor have_patch
+  case "$policy" in
+    same_minor_or_newer_patch)
+      want=$(semver_triplet "$match") || return 1
+      have=$(printf '%s\n' "$out" | first_semver_triplet) || return 1
+      read -r want_major want_minor want_patch <<< "$want"
+      read -r have_major have_minor have_patch <<< "$have"
+      [[ "$have_major" == "$want_major" && "$have_minor" == "$want_minor" ]] || return 1
+      (( 10#$have_patch >= 10#$want_patch ))
+      ;;
+    ""|exact|contains)
+      printf '%s\n' "$out" | grep -qF "$match"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 probe_version() {
-  local bin="$1" match="$2"; shift 2
+  local bin="$1" match="$2" policy="$3"; shift 3
   command -v "$bin" >/dev/null 2>&1 || return 1
   local out
   out=$("$bin" "$@" 2>&1) || true
-  printf '%s\n' "$out" | grep -qF "$match"
+  version_output_matches "$out" "$match" "$policy"
 }
 
 FAILED=()
@@ -99,6 +136,7 @@ for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
   required=$(jq -r --arg t "$name" '.tools[$t].required // false' "$MANIFEST")
   bin=$(jq -r --arg t "$name" '.tools[$t].bin // empty' "$MANIFEST")
   match=$(jq -r --arg t "$name" '.tools[$t].version_match // empty' "$MANIFEST")
+  policy=$(jq -r --arg t "$name" '.tools[$t].version_policy // empty' "$MANIFEST")
   vargs=()
   while IFS= read -r _a; do [ -n "$_a" ] && vargs+=("$_a"); done \
     < <(jq -r --arg t "$name" '.tools[$t].version_args[]? // empty' "$MANIFEST")
@@ -106,8 +144,8 @@ for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
 
   # Idempotent skip: marker present, version still matches, not forced.
   if [ "$FORCE" -eq 0 ] && [ -n "$bin" ] && [ -n "$match" ] \
-     && probe_version "$bin" "$match" "${vargs[@]}"; then
-    log "$name already at pinned version ($match) — skipping"
+     && probe_version "$bin" "$match" "$policy" "${vargs[@]}"; then
+    log "$name already satisfies version policy ($match${policy:+; $policy}) — skipping"
     printf '%s\n' "$match" > "$marker"
     SKIPPED+=("$name"); continue
   fi
@@ -122,7 +160,7 @@ for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
 
   if [ "$ok" -eq 1 ]; then
     # git tools have no version_match; treat a successful clone/checkout as done.
-    if [ -z "$bin" ] || [ -z "$match" ] || probe_version "$bin" "$match" "${vargs[@]}"; then
+    if [ -z "$bin" ] || [ -z "$match" ] || probe_version "$bin" "$match" "$policy" "${vargs[@]}"; then
       printf '%s\n' "${match:-$kind}" > "$marker"
       INSTALLED+=("$name")
     else

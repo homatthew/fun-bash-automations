@@ -24,30 +24,6 @@
   },
   "fastMode": false,
   "hooks": {
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/notify.sh",
-            "type": "command",
-            "timeout": 15
-          }
-        ],
-        "matcher": ""
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/notify.sh",
-            "type": "command",
-            "timeout": 15
-          }
-        ],
-        "matcher": ""
-      }
-    ],
     "PreCompact": [
       {
         "hooks": [
@@ -109,18 +85,6 @@
           {
             "command": "~/.claude/hooks/beads-prime.sh",
             "type": "command"
-          }
-        ],
-        "matcher": ""
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/notify.sh",
-            "type": "command",
-            "timeout": 15
           }
         ],
         "matcher": ""

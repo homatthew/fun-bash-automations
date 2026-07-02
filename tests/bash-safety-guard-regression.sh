@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..90"
+echo "1..85"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -338,11 +338,11 @@ git init -q "$dotfiles_repo"
 git -C "$dotfiles_repo" remote add origin https://git.netflix.net/matthewho/dotfiles.git
 dotfiles_push_allow=$(run_guard_with_workdir "$dotfiles_repo" "git push origin HEAD:main")
 [[ -z "$dotfiles_push_allow" ]] || fail "expected dotfiles direct push to be allowed, got: $dotfiles_push_allow"
-echo "ok 57 - dotfiles direct delivery push bypasses push-gate guard"
+echo "ok 57 - dotfiles direct delivery push bypasses feature-branch push guard"
 
 dotfiles_push_c_allow=$(run_guard "git -C $dotfiles_repo push origin HEAD:main")
 [[ -z "$dotfiles_push_c_allow" ]] || fail "expected dotfiles git -C direct push to be allowed, got: $dotfiles_push_c_allow"
-echo "ok 58 - dotfiles git -C direct delivery push bypasses push-gate guard"
+echo "ok 58 - dotfiles git -C direct delivery push bypasses feature-branch push guard"
 
 dotfiles_bare_push_block=$(run_guard_with_workdir "$dotfiles_repo" "git push")
 expect_contains "$dotfiles_bare_push_block" "bare git push is not allowed"
@@ -354,7 +354,7 @@ git -C "$fba_repo" checkout -q -b mh-netflix
 git -C "$fba_repo" remote add origin git@github.com:homatthew/fun-bash-automations.git
 fba_push_allow=$(run_guard_with_workdir "$fba_repo" "git push origin mh-netflix")
 [[ -z "$fba_push_allow" ]] || fail "expected FBA mh-netflix direct push to be allowed, got: $fba_push_allow"
-echo "ok 59 - fun-bash-automations mh-netflix direct push bypasses push-gate guard"
+echo "ok 59 - fun-bash-automations mh-netflix direct push bypasses feature-branch push guard"
 
 fba_bare_push_block=$(run_guard_with_workdir "$fba_repo" "git push")
 expect_contains "$fba_bare_push_block" "bare git push is not allowed"
@@ -378,6 +378,10 @@ echo "ok 60c - git push of a feature branch with 2>&1 | tail is allowed"
 fba_main_redir_block=$(run_guard_with_workdir "$fba_repo" "git push origin main 2>&1")
 expect_contains "$fba_main_redir_block" "pushing directly to origin/main is not allowed"
 echo "ok 60d - git push origin main 2>&1 stays blocked (redirect stripped, not a bypass)"
+
+quoted_push_text_allow=$(run_guard_with_workdir "$fba_repo" 'rg -n "git push no-mistakes" README.md')
+[[ -z "$quoted_push_text_allow" ]] || fail "expected quoted git-push search text to be allowed, got: $quoted_push_text_allow"
+echo "ok 60d2 - quoted git push text in a search command is not treated as a push"
 
 # Multi-line scripts: a git push on its own line must be isolated (regression:
 # newline-separated statements merged into one segment -> false 'bare push').

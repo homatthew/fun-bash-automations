@@ -195,7 +195,72 @@ is_dotfiles_repo() {
 }
 
 is_git_push_command() {
-  echo "$COMMAND" | grep -qE '(^|[;&|][[:space:]]*)git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+push([[:space:]]|$)'
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+def is_push_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return False
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return True
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if any(token.startswith(prefix) for prefix in (
+            "--git-dir=",
+            "--work-tree=",
+            "--namespace=",
+            "--exec-path=",
+            "--super-prefix=",
+        )):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return False
+    return False
+
+
+sys.exit(0 if any(is_push_segment(segment) for segment in segments) else 1)
+PY
 }
 
 agent_push_policy_path() {
@@ -1490,8 +1555,8 @@ check_git_force() {
   if echo "$COMMAND" | grep -qE 'git\s+branch\s+-D\s'; then
     # yolo branches may be force-deleted locally for cleanup of unmerged work.
     # Exempt only when EVERY deleted branch name is yolo-prefixed; a mixed or
-    # non-yolo delete still blocks. Remote deletes are gated in push-gate, not
-    # here.
+    # non-yolo delete still blocks. Remote deletes are handled by the push
+    # guard and the git-level pre-push hook, not here.
     local _yolo_del_targets _yolo_del_ok _yolo_del_t
     _yolo_del_targets=$(git_branch_force_delete_targets)
     _yolo_del_ok=0
@@ -1513,7 +1578,7 @@ check_git_force() {
 # Self-contained protected-branch guard for agent-initiated pushes. The
 # authoritative main-branch protection is the git-level pre-push hook, which
 # also catches external binaries (gnhf, no-mistakes); this agent-layer check is
-# defense-in-depth. The push-gate lease / Remote Scratch Mode / Dolt-stack
+# defense-in-depth. The retired push-gate lease / Remote Scratch Mode / Dolt-stack
 # auditing was retired with the rest of that stack, so this guard has no
 # external dependency.
 #
@@ -1940,7 +2005,7 @@ check_fba_pr_safety() {
 # --- 10bb. Scratch PR Safety ---
 check_scratch_pr_safety() {
   has_scratch_pr_open_command || return
-  deny "Blocked: scratch branches are not PR-eligible. Promote the commits to a delivery branch and use push-gate."
+  deny "Blocked: scratch branches are not PR-eligible. Promote the commits to a delivery branch and use the no-mistakes gate."
 }
 
 # --- 10c. GitHub Gist Host Safety ---

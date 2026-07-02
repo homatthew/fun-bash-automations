@@ -88,7 +88,8 @@ class for throwaway-fast work.
   review/tests/lint/docs, then pushes to the configured target and opens or
   updates the PR. The finish-the-job entrypoint is the `/ship` skill for a
   single change; for breadth across many tasks use `firstmate`, and for a
-  long-run single-objective loop use `gnhf`. All ship through the same gate.
+  long-run single-objective loop use `gnhf`. All ship through the same
+  no-mistakes policy.
 - `fun-bash-automations` and `dotfiles` are direct-push delivery repos
   (`mh-netflix` and `main`): after the user explicitly asks to push or invokes a
   finish workflow, the gate pushes directly with an explicit branch target such
@@ -118,6 +119,18 @@ Drive it with the `/ship` skill or the `no-mistakes` skill (`no-mistakes`, or
 `no-mistakes axi run` for agent-driven TOON output). The git-level main pre-push
 hook and `bash-safety-guard.sh` block protected-branch and bare/ambiguous pushes
 underneath it; these guardrails are never weakened.
+
+For parallel agents on the same repository, treehouse worktrees are necessary
+but not sufficient: each concurrent no-mistakes run must also have its own
+`NM_HOME` before `no-mistakes init`, `no-mistakes axi run`, or `/no-mistakes`.
+`NM_HOME` is the isolation boundary for no-mistakes state, socket, gate repos,
+database, and daemon. firstmate sets a per-worktree `NM_HOME` for crewmates and
+records it as `nm_home=` in task metadata; manual treehouse shells are
+auto-scoped by the zsh hook under `~/.treehouse`, or can be made explicit with
+`eval "$(nm-home --for "$PWD" --mkdir --export)"`. Do not unset a crewmate's
+inherited `NM_HOME`. Also keep branch names unique per concurrent task: separate
+homes isolate local gate state, but the remote branch and PR namespace are still
+shared by the git host.
 
 Never bypass the gate or the guard. Do not suggest, run, or document
 `--no-verify`, piping `yes` / `echo y` into a prompt, `no-mistakes --skip <step>`
