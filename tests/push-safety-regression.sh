@@ -50,15 +50,26 @@ hook="$(git -C "$linked" rev-parse --git-path hooks/pre-push)"
 [[ -x "$hook" ]] || fail "expected executable linked-worktree pre-push hook at $hook"
 
 zero_sha=0000000000000000000000000000000000000000
-if protected_out="$(printf 'refs/heads/topic %s refs/heads/main %s\n' "$zero_sha" "$zero_sha" | "$hook" origin git@example.com:repo.git 2>&1)"; then
+if protected_out="$( (cd "$linked" && printf 'refs/heads/topic %s refs/heads/main %s\n' "$zero_sha" "$zero_sha" | "$hook" origin git@example.com:repo.git) 2>&1)"; then
   fail "expected pre-push hook to block protected branch updates"
 fi
 [[ "$protected_out" == *"PROTECTED_PUSH  refs/heads/topic -> refs/heads/main"* ]] ||
   fail "pre-push hook did not report protected branch update: $protected_out"
 
-feature_out="$(printf 'refs/heads/topic %s refs/heads/topic %s\n' "$zero_sha" "$zero_sha" | "$hook" origin git@example.com:repo.git 2>&1)" ||
+feature_out="$( (cd "$linked" && printf 'refs/heads/topic %s refs/heads/topic %s\n' "$zero_sha" "$zero_sha" | "$hook" origin git@example.com:repo.git) 2>&1)" ||
   fail "expected pre-push hook to allow non-protected branch updates, got: $feature_out"
-[[ "$feature_out" == *"push-safety scan clean (all)"* ]] ||
+[[ "$feature_out" == *"push-safety scan clean (pre-push)"* ]] ||
   fail "pre-push hook did not run the leak scan after ref validation: $feature_out"
+
+printf 'token=%s%s\n' 'sk-' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > "$linked/committed-secret.txt"
+git -C "$linked" add committed-secret.txt
+git -C "$linked" commit -q -m "add committed secret"
+printf 'token=redacted\n' > "$linked/committed-secret.txt"
+secret_sha="$(git -C "$linked" rev-parse HEAD)"
+if committed_out="$( (cd "$linked" && printf 'refs/heads/topic %s refs/heads/topic %s\n' "$secret_sha" "$zero_sha" | "$hook" origin git@example.com:repo.git) 2>&1)"; then
+  fail "expected pre-push hook to catch a pushed committed secret"
+fi
+[[ "$committed_out" == *"LEAK  committed-secret.txt:1  [openai-secret]"* ]] ||
+  fail "pre-push hook did not scan the pushed commit content: $committed_out"
 
 echo "push safety regression passed"

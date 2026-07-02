@@ -17,6 +17,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALLOW_FILE="$ROOT/scripts/check-push-safety.allow"
 MODE="all"
+PRE_PUSH_REMOTE=""
+PRE_PUSH_UPDATES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,9 +54,11 @@ HOOK
 fi
 
 if [[ "$MODE" == "pre-push" ]]; then
+  PRE_PUSH_REMOTE="${1:-}"
   protected_hits=0
   while read -r local_ref local_sha remote_ref remote_sha; do
     [[ -n "${remote_ref:-}" ]] || continue
+    PRE_PUSH_UPDATES+=("${local_sha:-}	${remote_sha:-}")
     branch="${remote_ref#refs/heads/}"
     [[ "$branch" != "$remote_ref" ]] || continue
     case "$branch" in
@@ -73,7 +77,6 @@ Push a non-protected delivery or feature branch through the configured gate.
 MSG
     exit 1
   fi
-  MODE="all"
 fi
 
 # Patterns to flag. Each line: <label>|<extended regex>
@@ -109,13 +112,7 @@ allow_match() {
   return 1
 }
 
-if [[ "$MODE" == "staged" ]]; then
-  # Scan staged diff content for added lines that match patterns.
-  diff_text="$(git -C "$ROOT" diff --cached --unified=0 --no-color)"
-  if [[ -z "$diff_text" ]]; then
-    echo "no staged changes"
-    exit 0
-  fi
+scan_added_diff() {
   while IFS= read -r added; do
     [[ -n "$added" ]] || continue
     file="${added%%:*}"
@@ -137,7 +134,60 @@ if [[ "$MODE" == "staged" ]]; then
       printf 'LEAK  %s:%s  [%s]\n' "$file" "$line_no" "$label"
       HITS=$((HITS + 1))
     done
-  done < <(
+  done
+}
+
+scan_commit_diff() {
+  local commit="$1"
+  scan_added_diff < <(
+    git -C "$ROOT" show --format= --unified=0 --no-color --no-ext-diff --diff-filter=ACMR "$commit" |
+      awk '
+      /^\+\+\+ b\// { file = substr($0, 7); next }
+      /^@@ / {
+        if (match($0, /\+[0-9]+/)) {
+          line = substr($0, RSTART + 1, RLENGTH - 1)
+        }
+        next
+      }
+      /^\+\+\+ / { next }
+      /^\+/ {
+        if (file != "" && line != "") {
+          print file ":" line ":" substr($0, 2)
+          line++
+        }
+        next
+      }
+      /^ / {
+        if (line != "") line++
+      }
+      '
+  )
+}
+
+pre_push_commits() {
+  local local_sha="$1" remote_sha="$2" commits zero_sha
+  zero_sha=0000000000000000000000000000000000000000
+  [[ -n "$local_sha" && "$local_sha" != "$zero_sha" ]] || return 0
+  if [[ -n "$remote_sha" && "$remote_sha" != "$zero_sha" ]]; then
+    git -C "$ROOT" rev-list "${remote_sha}..${local_sha}"
+    return 0
+  fi
+  commits="$(git -C "$ROOT" rev-list "$local_sha" --not --remotes="$PRE_PUSH_REMOTE" 2>/dev/null || true)"
+  if [[ -n "$commits" ]]; then
+    printf '%s\n' "$commits"
+  else
+    git -C "$ROOT" rev-list -n 1 "$local_sha"
+  fi
+}
+
+if [[ "$MODE" == "staged" ]]; then
+  # Scan staged diff content for added lines that match patterns.
+  diff_text="$(git -C "$ROOT" diff --cached --unified=0 --no-color)"
+  if [[ -z "$diff_text" ]]; then
+    echo "no staged changes"
+    exit 0
+  fi
+  scan_added_diff < <(
     git -C "$ROOT" diff --cached --unified=0 --no-color --diff-filter=ACMR |
       awk '
         /^\+\+\+ b\// { file = substr($0, 7); next }
@@ -160,6 +210,14 @@ if [[ "$MODE" == "staged" ]]; then
         }
       '
   )
+elif [[ "$MODE" == "pre-push" ]]; then
+  for update in "${PRE_PUSH_UPDATES[@]}"; do
+    IFS=$'\t' read -r local_sha remote_sha <<< "$update"
+    while IFS= read -r commit; do
+      [[ -n "$commit" ]] || continue
+      scan_commit_diff "$commit"
+    done < <(pre_push_commits "$local_sha" "$remote_sha")
+  done
 else
   files_to_scan="$(git -C "$ROOT" ls-files)"
 fi

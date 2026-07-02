@@ -716,6 +716,47 @@ is_scratch_remote_token() {
   return 1
 }
 
+scratch_gh_pr_list() {
+  local selector="$1" branch="$2"
+  if [[ -n "$GUARD_WORKDIR" && -d "$GUARD_WORKDIR" ]]; then
+    (cd "$GUARD_WORKDIR" && GH_PAGER=cat gh pr list "$selector" "$branch" --state open --json number --limit 1)
+  else
+    GH_PAGER=cat gh pr list "$selector" "$branch" --state open --json number --limit 1
+  fi
+}
+
+verify_scratch_branch_pr_state() {
+  local branch="$1" head_json base_json
+  command -v gh >/dev/null 2>&1 || {
+    printf 'unverified\n'
+    return 2
+  }
+  head_json=$(scratch_gh_pr_list --head "$branch" 2>/dev/null) || {
+    printf 'unverified\n'
+    return 2
+  }
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "$head_json"; then
+    printf 'unverified\n'
+    return 2
+  fi
+  if ! jq -e 'length == 0' >/dev/null 2>&1 <<< "$head_json"; then
+    printf 'head\n'
+    return 1
+  fi
+  base_json=$(scratch_gh_pr_list --base "$branch" 2>/dev/null) || {
+    printf 'unverified\n'
+    return 2
+  }
+  if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "$base_json"; then
+    printf 'unverified\n'
+    return 2
+  fi
+  if ! jq -e 'length == 0' >/dev/null 2>&1 <<< "$base_json"; then
+    printf 'base\n'
+    return 1
+  fi
+}
+
 current_branch_is_yolo() {
   local branch
   branch=$(git_context symbolic-ref --quiet --short HEAD 2>/dev/null || git_context branch --show-current 2>/dev/null || true)
@@ -3147,6 +3188,20 @@ check_push_guard() {
     fi
     if git_push_has_any_force_from_command; then
       deny "Blocked: scratch branch pushes must not force-update remote history."
+    fi
+    local scratch_pr_state
+    if ! scratch_pr_state=$(verify_scratch_branch_pr_state "$target_branch"); then
+      case "$scratch_pr_state" in
+        head)
+          deny "Blocked: scratch branch ${target_branch} has an open PR and is not scratch-eligible."
+          ;;
+        base)
+          deny "Blocked: scratch branch ${target_branch} is the base of an open PR and is not scratch-eligible."
+          ;;
+        *)
+          deny "Blocked: could not verify scratch branch PR state for ${target_branch}; scratch pushes fail closed."
+          ;;
+      esac
     fi
   fi
 }

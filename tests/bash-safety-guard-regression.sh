@@ -8,6 +8,28 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 export SSH_LEASE_FILE="$TEST_TMP/ssh-leases"
 export SSH_COMMAND_LEASE_FILE="$TEST_TMP/ssh-command-leases"
 export BASH_SAFETY_GUARD_EXTENSION_DIRS="$TEST_TMP/bash-safety-guard.d"
+mkdir -p "$TEST_TMP/bin"
+cat >"$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then
+  mode="${GH_STUB_PR_STATE:-empty}"
+  selector=""
+  for arg in "$@"; do
+    if [[ "$arg" == "--head" || "$arg" == "--base" ]]; then
+      selector="$arg"
+    fi
+  done
+  case "$mode:$selector" in
+    fail:*) echo "auth failed" >&2; exit 1 ;;
+    head:--head|base:--base) printf '[{"number":1}]\n'; exit 0 ;;
+    *) printf '[]\n'; exit 0 ;;
+  esac
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+EOF
+chmod +x "$TEST_TMP/bin/gh"
+export PATH="$TEST_TMP/bin:$PATH"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -81,7 +103,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..128"
+echo "1..131"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -443,6 +465,30 @@ scratch_push_llm_allow=$(
 )
 [[ -z "$scratch_push_llm_allow" ]] || fail "expected LLM_AGENT_WORK_MODE remote_scratch scratch push to be allowed, got: $scratch_push_llm_allow"
 echo "ok 60i - scratch branch push is allowed with LLM_AGENT_WORK_MODE=remote_scratch"
+
+scratch_push_head_pr_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GH_STUB_PR_STATE=head
+  run_guard_with_workdir "$fba_repo" "git push origin wip/agent/has-pr"
+)
+expect_contains "$scratch_push_head_pr_block" "has an open PR"
+echo "ok 60i2 - scratch branch push with open head PR is blocked"
+
+scratch_push_base_pr_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GH_STUB_PR_STATE=base
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/pr-base"
+)
+expect_contains "$scratch_push_base_pr_block" "base of an open PR"
+echo "ok 60i3 - scratch branch push used as PR base is blocked"
+
+scratch_push_unverified_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GH_STUB_PR_STATE=fail
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/unverified"
+)
+expect_contains "$scratch_push_unverified_block" "could not verify scratch branch PR state"
+echo "ok 60i4 - scratch branch push fails closed when PR state is unverified"
 
 feature_delete_block=$(run_guard_with_workdir "$fba_repo" "git push origin --delete mho/feature")
 expect_contains "$feature_delete_block" "deleting remote branches is only allowed for configured yolo branches"
