@@ -11,6 +11,7 @@
 #   scripts/check-push-safety.sh            # scan tracked files
 #   scripts/check-push-safety.sh --staged   # scan only staged diff content
 #   scripts/check-push-safety.sh --install-hook   # write .git/hooks/pre-push
+#   scripts/check-push-safety.sh --pre-push <remote> <url>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,8 +22,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --staged) MODE="staged" ;;
     --install-hook) MODE="install-hook" ;;
+    --pre-push)
+      MODE="pre-push"
+      shift
+      break
+      ;;
     -h|--help)
-      sed -n '2,15p' "$0"
+      sed -n '2,16p' "$0"
       exit 0
       ;;
     *)
@@ -38,11 +44,36 @@ if [[ "$MODE" == "install-hook" ]]; then
   mkdir -p "$(dirname "$hook")"
   cat > "$hook" <<'HOOK'
 #!/usr/bin/env bash
-exec "$(git rev-parse --show-toplevel)/scripts/check-push-safety.sh"
+exec "$(git rev-parse --show-toplevel)/scripts/check-push-safety.sh" --pre-push "$@"
 HOOK
   chmod +x "$hook"
   echo "installed pre-push hook at $hook"
   exit 0
+fi
+
+if [[ "$MODE" == "pre-push" ]]; then
+  protected_hits=0
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ -n "${remote_ref:-}" ]] || continue
+    branch="${remote_ref#refs/heads/}"
+    [[ "$branch" != "$remote_ref" ]] || continue
+    case "$branch" in
+      main|master|develop|trunk)
+        printf 'PROTECTED_PUSH  %s -> %s\n' "${local_ref:-unknown}" "$remote_ref" >&2
+        protected_hits=$((protected_hits + 1))
+        ;;
+    esac
+  done
+  if [[ "$protected_hits" -gt 0 ]]; then
+    cat <<MSG >&2
+
+push-safety pre-push failed: protected branch update(s) are blocked
+
+Push a non-protected delivery or feature branch through the configured gate.
+MSG
+    exit 1
+  fi
+  MODE="all"
 fi
 
 # Patterns to flag. Each line: <label>|<extended regex>

@@ -35,14 +35,43 @@ for token in tokens:
 if current:
     segments.append(current)
 
-def parse_env_assignments(segment):
+def parse_segment_prefix(segment):
     env = {}
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        name, value = segment[idx].split("=", 1)
-        env[name] = value
-        idx += 1
-    return env, segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            name, value = segment[idx].split("=", 1)
+            env[name] = value
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    name, value = token.split("=", 1)
+                    env[name] = value
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return env, segment[idx:]
 
 def dgw_write(segment):
     if not segment or segment[0] != "dgw-cli":
@@ -68,7 +97,7 @@ def dgw_write(segment):
     return None
 
 for raw_segment in segments:
-    env_assignments, segment = parse_env_assignments(raw_segment)
+    env_assignments, segment = parse_segment_prefix(raw_segment)
     env = dgw_write(segment)
     if env is None:
         continue

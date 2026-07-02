@@ -24,6 +24,7 @@ INPUT_WORKDIR=$(echo "$INPUT" | jq -r '
 ')
 GUARD_WORKDIR=$(python3 - "$COMMAND" "$INPUT_WORKDIR" <<'PY'
 import os
+import re
 import shlex
 import sys
 
@@ -51,12 +52,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and "=" in segment[idx] and not segment[idx].startswith("-"):
-        name = segment[idx].split("=", 1)[0]
-        if not name.replace("_", "a").isalnum() or name[:1].isdigit():
-            break
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 for segment in segments:
     segment = strip_env_assignments(segment)
@@ -140,9 +165,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def bad_repo_value(value):
     return re.match(r"^(https?://)?(github|git)\.netflix\.net(/|:)", value) is not None
@@ -226,9 +278,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 def is_push_segment(segment):
@@ -294,9 +373,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def push_args_for_segment(segment):
     segment = strip_env_assignments(segment)
@@ -406,9 +512,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def push_args_for_segment(segment):
     segment = strip_env_assignments(segment)
@@ -624,9 +757,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 global_value_options = {
@@ -717,9 +877,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def git_subcommand(segment):
     segment = strip_env_assignments(segment)
@@ -781,9 +968,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def git_subcommand(segment):
     segment = strip_env_assignments(segment)
@@ -863,9 +1077,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 def branch_args(segment):
@@ -967,9 +1208,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def push_args_for_segment(segment):
     segment = strip_env_assignments(segment)
@@ -1096,9 +1364,36 @@ global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-lock
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def push_args_for_segment(segment):
     segment = strip_env_assignments(segment)
@@ -1180,15 +1475,44 @@ if current:
 global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
 global_no_value_options = {"--literal-pathspecs", "--no-optional-locks", "--no-pager"}
 
-def push_args_for_segment(segment):
-    if not segment:
-        return None
+def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    if idx >= len(segment) or segment[idx] != "git":
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
         return None
-    idx += 1
+    idx = 1
     while idx < len(segment):
         token = segment[idx]
         if token == "push":
@@ -1330,9 +1654,36 @@ placeholder_hosts = {"ignored", "ignore", "placeholder", "dummy"}
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def normalize_host(token):
     if "@" in token:
@@ -1432,9 +1783,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 for segment in segments:
     segment = strip_env_assignments(segment)
@@ -1472,9 +1850,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 if len(segments) != 1:
     sys.exit(1)
@@ -1535,9 +1940,36 @@ nodetool_deny = {
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def remote_tokens(segment):
     idx = 1
@@ -1636,9 +2068,36 @@ value_options = {
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def remote_tokens(segment):
     idx = 1
@@ -1752,9 +2211,36 @@ placeholder_hosts = {"ignored", "ignore", "placeholder", "dummy"}
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def normalize_host(token):
     if "@" in token:
@@ -1907,9 +2393,36 @@ unsafe = []
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def check_option(value):
     if "=" not in value:
@@ -2002,9 +2515,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 def collect_gist_create_files(args):
@@ -2128,9 +2668,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def repo_is_fba(repo):
     if not repo:
@@ -2222,9 +2789,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 def strip_gh_global_args(args):
     out = []
@@ -2495,9 +3089,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 def git_subcommand(segment):
@@ -2631,9 +3252,36 @@ if current:
 
 def strip_env_assignments(segment):
     idx = 0
-    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
-        idx += 1
-    return segment[idx:]
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
 
 
 read_flags = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}

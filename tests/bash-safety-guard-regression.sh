@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..117"
+echo "1..123"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -364,6 +364,10 @@ fba_push_allow=$(run_guard_with_workdir "$fba_repo" "git push origin mh-netflix"
 [[ -z "$fba_push_allow" ]] || fail "expected FBA mh-netflix direct push to be allowed, got: $fba_push_allow"
 echo "ok 59 - fun-bash-automations mh-netflix direct push bypasses feature-branch push guard"
 
+fba_wrapped_push_allow=$(run_guard_with_workdir "$fba_repo" "env git push origin mh-netflix")
+[[ -z "$fba_wrapped_push_allow" ]] || fail "expected wrapped FBA mh-netflix direct push to be allowed, got: $fba_wrapped_push_allow"
+echo "ok 59a - wrapped fun-bash-automations mh-netflix direct push stays allowed"
+
 fba_bare_push_block=$(run_guard_with_workdir "$fba_repo" "git push")
 expect_contains "$fba_bare_push_block" "bare git push is not allowed"
 echo "ok 59b - fun-bash-automations bare git push is blocked despite direct-push exception"
@@ -371,6 +375,10 @@ echo "ok 59b - fun-bash-automations bare git push is blocked despite direct-push
 fba_main_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin HEAD:main")
 expect_contains "$fba_main_push_block" "pushing directly to origin/main is not allowed"
 echo "ok 60 - fun-bash-automations main push remains blocked"
+
+wrapped_fba_main_push_block=$(run_guard_with_workdir "$fba_repo" "env git push origin HEAD:main")
+expect_contains "$wrapped_fba_main_push_block" "pushing directly to origin/main is not allowed"
+echo "ok 60a0 - wrapped fun-bash-automations main push remains blocked"
 
 printf 'builder.work %s\n' "$future_expiry" >>"$SSH_LEASE_FILE"
 dotwork_pure_allow=$(run_guard "ssh builder.work 'sudo systemctl restart test-service'")
@@ -455,6 +463,22 @@ echo "ok 60m - protected remote branch delete is blocked"
 colon_yolo_delete_allow=$(run_guard_with_workdir "$fba_repo" "git push origin :mho-yolo/quick")
 [[ -z "$colon_yolo_delete_allow" ]] || fail "expected colon yolo remote delete on origin to be allowed, got: $colon_yolo_delete_allow"
 echo "ok 60n - colon-form yolo remote branch delete is allowed"
+
+wrapped_feature_delete_block=$(run_guard_with_workdir "$fba_repo" "command git push origin --delete mho/feature")
+expect_contains "$wrapped_feature_delete_block" "deleting remote branches is only allowed for configured yolo branches"
+echo "ok 60o - wrapped ordinary remote branch delete is blocked"
+
+wrapped_yolo_delete_allow=$(run_guard_with_workdir "$fba_repo" "env git push origin --delete mho-yolo/quick")
+[[ -z "$wrapped_yolo_delete_allow" ]] || fail "expected wrapped yolo remote delete on origin to be allowed, got: $wrapped_yolo_delete_allow"
+echo "ok 60p - wrapped yolo remote branch delete is allowed"
+
+wrapped_plain_force_block=$(run_guard_with_workdir "$fba_repo" "env git push --force origin mho-yolo/quick")
+expect_contains "$wrapped_plain_force_block" "Use --force-with-lease"
+echo "ok 60q - wrapped plain force push is blocked"
+
+wrapped_force_with_lease_allow=$(run_guard_with_workdir "$fba_repo" "command git push --force-with-lease origin mho-yolo/quick")
+[[ -z "$wrapped_force_with_lease_allow" ]] || fail "expected wrapped force-with-lease yolo push to be allowed, got: $wrapped_force_with_lease_allow"
+echo "ok 60r - wrapped force-with-lease yolo push is allowed"
 
 fake_bin="$TEST_TMP/fake-bin"
 mkdir -p "$fake_bin"
