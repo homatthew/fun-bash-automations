@@ -295,6 +295,18 @@ yolo_branch_prefixes() {
   ' "$policy_path" 2>/dev/null
 }
 
+yolo_branch_remotes() {
+  local policy_path
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 0
+  jq -r '
+    (.yolo_branches // {})
+    | select((.enabled // false) == true)
+    | .remotes // []
+    | .[]
+  ' "$policy_path" 2>/dev/null
+}
+
 # True when token starts with a configured (enabled) yolo prefix.
 is_yolo_branch_token() {
   local token="$1" prefix
@@ -303,6 +315,38 @@ is_yolo_branch_token() {
     [[ -z "$prefix" ]] && continue
     [[ "$token" == "$prefix"* ]] && return 0
   done < <(yolo_branch_prefixes)
+  return 1
+}
+
+is_yolo_remote_token() {
+  local token="$1" remote
+  [[ -n "$token" ]] || return 1
+  while IFS= read -r remote; do
+    [[ -z "$remote" ]] && continue
+    [[ "$token" == "$remote" ]] && return 0
+  done < <(yolo_branch_remotes)
+  return 1
+}
+
+scratch_branch_prefixes() {
+  local policy_path
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 0
+  jq -r '
+    (.scratch_branches // {})
+    | select((.enabled // false) == true)
+    | .prefixes // []
+    | .[]
+  ' "$policy_path" 2>/dev/null
+}
+
+is_scratch_branch_token() {
+  local token="$1" prefix
+  [[ -n "$token" ]] || return 1
+  while IFS= read -r prefix; do
+    [[ -z "$prefix" ]] && continue
+    [[ "$token" == "$prefix"* ]] && return 0
+  done < <(scratch_branch_prefixes)
   return 1
 }
 
@@ -645,6 +689,115 @@ if target.startswith("refs/heads/"):
     target = target[len("refs/heads/"):]
 if target and target != "HEAD":
     print(target)
+PY
+}
+
+git_push_delete_remote_and_target_from_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+    else:
+        current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--literal-pathspecs", "--no-optional-locks", "--no-pager"}
+
+def push_args_for_segment(segment):
+    if not segment:
+        return None
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    if idx >= len(segment) or segment[idx] != "git":
+        return None
+    idx += 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+push_args = [args for args in (push_args_for_segment(segment) for segment in segments) if args is not None]
+if len(push_args) != 1:
+    sys.exit(0)
+
+args = push_args[0]
+
+def redir_start(toks):
+    for i, t in enumerate(toks):
+        if "<" in t or ">" in t or t == "&":
+            if i > 0 and re.fullmatch(r"\d+", toks[i - 1]):
+                return i - 1
+            return i
+    return len(toks)
+
+args = args[:redir_start(args)]
+remote = None
+refspecs = []
+skip_next = False
+is_delete = False
+for token in args:
+    if skip_next:
+        skip_next = False
+        continue
+    if token in {"--delete", "-d"}:
+        is_delete = True
+        continue
+    if token == "--":
+        continue
+    if token.startswith("-"):
+        if token in {"--repo"}:
+            skip_next = True
+        continue
+    if remote is None:
+        remote = token
+    else:
+        refspecs.append(token)
+
+target = ""
+if is_delete:
+    if len(refspecs) == 1:
+        target = refspecs[0]
+elif len(refspecs) == 1:
+    refspec = refspecs[0]
+    if refspec.startswith("+"):
+        refspec = refspec[1:]
+    if refspec.startswith(":"):
+        target = refspec[1:]
+
+if target.startswith("refs/heads/"):
+    target = target[len("refs/heads/"):]
+if target:
+    print(f"{remote or ''}\t{target}")
 PY
 }
 
@@ -1578,15 +1731,15 @@ check_git_force() {
 # Self-contained protected-branch guard for agent-initiated pushes. The
 # authoritative main-branch protection is the git-level pre-push hook, which
 # also catches external binaries (gnhf, no-mistakes); this agent-layer check is
-# defense-in-depth. The retired push-gate lease / Remote Scratch Mode / Dolt-stack
-# auditing was retired with the rest of that stack, so this guard has no
-# external dependency.
+# defense-in-depth.
 #
 # Allowed: configured delivery pushes (FBA mh-netflix, dotfiles main) and normal
 # feature-branch / no-mistakes-remote / gnhf pushes that name a non-protected
-# target. Blocked: pushes (or deletes) to main/master/develop/trunk and bare or
-# ambiguous pushes that do not name an explicit branch. Force-push protection
-# lives separately in check_git_force.
+# target. Scratch branch pushes require Remote Scratch Mode. Remote deletes are
+# blocked except configured yolo branches on configured yolo remotes. Blocked:
+# pushes (or deletes) to main/master/develop/trunk and bare or ambiguous pushes
+# that do not name an explicit branch. Force-push protection lives separately in
+# check_git_force.
 check_push_guard() {
   is_git_push_command || return
   if is_direct_delivery_push; then
@@ -1602,13 +1755,22 @@ check_push_guard() {
       deny "Blocked: bare git push is not allowed. Name the target branch explicitly, e.g. git push origin <branch>."
       ;;
     __DELETE__)
-      # Protected-branch deletes are caught authoritatively by the git-level
-      # pre-push hook; mirror that here as defense-in-depth.
-      if echo "$COMMAND" | grep -qE '(^|[[:space:]:/+])(main|master|develop|trunk)([[:space:]]|$)|refs/heads/(main|master|develop|trunk)'; then
+      local delete_info delete_remote delete_target
+      delete_info=$(git_push_delete_remote_and_target_from_command)
+      IFS=$'\t' read -r delete_remote delete_target <<< "$delete_info"
+      if [[ "$delete_target" == "main" || "$delete_target" == "master" || "$delete_target" == "develop" || "$delete_target" == "trunk" ]]; then
         deny "Blocked: deleting a protected branch (main/master/develop/trunk) is not allowed."
+      fi
+      if ! is_yolo_remote_token "$delete_remote" || ! is_yolo_branch_token "$delete_target"; then
+        deny "Blocked: deleting remote branches is only allowed for configured yolo branches on configured yolo remotes."
       fi
       ;;
   esac
+  if is_scratch_branch_token "$target_branch"; then
+    if [[ "${AGENT_WORK_MODE:-}" != "remote_scratch" && "${LLM_AGENT_WORK_MODE:-}" != "remote_scratch" ]]; then
+      deny "Blocked: scratch branch pushes require Remote Scratch Mode (AGENT_WORK_MODE=remote_scratch or LLM_AGENT_WORK_MODE=remote_scratch)."
+    fi
+  fi
 }
 
 # --- 2b. Branch Creation Tracking Guard ---

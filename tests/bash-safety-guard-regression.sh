@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..85"
+echo "1..101"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -300,16 +300,16 @@ pilgrim_config="$pilgrim_config_dir/config.nodelete"
 cat >"$pilgrim_config" <<'EOF'
 Host ignored
   Hostname 100.94.160.30
-  User matthewho
+  User operator
 EOF
-pilgrim_block=$(run_guard "ssh -F $pilgrim_config matthewho@ignored uptime")
+pilgrim_block=$(run_guard "ssh -F $pilgrim_config operator@ignored uptime")
 expect_contains "$pilgrim_block" "ssh to 'i-06d1de1f25c667a62' requires a lease"
 expect_contains "$pilgrim_block" "ssh-gate i-06d1de1f25c667a62"
 if [[ "$pilgrim_block" == *"ssh-gate ignored"* ]]; then
   fail "expected Pilgrim placeholder host not to suggest ssh-gate ignored: $pilgrim_block"
 fi
 printf 'i-06d1de1f25c667a62 %s\n' "$future_expiry" >"$SSH_LEASE_FILE"
-pilgrim_allow=$(run_guard "ssh -F $pilgrim_config matthewho@ignored uptime")
+pilgrim_allow=$(run_guard "ssh -F $pilgrim_config operator@ignored uptime")
 [[ -z "$pilgrim_allow" ]] || fail "expected Pilgrim placeholder SSH to match instance-id lease, got: $pilgrim_allow"
 echo "ok 51 - Pilgrim placeholder SSH config suggests and accepts instance-id lease"
 
@@ -392,6 +392,44 @@ echo "ok 60e - git push on its own line in a multi-line script is allowed"
 fba_multiline_main=$(run_guard_with_workdir "$fba_repo" $'echo prep\ngit push origin main')
 expect_contains "$fba_multiline_main" "pushing directly to origin/main is not allowed"
 echo "ok 60f - git push origin main on its own line in a multi-line script stays blocked"
+
+scratch_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin wip/agent/checkpoint")
+expect_contains "$scratch_push_block" "scratch branch pushes require Remote Scratch Mode"
+echo "ok 60g - scratch branch push is blocked without Remote Scratch Mode"
+
+scratch_push_agent_allow=$(
+  export AGENT_WORK_MODE=remote_scratch
+  run_guard_with_workdir "$fba_repo" "git push origin wip/agent/checkpoint"
+)
+[[ -z "$scratch_push_agent_allow" ]] || fail "expected AGENT_WORK_MODE remote_scratch scratch push to be allowed, got: $scratch_push_agent_allow"
+echo "ok 60h - scratch branch push is allowed with AGENT_WORK_MODE=remote_scratch"
+
+scratch_push_llm_allow=$(
+  export LLM_AGENT_WORK_MODE=remote_scratch
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/checkpoint"
+)
+[[ -z "$scratch_push_llm_allow" ]] || fail "expected LLM_AGENT_WORK_MODE remote_scratch scratch push to be allowed, got: $scratch_push_llm_allow"
+echo "ok 60i - scratch branch push is allowed with LLM_AGENT_WORK_MODE=remote_scratch"
+
+feature_delete_block=$(run_guard_with_workdir "$fba_repo" "git push origin --delete mho/feature")
+expect_contains "$feature_delete_block" "deleting remote branches is only allowed for configured yolo branches"
+echo "ok 60j - ordinary remote branch delete is blocked"
+
+yolo_delete_allow=$(run_guard_with_workdir "$fba_repo" "git push origin --delete mho-yolo/quick")
+[[ -z "$yolo_delete_allow" ]] || fail "expected yolo remote delete on origin to be allowed, got: $yolo_delete_allow"
+echo "ok 60k - yolo remote branch delete on configured remote is allowed"
+
+yolo_delete_wrong_remote_block=$(run_guard_with_workdir "$fba_repo" "git push upstream --delete mho-yolo/quick")
+expect_contains "$yolo_delete_wrong_remote_block" "configured yolo branches on configured yolo remotes"
+echo "ok 60l - yolo remote branch delete on unconfigured remote is blocked"
+
+protected_delete_block=$(run_guard_with_workdir "$fba_repo" "git push origin --delete main")
+expect_contains "$protected_delete_block" "deleting a protected branch"
+echo "ok 60m - protected remote branch delete is blocked"
+
+colon_yolo_delete_allow=$(run_guard_with_workdir "$fba_repo" "git push origin :mho-yolo/quick")
+[[ -z "$colon_yolo_delete_allow" ]] || fail "expected colon yolo remote delete on origin to be allowed, got: $colon_yolo_delete_allow"
+echo "ok 60n - colon-form yolo remote branch delete is allowed"
 
 fake_bin="$TEST_TMP/fake-bin"
 mkdir -p "$fake_bin"

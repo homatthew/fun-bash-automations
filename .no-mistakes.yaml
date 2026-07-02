@@ -15,11 +15,11 @@
 # To stop a stage from auto-fixing (force a manual gate instead), set its
 # auto_fix to 0 below. NEVER --skip a stage that actually failed (see the doc).
 
-# Agent for code generation / fixes. Usually omit here and inherit the global
-# `agent` (default: auto). Override per-repo only if this repo needs a specific
-# one. Options: auto, claude, codex, rovodev, opencode, pi, copilot,
-# acp:<target>.
-# agent: auto
+# Agent for no-mistakes code generation / fixes. The Kun-stack default is Codex;
+# `kun-stack-install` writes the same default to the global home, and `nm-home`
+# seeds per-worktree homes with this value for parallel gate runs. Options:
+# auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>.
+agent: codex
 
 # Per-repo command overrides. Empty string = auto-detect. These run shell
 # commands on the no-mistakes daemon host, so upstream no-mistakes reads
