@@ -1040,6 +1040,132 @@ sys.exit(1)
 PY
 }
 
+has_git_broad_discard_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while True:
+        while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+            idx += 1
+        if idx < len(segment) and segment[idx] == "command":
+            idx += 1
+            while idx < len(segment) and segment[idx] == "-p":
+                idx += 1
+            continue
+        if idx < len(segment) and segment[idx] in {"env", "/usr/bin/env"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token):
+                    idx += 1
+                    continue
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-i", "--ignore-environment", "-0", "--null"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "--unset", "-C", "--chdir"} and idx + 1 < len(segment):
+                    idx += 2
+                    continue
+                if token.startswith("--unset=") or token.startswith("--chdir="):
+                    idx += 1
+                    continue
+                break
+            continue
+        return segment[idx:]
+
+def git_subcommand(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None, []
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return token, segment[idx + 1:]
+    return None, []
+
+def contains_broad_pathspec(args, value_options):
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token == "--":
+            idx += 1
+            continue
+        if token in value_options and idx + 1 < len(args):
+            idx += 2
+            continue
+        if any(token.startswith(prefix) for prefix in value_options if prefix.startswith("--")) and "=" in token:
+            idx += 1
+            continue
+        if token in {".", "./"}:
+            return True
+        idx += 1
+    return False
+
+def stash_loses_work(args):
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token == "--":
+            return False
+        if token in {"-q", "--quiet"}:
+            idx += 1
+            continue
+        return token in {"drop", "clear"}
+    return False
+
+checkout_value_options = {"-b", "-B", "--branch", "--orphan", "--pathspec-from-file"}
+restore_value_options = {"-s", "--source", "--pathspec-from-file"}
+
+for segment in segments:
+    subcmd, args = git_subcommand(segment)
+    if subcmd == "checkout" and contains_broad_pathspec(args, checkout_value_options):
+        sys.exit(0)
+    if subcmd == "restore" and contains_broad_pathspec(args, restore_value_options):
+        sys.exit(0)
+    if subcmd == "stash" and stash_loses_work(args):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # Emit each branch name targeted by a force-delete (`git branch -D ...`, or a
 # `-d`/`--delete` combined with `--force`/`-f`, or a bundled short flag like
 # -Df) in COMMAND, one name per line. Empty output means no such delete.
@@ -2948,12 +3074,8 @@ check_git_force() {
     deny "Blocked: git push force-updates remote history. Use --force-with-lease."
   has_git_reset_hard_command &&
     deny "Blocked: git reset --hard discards all uncommitted changes."
-  echo "$COMMAND" | grep -qE -- 'git\s+checkout\s+--\s*\.' &&
-    deny "Blocked: git checkout -- . discards unstaged changes."
-  echo "$COMMAND" | grep -qE 'git\s+checkout\s+\.\s*$' &&
-    deny "Blocked: git checkout . discards unstaged changes."
-  echo "$COMMAND" | grep -qE 'git\s+restore\s+\.' &&
-    deny "Blocked: git restore . discards changes broadly."
+  has_git_broad_discard_command &&
+    deny "Blocked: git checkout/restore/stash discard command loses local work."
   has_git_clean_force_command &&
     deny "Blocked: git clean -f deletes untracked files."
   local _yolo_del_targets
@@ -2973,8 +3095,6 @@ check_git_force() {
     [[ "$_yolo_del_ok" == "1" ]] ||
       deny "Blocked: git branch -D force-deletes a branch."
   fi
-  echo "$COMMAND" | grep -qE 'git\s+stash\s+(drop|clear)(\s|$)' &&
-    deny "Blocked: git stash drop/clear loses stashed work."
 }
 
 # --- 2. Push Guard ---

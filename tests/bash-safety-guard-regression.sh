@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..123"
+echo "1..128"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -676,6 +676,26 @@ echo "ok 80i - git -C clean -fd is blocked"
 git_c_branch_delete_block=$(run_guard "git -C /tmp/repo branch -D main")
 expect_contains "$git_c_branch_delete_block" "force-deletes a branch"
 echo "ok 80j - git -C branch -D main is blocked"
+
+git_c_checkout_dash_dot_block=$(run_guard "git -C /tmp/repo checkout -- .")
+expect_contains "$git_c_checkout_dash_dot_block" "discard command loses local work"
+echo "ok 80k - git -C checkout -- . is blocked"
+
+git_c_checkout_dot_block=$(run_guard "git -C /tmp/repo checkout .")
+expect_contains "$git_c_checkout_dot_block" "discard command loses local work"
+echo "ok 80l - git -C checkout . is blocked"
+
+git_c_restore_dot_block=$(run_guard "env git -C /tmp/repo restore .")
+expect_contains "$git_c_restore_dot_block" "discard command loses local work"
+echo "ok 80m - wrapped git -C restore . is blocked"
+
+git_c_stash_clear_block=$(run_guard "git -C /tmp/repo stash clear")
+expect_contains "$git_c_stash_clear_block" "discard command loses local work"
+echo "ok 80n - git -C stash clear is blocked"
+
+git_c_stash_drop_block=$(run_guard "command git -C /tmp/repo stash drop")
+expect_contains "$git_c_stash_drop_block" "discard command loses local work"
+echo "ok 80o - wrapped git -C stash drop is blocked"
 
 # Fail-closed: if the yolo class is disabled in policy, the branch -D exemption
 # must not apply.

@@ -55,6 +55,22 @@ semver_triplet() {
   return 1
 }
 
+version_candidate_triplets() {
+  local out="$1" line lower token
+  while IFS= read -r line; do
+    lower=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+      latest*|*" latest "*|*"latest:"*|*"update available"*|*"updates available"*|*"new version"*|*"new-version"*|*"upgrade available"*|*"available update"*)
+        continue
+        ;;
+    esac
+    while IFS= read -r token; do
+      [ -n "$token" ] || continue
+      semver_triplet "$token"
+    done < <(printf '%s\n' "$line" | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' || true)
+  done <<< "$out"
+}
+
 same_minor_or_newer_patch_match() {
   local out="$1" match="$2" want want_major want_minor want_patch have have_major have_minor have_patch
   want=$(semver_triplet "$match") || return 1
@@ -63,13 +79,7 @@ same_minor_or_newer_patch_match() {
     read -r have_major have_minor have_patch <<< "$have"
     [[ "$have_major" == "$want_major" && "$have_minor" == "$want_minor" ]] || continue
     (( 10#$have_patch >= 10#$want_patch )) && return 0
-  done < <(
-    printf '%s\n' "$out" |
-      grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' |
-      while IFS= read -r token; do
-        semver_triplet "$token"
-      done
-  )
+  done < <(version_candidate_triplets "$out")
   return 1
 }
 
