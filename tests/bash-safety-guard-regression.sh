@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..101"
+echo "1..117"
 
 blocked_output=$(run_guard "gh api /gists --method POST --input payload.json")
 expect_contains "$blocked_output" "must target Netflix GHE explicitly"
@@ -312,6 +312,14 @@ printf 'i-06d1de1f25c667a62 %s\n' "$future_expiry" >"$SSH_LEASE_FILE"
 pilgrim_allow=$(run_guard "ssh -F $pilgrim_config operator@ignored uptime")
 [[ -z "$pilgrim_allow" ]] || fail "expected Pilgrim placeholder SSH to match instance-id lease, got: $pilgrim_allow"
 echo "ok 51 - Pilgrim placeholder SSH config suggests and accepts instance-id lease"
+
+multi_ssh_unleased_block=$(run_guard "ssh i-06d1de1f25c667a62 uptime; ssh unleased.example uptime")
+expect_contains "$multi_ssh_unleased_block" "ssh to 'unleased.example' requires a lease"
+echo "ok 51a - every SSH segment must have a host lease"
+
+multi_ssh_sensitive_block=$(run_guard "ssh i-06d1de1f25c667a62 uptime; ssh i-06d1de1f25c667a62 'jstack 1234'")
+expect_contains "$multi_ssh_sensitive_block" "requires an exact command lease"
+echo "ok 51b - later sensitive SSH segment needs its exact command lease"
 
 fba_pr_create_block=$(run_guard "gh pr create --base main --head mh-netflix --title nope")
 expect_contains "$fba_pr_create_block" "fun-bash-automations uses mh-netflix as the delivery branch"
@@ -610,6 +618,40 @@ echo "ok 80b - git -C push --force is blocked"
 mixed_plain_force_block=$(run_guard "git push --force-with-lease origin mho-yolo/quick; git -C /tmp/repo push -f origin mho-yolo/other")
 expect_contains "$mixed_plain_force_block" "Use --force-with-lease"
 echo "ok 80c - later plain force push is blocked even after force-with-lease"
+
+plus_refspec_force_block=$(run_guard "git push origin +mho/feature:mho/feature")
+expect_contains "$plus_refspec_force_block" "Use --force-with-lease"
+echo "ok 80d - leading-plus push refspec is blocked without a lease flag"
+
+plus_refspec_lease_allow=$(run_guard "git push --force-with-lease origin +mho-yolo/quick:mho-yolo/quick")
+[[ -z "$plus_refspec_lease_allow" ]] || fail "expected leased leading-plus yolo refspec to be allowed, got: $plus_refspec_lease_allow"
+echo "ok 80e - leading-plus push refspec is allowed only with force-with-lease"
+
+scratch_force_lease_remote_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  run_guard_with_workdir "$fba_repo" "git push --force-with-lease upstream scratch/agent/x"
+)
+expect_contains "$scratch_force_lease_remote_block" "configured scratch remotes"
+echo "ok 80f - scratch branch push to an unconfigured remote is blocked"
+
+scratch_force_lease_origin_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  run_guard_with_workdir "$fba_repo" "git push --force-with-lease origin scratch/agent/x"
+)
+expect_contains "$scratch_force_lease_origin_block" "must not force-update"
+echo "ok 80g - scratch branch force-with-lease push is blocked"
+
+git_c_reset_hard_block=$(run_guard "git -C /tmp/repo reset --hard")
+expect_contains "$git_c_reset_hard_block" "git reset --hard"
+echo "ok 80h - git -C reset --hard is blocked"
+
+git_c_clean_force_block=$(run_guard "git -C /tmp/repo clean -fd")
+expect_contains "$git_c_clean_force_block" "git clean -f"
+echo "ok 80i - git -C clean -fd is blocked"
+
+git_c_branch_delete_block=$(run_guard "git -C /tmp/repo branch -D main")
+expect_contains "$git_c_branch_delete_block" "force-deletes a branch"
+echo "ok 80j - git -C branch -D main is blocked"
 
 # Fail-closed: if the yolo class is disabled in policy, the branch -D exemption
 # must not apply.

@@ -10,27 +10,85 @@
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 
-# Only act on dgw-cli kv write operations
-if echo "$COMMAND" | grep -qE 'dgw-cli[[:space:]]+kv' && \
-   echo "$COMMAND" | grep -qE '[[:space:]](put|delete)[[:space:]]'; then
+violation=$(python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
 
-  # Determine target environment
-  if echo "$COMMAND" | grep -qE '(-e|--env)[[:space:]]+prod'; then
-    ENV=prod
-    FLAG=DGW_PROD_WRITE_AUTHORIZED=1
-  elif echo "$COMMAND" | grep -qE '(-e|--env)[[:space:]]+test'; then
-    ENV=test
-    FLAG=DGW_TEST_WRITE_AUTHORIZED=1
-  else
-    ENV=unknown
-    FLAG=DGW_PROD_WRITE_AUTHORIZED=1  # default to prod-level restriction
-  fi
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
 
-  # Allow if the correct flag is present
-  if echo "$COMMAND" | grep -q "$FLAG"; then
-    exit 0
-  fi
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
 
+def parse_env_assignments(segment):
+    env = {}
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        name, value = segment[idx].split("=", 1)
+        env[name] = value
+        idx += 1
+    return env, segment[idx:]
+
+def dgw_write(segment):
+    if not segment or segment[0] != "dgw-cli":
+        return None
+    if len(segment) < 2 or segment[1] != "kv":
+        return None
+    args = segment[2:]
+    env = "unknown"
+    idx = 0
+    while idx < len(args):
+        token = args[idx]
+        if token in {"-e", "--env"} and idx + 1 < len(args):
+            env = args[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--env="):
+            env = token.split("=", 1)[1]
+            idx += 1
+            continue
+        if token in {"put", "delete"}:
+            return env
+        idx += 1
+    return None
+
+for raw_segment in segments:
+    env_assignments, segment = parse_env_assignments(raw_segment)
+    env = dgw_write(segment)
+    if env is None:
+        continue
+    if env == "test":
+        flag_name = "DGW_TEST_WRITE_AUTHORIZED"
+        flag = "DGW_TEST_WRITE_AUTHORIZED=1"
+    else:
+        # Unknown environments fail closed with prod-level authorization.
+        flag_name = "DGW_PROD_WRITE_AUTHORIZED"
+        flag = "DGW_PROD_WRITE_AUTHORIZED=1"
+        env = "prod" if env == "prod" else "unknown"
+    if env_assignments.get(flag_name) == "1":
+        continue
+    print(f"{env}\t{flag}")
+    sys.exit(0)
+PY
+)
+
+if [[ -n "$violation" ]]; then
+  IFS=$'\t' read -r ENV FLAG <<< "$violation"
   jq -n --arg env "$ENV" --arg flag "$FLAG" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

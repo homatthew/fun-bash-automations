@@ -99,9 +99,11 @@ class for throwaway-fast work.
   `/ship` (and firstmate ship tasks) count as that explicit ask for their
   delivery actions.
 - Agents may commit and push matching scratch branches only in Remote Scratch
-  Mode. Scratch branches are not PR-eligible and must not have an open PR or be
-  the base of an open PR. Promoting scratch work to a delivery branch ships
-  through the no-mistakes gate.
+  Mode, only to configured scratch remotes, and never with force-update forms
+  such as `--force`, `--force-with-lease`, or leading-plus refspecs. Scratch
+  branches are not PR-eligible and must not have an open PR or be the base of an
+  open PR. Promoting scratch work to a delivery branch ships through the
+  no-mistakes gate.
 - Yolo branches (`mho-yolo/*`) get a raw explicit-branch push + PR fast path:
   `git push origin mho-yolo/<topic>` plus `gh pr create`, no gate,
   force-with-lease and delete allowed. They are keyed on the branch prefix and

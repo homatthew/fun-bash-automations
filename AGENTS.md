@@ -18,8 +18,8 @@ canonical instruction entrypoint.
 
 - This repository delivers directly on `mh-netflix`; there is no PR gate.
 - After the user explicitly asks to push or invokes an explicit finish workflow,
-  agents should push directly with an explicit branch target, e.g.
-  `git push origin mh-netflix`.
+  the no-mistakes gate performs the direct delivery push with an explicit branch
+  target, e.g. `git push origin mh-netflix`.
 - The finish-the-job entrypoint is the `/ship` skill for a single change; it runs
   the `no-mistakes` gate (automated code review, tests, lint, docs) and then
   pushes to the configured target. For breadth across many tasks use `firstmate`;

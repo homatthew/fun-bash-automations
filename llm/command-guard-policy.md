@@ -25,10 +25,11 @@ Codex, and future harnesses.
 
 ### Git history and branch safety
 
-- Block `git push --force`; allow `--force-with-lease` only where the push
-  policy permits it. Scratch branches never allow force pushes; yolo
-  branches allow `--force-with-lease` and delete (see the yolo branch class
-  below).
+- Block force-update pushes, including `git push --force`, `git push -f`, and
+  leading-plus refspecs such as `+branch:branch`; allow `--force-with-lease`
+  only where the push policy permits it. Scratch branches never allow force
+  pushes; yolo branches allow `--force-with-lease` and delete (see the yolo
+  branch class below).
 - Block `git reset --hard`
 - Block broad discard commands like `git checkout .`, `git checkout -- .`,
   `git restore .`, `git clean -f`, `git branch -D` (the `git branch -D` block
@@ -80,9 +81,10 @@ Agents may commit and push matching scratch branches only after the user selects
 Remote Scratch Mode. The guard allows those pushes only when the shell declares
 `AGENT_WORK_MODE=remote_scratch` or `LLM_AGENT_WORK_MODE=remote_scratch`, the
 target branch matches a configured scratch prefix, targets a configured scratch
-remote, is not a force/delete push, has no open PR as its head, and is not the
-base of an open PR. If any of those checks fails or cannot be verified, the
-branch is treated as delivery scope.
+remote, is not a force/delete push, does not use `--force-with-lease` or a
+leading-plus refspec, has no open PR as its head, and is not the base of an open
+PR. If any of those checks fails or cannot be verified, the branch is treated as
+delivery scope.
 
 The machine-readable cadence is `regular_milestones`: in Remote Scratch Mode,
 commit and push after a coherent checkpoint worth preserving, after verification
@@ -171,7 +173,8 @@ through to the delivery default-deny.
 
 - Block pipe-to-shell (`curl | bash`, `wget | sh`)
 - Block `eval`
-- Require explicit SSH lease / approval model for remote access
+- Require explicit SSH lease / approval model for remote access. Every `ssh`
+  segment in a compound command must independently satisfy host lease checks.
 - Block interactive SSH from agents; SSH must include an explicit remote
   command.
 - Block obvious dangerous remote SSH commands such as `sudo`, `su`,
@@ -183,8 +186,9 @@ through to the delivery default-deny.
 - Require an exact command lease, in addition to the host lease, for
   production-sensitive diagnostics such as `nodetool toppartitions`, `jcmd`,
   `jstack`, `jmap`, remote `tar`, large remote `tail`, full Cassandra log
-  grep, or `find` under `/mnt/data/cassandra`. Use `ssh-command-gate <host>
-  -- <remote-command...>` to grant one exact command hash.
+  grep, or `find` under `/mnt/data/cassandra`. This also applies independently
+  to every `ssh` segment in a compound command. Use `ssh-command-gate <host> --
+  <remote-command...>` to grant one exact command hash.
 - Allow lower-risk read-only diagnostics such as `tpstats`,
   `proxyhistograms`, `tablestats`, `tablehistograms`, `gcstats`, and
   `compactionstats` with only a valid SSH host lease.
@@ -226,7 +230,10 @@ through to the delivery default-deny.
 ### DGW KV writes
 
 - Block `dgw-cli kv put` and `dgw-cli kv delete` by default
-- Require explicit write-authorization flags for `test` or `prod`
+- Require explicit write-authorization flags for `test` or `prod`; the matching
+  `DGW_*_WRITE_AUTHORIZED=1` assignment must appear on the same shell command
+  segment as the `dgw-cli kv put/delete`, not merely somewhere earlier in a
+  chained command.
 
 ### Private guard extensions
 

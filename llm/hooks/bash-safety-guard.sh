@@ -335,20 +335,139 @@ def redir_start(args):
 
 def has_plain_force(args):
     args = args[:redir_start(args)]
+    force_with_lease = False
+    refspecs = []
+    skip_next = False
     for token in args:
+        if skip_next:
+            skip_next = False
+            continue
         if token == "--":
-            return False
+            continue
+        if token == "--force-with-lease" or token.startswith("--force-with-lease="):
+            force_with_lease = True
+            continue
         if token == "--force" or token.startswith("--force="):
             return True
+        if token in {"--repo"}:
+            skip_next = True
+            continue
         if token.startswith("--"):
             continue
         if token.startswith("-") and "f" in token[1:]:
+            return True
+        if token.startswith("-"):
+            continue
+        refspecs.append(token)
+    # Leading-plus refspecs are force updates too. Permit them only when the
+    # command also names the sanctioned lease flag explicitly.
+    for refspec in refspecs[1:]:
+        if refspec.startswith("+") and not force_with_lease:
             return True
     return False
 
 for segment in segments:
     args = push_args_for_segment(segment)
     if args is not None and has_plain_force(args):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+git_push_has_any_force_from_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+def redir_start(args):
+    for i, token in enumerate(args):
+        if "<" in token or ">" in token or token == "&":
+            if i > 0 and re.fullmatch(r"\d+", args[i - 1]):
+                return i - 1
+            return i
+    return len(args)
+
+def has_force(args):
+    args = args[:redir_start(args)]
+    refspecs = []
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            continue
+        if token in {"--force", "--force-with-lease"}:
+            return True
+        if token.startswith("--force=") or token.startswith("--force-with-lease="):
+            return True
+        if token in {"--repo"}:
+            skip_next = True
+            continue
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") and "f" in token[1:]:
+            return True
+        if token.startswith("-"):
+            continue
+        refspecs.append(token)
+    return any(refspec.startswith("+") for refspec in refspecs[1:])
+
+for segment in segments:
+    args = push_args_for_segment(segment)
+    if args is not None and has_force(args):
         sys.exit(0)
 
 sys.exit(1)
@@ -432,6 +551,18 @@ scratch_branch_prefixes() {
   ' "$policy_path" 2>/dev/null
 }
 
+scratch_branch_remotes() {
+  local policy_path
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 0
+  jq -r '
+    (.scratch_branches // {})
+    | select((.enabled // false) == true)
+    | .remotes // []
+    | .[]
+  ' "$policy_path" 2>/dev/null
+}
+
 is_scratch_branch_token() {
   local token="$1" prefix
   [[ -n "$token" ]] || return 1
@@ -439,6 +570,16 @@ is_scratch_branch_token() {
     [[ -z "$prefix" ]] && continue
     [[ "$token" == "$prefix"* ]] && return 0
   done < <(scratch_branch_prefixes)
+  return 1
+}
+
+is_scratch_remote_token() {
+  local token="$1" remote
+  [[ -n "$token" ]] || return 1
+  while IFS= read -r remote; do
+    [[ -z "$remote" ]] && continue
+    [[ "$token" == "$remote" ]] && return 0
+  done < <(scratch_branch_remotes)
   return 1
 }
 
@@ -541,6 +682,146 @@ for segment in segments:
     if args is not None and "--amend" in args:
         sys.exit(0)
 
+sys.exit(1)
+PY
+}
+
+has_git_reset_hard_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def git_subcommand(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None, []
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "reset":
+            return token, segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return token, segment[idx + 1:]
+    return None, []
+
+for segment in segments:
+    subcmd, args = git_subcommand(segment)
+    if subcmd == "reset" and "--hard" in args:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+has_git_clean_force_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def git_subcommand(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None, []
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "clean":
+            return token, segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return token, segment[idx + 1:]
+    return None, []
+
+def clean_has_force(args):
+    for token in args:
+        if token == "--":
+            break
+        if token in {"--force", "-f"}:
+            return True
+        if token.startswith("--force="):
+            return True
+        if token.startswith("-") and not token.startswith("--") and "f" in token[1:]:
+            return True
+    return False
+
+for segment in segments:
+    subcmd, args = git_subcommand(segment)
+    if subcmd == "clean" and clean_has_force(args):
+        sys.exit(0)
 sys.exit(1)
 PY
 }
@@ -781,6 +1062,92 @@ if target.startswith("refs/heads/"):
     target = target[len("refs/heads/"):]
 if target and target != "HEAD":
     print(target)
+PY
+}
+
+git_push_remote_from_command() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def push_args_for_segment(segment):
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        return None
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "push":
+            return segment[idx + 1:]
+        if token in global_value_options and idx + 1 < len(segment):
+            idx += 2
+            continue
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+            idx += 1
+            continue
+        if token in global_no_value_options:
+            idx += 1
+            continue
+        return None
+    return None
+
+push_args = [args for args in (push_args_for_segment(segment) for segment in segments) if args is not None]
+if len(push_args) != 1:
+    sys.exit(0)
+
+def redir_start(args):
+    for i, token in enumerate(args):
+        if "<" in token or ">" in token or token == "&":
+            if i > 0 and re.fullmatch(r"\d+", args[i - 1]):
+                return i - 1
+            return i
+    return len(args)
+
+args = push_args[0][:redir_start(push_args[0])]
+skip_next = False
+for token in args:
+    if skip_next:
+        skip_next = False
+        continue
+    if token == "--":
+        continue
+    if token in {"--repo"}:
+        skip_next = True
+        continue
+    if token.startswith("-"):
+        continue
+    print(token)
+    sys.exit(0)
 PY
 }
 
@@ -1349,6 +1716,166 @@ sys.exit(1)
 PY
 }
 
+ssh_lease_requirements() {
+  python3 - "$COMMAND" <<'PY'
+import hashlib
+import re
+import shlex
+import sys
+
+command = sys.argv[1]
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+value_options = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
+    "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
+placeholder_hosts = {"ignored", "ignore", "placeholder", "dummy"}
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+def normalize_host(token):
+    if "@" in token:
+        token = token.rsplit("@", 1)[1]
+    if token.startswith("[") and "]" in token:
+        token = token[1:token.index("]")]
+    return token
+
+def resolve_config_target(config_path, host):
+    if not config_path or host not in placeholder_hosts:
+        return host
+
+    instance_match = re.search(r"i-[0-9a-fA-F]{8,}", config_path)
+    if instance_match:
+        return instance_match.group(0)
+
+    hostname = None
+    active = False
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                key = parts[0].lower()
+                values = parts[1:]
+                if key == "host":
+                    active = host in values or "*" in values
+                elif active and key == "hostname" and values:
+                    hostname = values[0]
+                    break
+    except OSError:
+        return host
+
+    return hostname or host
+
+def split_ssh(segment):
+    idx = 1
+    config_path = None
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "--":
+            idx += 1
+            if idx < len(segment):
+                target = resolve_config_target(config_path, normalize_host(segment[idx]))
+                return target, segment[idx + 1:]
+            return "", []
+        if token == "-F" and idx + 1 < len(segment):
+            config_path = segment[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("-F") and len(token) > 2:
+            config_path = token[2:]
+            idx += 1
+            continue
+        if token in value_options:
+            idx += 2
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        target = resolve_config_target(config_path, normalize_host(token))
+        return target, segment[idx + 1:]
+    return "", []
+
+def flatten_remote(remote):
+    if not remote:
+        return []
+    joined = " ".join(remote)
+    try:
+        return shlex.split(joined, posix=True)
+    except ValueError:
+        return remote
+
+def base(token):
+    return token.rsplit("/", 1)[-1].lower()
+
+def canonical(tokens):
+    return " ".join(shlex.quote(token) for token in tokens)
+
+def sensitive_reason(tokens):
+    lowered = [base(token) for token in tokens]
+    for idx, token in enumerate(lowered):
+        if token == "nodetool" and idx + 1 < len(lowered) and lowered[idx + 1] == "toppartitions":
+            return "nodetool toppartitions"
+        if token in {"jcmd", "jstack", "jmap"}:
+            return token
+        if token == "tar":
+            return "remote tar"
+        if token == "find" and any(part.startswith("/mnt/data/cassandra") for part in tokens[idx + 1 :]):
+            return "find under /mnt/data/cassandra"
+        if token == "tail":
+            for part in tokens[idx + 1 :]:
+                if part.isdigit() and int(part) > 5000:
+                    return "large remote tail"
+                if part.startswith("-") and part[1:].isdigit() and int(part[1:]) > 5000:
+                    return "large remote tail"
+        if token == "grep" and any(part.startswith("/mnt/data/cassandra/logs/") for part in tokens[idx + 1 :]):
+            return "grep over cassandra logs"
+    return ""
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "ssh":
+        continue
+    target, remote = split_ssh(segment)
+    if not target:
+        print("__NO_TARGET__\t\t\t")
+        continue
+    remote_tokens = flatten_remote(remote)
+    reason = sensitive_reason(remote_tokens)
+    if reason:
+        remote_text = canonical(remote_tokens)
+        digest = hashlib.sha256(remote_text.encode("utf-8")).hexdigest()
+        print(f"{target}\t{digest}\t{reason}\t{remote_text}")
+    else:
+        print(f"{target}\t\t\t")
+PY
+}
+
 ssh_uses_unsafe_host_key_options() {
   python3 - "$COMMAND" <<'PY'
 import re
@@ -1824,8 +2351,8 @@ EOF
 # --- 1. Git Force/Destructive ---
 check_git_force() {
   git_push_has_plain_force_from_command &&
-    deny "Blocked: git push --force rewrites remote history. Use --force-with-lease."
-  echo "$COMMAND" | grep -qE -- 'git\s+reset\s+--hard' &&
+    deny "Blocked: git push force-updates remote history. Use --force-with-lease."
+  has_git_reset_hard_command &&
     deny "Blocked: git reset --hard discards all uncommitted changes."
   echo "$COMMAND" | grep -qE -- 'git\s+checkout\s+--\s*\.' &&
     deny "Blocked: git checkout -- . discards unstaged changes."
@@ -1833,23 +2360,22 @@ check_git_force() {
     deny "Blocked: git checkout . discards unstaged changes."
   echo "$COMMAND" | grep -qE 'git\s+restore\s+\.' &&
     deny "Blocked: git restore . discards changes broadly."
-  echo "$COMMAND" | grep -qE 'git\s+clean\s+.*-f' &&
+  has_git_clean_force_command &&
     deny "Blocked: git clean -f deletes untracked files."
-  if echo "$COMMAND" | grep -qE 'git\s+branch\s+-D\s'; then
+  local _yolo_del_targets
+  _yolo_del_targets=$(git_branch_force_delete_targets)
+  if [[ -n "$_yolo_del_targets" ]]; then
     # yolo branches may be force-deleted locally for cleanup of unmerged work.
     # Exempt only when EVERY deleted branch name is yolo-prefixed; a mixed or
     # non-yolo delete still blocks. Remote deletes are handled by the push
     # guard and the git-level pre-push hook, not here.
-    local _yolo_del_targets _yolo_del_ok _yolo_del_t
-    _yolo_del_targets=$(git_branch_force_delete_targets)
+    local _yolo_del_ok _yolo_del_t
     _yolo_del_ok=0
-    if [[ -n "$_yolo_del_targets" ]]; then
-      _yolo_del_ok=1
-      while IFS= read -r _yolo_del_t; do
-        [[ -z "$_yolo_del_t" ]] && continue
-        is_yolo_branch_token "$_yolo_del_t" || _yolo_del_ok=0
-      done <<< "$_yolo_del_targets"
-    fi
+    _yolo_del_ok=1
+    while IFS= read -r _yolo_del_t; do
+      [[ -z "$_yolo_del_t" ]] && continue
+      is_yolo_branch_token "$_yolo_del_t" || _yolo_del_ok=0
+    done <<< "$_yolo_del_targets"
     [[ "$_yolo_del_ok" == "1" ]] ||
       deny "Blocked: git branch -D force-deletes a branch."
   fi
@@ -1899,6 +2425,14 @@ check_push_guard() {
   if is_scratch_branch_token "$target_branch"; then
     if [[ "${AGENT_WORK_MODE:-}" != "remote_scratch" && "${LLM_AGENT_WORK_MODE:-}" != "remote_scratch" ]]; then
       deny "Blocked: scratch branch pushes require Remote Scratch Mode (AGENT_WORK_MODE=remote_scratch or LLM_AGENT_WORK_MODE=remote_scratch)."
+    fi
+    local scratch_remote
+    scratch_remote=$(git_push_remote_from_command)
+    if ! is_scratch_remote_token "$scratch_remote"; then
+      deny "Blocked: scratch branch pushes are only allowed to configured scratch remotes."
+    fi
+    if git_push_has_any_force_from_command; then
+      deny "Blocked: scratch branch pushes must not force-update remote history."
     fi
   fi
 }
@@ -2224,23 +2758,27 @@ check_remote_exec() {
   if [ -n "$unsafe_ssh_options" ]; then
     deny "Blocked: unsafe SSH host-key option ($unsafe_ssh_options). Use StrictHostKeyChecking=accept-new instead."
   fi
-  # Check SSH lease file for approved hosts (12-hour leases via ssh-gate)
-  local SSH_TARGET sensitive_ssh hash reason remote_command
-  SSH_TARGET=$(extract_ssh_target)
-  if [ -n "$SSH_TARGET" ] || has_ssh_invocation; then
-    if [ -n "$SSH_TARGET" ]; then
-      if ! has_valid_ssh_lease "$SSH_TARGET"; then
-        deny "Blocked: ssh to '$SSH_TARGET' requires a lease. Ask the user to run: ssh-gate $SSH_TARGET"
+  # Check SSH lease file for approved hosts (12-hour leases via ssh-gate).
+  local ssh_requirements ssh_target hash reason remote_command
+  ssh_requirements=$(ssh_lease_requirements 2>/dev/null || true)
+  if [ -n "$ssh_requirements" ]; then
+    while IFS=$'\t' read -r ssh_target hash reason remote_command; do
+      [[ -n "$ssh_target" ]] || continue
+      if [[ "$ssh_target" == "__NO_TARGET__" ]]; then
+        deny "Blocked: ssh requires a lease. Ask the user to run: ssh-gate <host>"
       fi
-      sensitive_ssh=$(ssh_sensitive_remote_command 2>/dev/null || true)
-      if [ -n "$sensitive_ssh" ]; then
-        IFS=$'\t' read -r hash reason remote_command <<< "$sensitive_ssh"
-        if ! has_valid_ssh_command_lease "$SSH_TARGET" "$hash"; then
-          deny "Blocked: sensitive SSH remote command ($reason) requires an exact command lease for '$SSH_TARGET'. Ask the user to run: ssh-command-gate $SSH_TARGET -- $remote_command"
+      if ! has_valid_ssh_lease "$ssh_target"; then
+        deny "Blocked: ssh to '$ssh_target' requires a lease. Ask the user to run: ssh-gate $ssh_target"
+      fi
+      if [ -n "$hash" ]; then
+        if ! has_valid_ssh_command_lease "$ssh_target" "$hash"; then
+          deny "Blocked: sensitive SSH remote command ($reason) requires an exact command lease for '$ssh_target'. Ask the user to run: ssh-command-gate $ssh_target -- $remote_command"
         fi
       fi
-      return
-    fi
+    done <<< "$ssh_requirements"
+    return
+  fi
+  if has_ssh_invocation; then
     deny "Blocked: ssh requires a lease. Ask the user to run: ssh-gate <host>"
   fi
   # scp/rsync: allow local-only, check SSH lease for remote hosts

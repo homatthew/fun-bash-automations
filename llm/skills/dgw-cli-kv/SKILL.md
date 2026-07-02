@@ -157,9 +157,11 @@ python3 -c "import json,sys; data=json.load(open('out.json')); print(len(data))"
 
 ### Hook enforcement
 
-A `PreToolUse` hook blocks `dgw-cli kv put` and `dgw-cli kv delete` against `-e prod` by default. Writes to `-e test` are always allowed.
+A `PreToolUse` hook blocks `dgw-cli kv put` and `dgw-cli kv delete` by default
+for every environment, including `-e test`.
 
-**All writes are blocked by default**, regardless of environment. Use the environment-specific flag:
+**All writes are blocked by default**, regardless of environment. Use the
+environment-specific flag on the same command segment as the write:
 
 | Environment | Required prefix |
 |-------------|----------------|
