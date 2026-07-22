@@ -54,5 +54,11 @@ expect_allow 'date +%s'
 expect_prompt 'date --set 2026-01-01'
 expect_allow 'hostname'
 expect_prompt 'hostname replacement-name'
+expect_allow 'git diff --stat HEAD~1'
+expect_prompt 'git diff --output=review.patch HEAD~1'
+expect_prompt 'git diff --ext-diff HEAD~1'
+expect_prompt 'git grep --open-files-in-pager=helper pattern'
+expect_prompt 'git cat-file --filters HEAD:file.txt'
+expect_prompt 'GIT_EXTERNAL_DIFF=helper git diff HEAD~1'
 
 echo "permission allow regression passed"

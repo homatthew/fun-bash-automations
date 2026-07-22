@@ -2,8 +2,8 @@
 # Block accidental publication of credentials and environment-private content.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ALLOW_FILE="$ROOT/scripts/check-push-safety.allow"
+DEFAULT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${FBA_PUSH_SAFETY_ROOT:-$DEFAULT_ROOT}"
 MODE="all"
 OUTGOING_BASE=""
 POLICY_FILE="${FBA_PUSH_SAFETY_POLICY_FILE:-}"
@@ -16,6 +16,9 @@ import sys
 print(os.path.realpath(sys.argv[1]))
 PY
 }
+
+ROOT="$(canonical_path "$ROOT")"
+ALLOW_FILE="${FBA_PUSH_SAFETY_ALLOW_FILE:-$ROOT/scripts/check-push-safety.allow}"
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -111,7 +114,8 @@ USAGE
 done
 
 install_hook() {
-  local hook hook_dir managed_dir existing_hook legacy_existing safety_hook attestation
+  local hook hook_dir managed_dir existing_hook legacy_existing safety_hook attestation trusted_dir
+  local scanner_copy allow_copy scanner_hash allow_hash
   local policy_pointer trusted_path trusted_hash configured_policy trust_record extra
   local clear_policy="${FBA_PUSH_SAFETY_CLEAR_POLICY:-0}"
   local clear_trust="${FBA_NO_MISTAKES_CLEAR_TRUST:-0}"
@@ -127,7 +131,27 @@ install_hook() {
   safety_hook="$managed_dir/50-push-safety"
   attestation="$managed_dir/40-no-mistakes.attestation"
   policy_pointer="$managed_dir/45-push-safety-policy"
+  trusted_dir="$managed_dir/.push-safety"
+  scanner_copy="$trusted_dir/check-push-safety.sh"
+  allow_copy="$trusted_dir/check-push-safety.allow"
+  [[ ! -L "$managed_dir" ]] || {
+    echo "refusing symlinked managed hook directory: $managed_dir" >&2
+    exit 1
+  }
   mkdir -p "$managed_dir"
+  [[ ! -L "$safety_hook" && ! -L "$attestation" && ! -L "$policy_pointer" && ! -L "$trusted_dir" ]] || {
+    echo "refusing symlinked managed hook component" >&2
+    exit 1
+  }
+  if [[ -e "$trusted_dir" && ! -d "$trusted_dir" ]]; then
+    echo "refusing non-directory trusted hook assets: $trusted_dir" >&2
+    exit 1
+  fi
+  mkdir -p "$trusted_dir"
+  [[ ! -L "$scanner_copy" && ! -L "$allow_copy" ]] || {
+    echo "refusing symlinked trusted hook asset" >&2
+    exit 1
+  }
 
   if [[ -e "$legacy_existing" || -L "$legacy_existing" ]]; then
     if [[ -e "$existing_hook" || -L "$existing_hook" ]]; then
@@ -137,12 +161,24 @@ install_hook() {
     mv "$legacy_existing" "$existing_hook"
   fi
 
-  if [[ -e "$safety_hook" ]] && ! grep -Fq '# fba-push-safety-hook' "$safety_hook" 2>/dev/null; then
-    echo "refusing to replace unmanaged hook component: $safety_hook" >&2
-    exit 1
+  if [[ -e "$safety_hook" ]]; then
+    [[ -f "$safety_hook" ]] || {
+      echo "refusing non-regular hook component: $safety_hook" >&2
+      exit 1
+    }
+    if ! grep -Fq '# fba-push-safety-hook' "$safety_hook" 2>/dev/null; then
+      echo "refusing to replace unmanaged hook component: $safety_hook" >&2
+      exit 1
+    fi
   fi
 
-  if [[ -e "$hook" || -L "$hook" ]]; then
+  if [[ -L "$hook" ]]; then
+    if [[ -e "$existing_hook" || -L "$existing_hook" ]]; then
+      echo "refusing to replace unmanaged pre-push hook: $hook" >&2
+      exit 1
+    fi
+    mv "$hook" "$existing_hook"
+  elif [[ -e "$hook" ]]; then
     if ! grep -Fq '# fba-managed-pre-push-dispatcher' "$hook" 2>/dev/null; then
       if [[ -e "$existing_hook" || -L "$existing_hook" ]]; then
         echo "refusing to replace unmanaged pre-push hook: $hook" >&2
@@ -178,18 +214,55 @@ done
 HOOK
   chmod +x "$hook"
 
-  cat > "$safety_hook" <<'HOOK'
+  cp "$ROOT/scripts/check-push-safety.sh" "$scanner_copy"
+  cp "$ROOT/scripts/check-push-safety.allow" "$allow_copy"
+  chmod 700 "$scanner_copy"
+  chmod 600 "$allow_copy"
+  scanner_hash="$(sha256_file "$scanner_copy")"
+  allow_hash="$(sha256_file "$allow_copy")"
+
+  {
+    cat <<'HOOK'
 #!/usr/bin/env bash
 # fba-push-safety-hook
+set -u
 root="$(git rev-parse --show-toplevel)" || exit 1
-policy_pointer="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/45-push-safety-policy"
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+scanner="$hook_dir/.push-safety/check-push-safety.sh"
+allow_file="$hook_dir/.push-safety/check-push-safety.allow"
+HOOK
+    printf 'expected_scanner_hash=%q\n' "$scanner_hash"
+    printf 'expected_allow_hash=%q\n' "$allow_hash"
+    cat <<'HOOK'
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+for asset in "$scanner" "$allow_file"; do
+  [[ -f "$asset" && ! -L "$asset" ]] || {
+    echo "push-safety: trusted enforcement asset is missing or unsafe: $asset" >&2
+    exit 1
+  }
+done
+[[ "$(sha256_file "$scanner")" == "$expected_scanner_hash" && "$(sha256_file "$allow_file")" == "$expected_allow_hash" ]] || {
+  echo "push-safety: trusted enforcement assets failed integrity verification" >&2
+  exit 1
+}
+policy_pointer="$hook_dir/45-push-safety-policy"
 if [[ -f "$policy_pointer" ]]; then
+  [[ ! -L "$policy_pointer" ]] || exit 1
   IFS= read -r FBA_PUSH_SAFETY_POLICY_FILE < "$policy_pointer" || exit 1
   [[ -n "$FBA_PUSH_SAFETY_POLICY_FILE" ]] || exit 1
   export FBA_PUSH_SAFETY_POLICY_FILE
 fi
-exec "$root/scripts/check-push-safety.sh" --pre-push "$@"
+export FBA_PUSH_SAFETY_ROOT="$root"
+export FBA_PUSH_SAFETY_ALLOW_FILE="$allow_file"
+exec "$scanner" --pre-push "$@"
 HOOK
+  } > "$safety_hook"
   chmod +x "$safety_hook"
   [[ "$clear_policy" == "0" || "$clear_policy" == "1" ]] || {
     echo "FBA_PUSH_SAFETY_CLEAR_POLICY must be 0 or 1" >&2

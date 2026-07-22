@@ -35,8 +35,9 @@ except ValueError:
     sys.exit(1)
 
 assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+environment = []
 while tokens and assignment.match(tokens[0]):
-    tokens.pop(0)
+    environment.append(tokens.pop(0).split("=", 1)[0])
 if not tokens:
     sys.exit(1)
 
@@ -197,6 +198,10 @@ if command == "defaults":
 if command != "git" or not args:
     sys.exit(1)
 
+unsafe_git_environment = {"GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_CONFIG_COUNT"}
+if any(name in unsafe_git_environment or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in environment):
+    sys.exit(1)
+
 subcommand = args[0]
 subargs = args[1:]
 read_only = {
@@ -206,6 +211,20 @@ read_only = {
     "check-ref-format",
 }
 if subcommand in read_only:
+    unsafe_options = {
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--open-files-in-pager",
+        "--filters",
+        "--upload-pack",
+    }
+    if any(
+        arg in unsafe_options
+        or any(arg.startswith(option + "=") for option in unsafe_options)
+        for arg in subargs
+    ):
+        sys.exit(1)
     sys.exit(0)
 if subcommand == "branch":
     mutating = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--force", "-t", "--track", "--no-track", "--recurse-submodules", "--create-reflog", "--delete", "--move", "--copy", "--edit-description", "--set-upstream-to", "--unset-upstream", "-u"}

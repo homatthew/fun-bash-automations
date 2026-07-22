@@ -34,4 +34,12 @@ out="$(
 [[ "$(cat "$TMP/sudo.log")" == "apt-get install -y libnotify-bin" ]] ||
   fail "Linux notification setup did not invoke the native package manager"
 
+for target in '.vimrc' '.zshrc' 'zsh/personal.zsh' 'ghostty/config'; do
+  grep -Fq "\$ROOT_DIR/$target" "$ROOT/setupPermissions.sh" ||
+    fail "setupPermissions does not link $target from ROOT_DIR"
+done
+if rg -n '~/repos/fun-bash-automations' "$ROOT/setupPermissions.sh" >/dev/null; then
+  fail "setupPermissions retains fixed-checkout symlink targets"
+fi
+
 echo "setup permissions regression passed"

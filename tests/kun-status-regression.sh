@@ -58,4 +58,34 @@ gate_out="$(PATH="$TMP/bin:/usr/bin:/bin" "$ROOT/bin/kun-status" --gate 2>"$TMP/
 grep -Fq "database failed while reading gate" "$TMP/gate.err" ||
   fail "no-mistakes failure diagnostics were discarded"
 
+status_file="$TMP/status.toon"
+PATH="$TMP/bin:/usr/bin:/bin" "$ROOT/bin/kun-status" --pool > "$status_file" 2> "$TMP/status.err" ||
+  fail "kun-status file output crashed"
+grep -Fq 'description: "One-glance Kun stack state (pool, gate, crew, wake) as TOON."' "$status_file" ||
+  fail "fixed description scalar was not TOON-encoded"
+python3 - "$status_file" <<'PY' || fail "kun-status output ended with a line terminator"
+import pathlib
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes()
+raise SystemExit(0 if data and not data.endswith((b"\n", b"\r")) else 1)
+PY
+
+set +e
+PATH="$TMP/bin:/usr/bin:/bin" "$ROOT/bin/kun-status" --unknown > "$TMP/usage.toon" 2> "$TMP/usage.err"
+usage_rc=$?
+set -e
+[[ "$usage_rc" -eq 2 ]] || fail "kun-status usage error returned $usage_rc instead of 2"
+grep -Fq 'error: "unknown flag: --unknown"' "$TMP/usage.toon" ||
+  fail "usage error scalar was not TOON-encoded"
+grep -Fq 'help: "kun-status [--pool] [--gate] [--crew] [--wake] | --help"' "$TMP/usage.toon" ||
+  fail "usage help scalar was not TOON-encoded"
+python3 - "$TMP/usage.toon" <<'PY' || fail "kun-status usage output ended with a line terminator"
+import pathlib
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes()
+raise SystemExit(0 if data and not data.endswith((b"\n", b"\r")) else 1)
+PY
+
 echo "kun status regression passed"

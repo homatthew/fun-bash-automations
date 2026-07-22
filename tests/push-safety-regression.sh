@@ -296,8 +296,26 @@ printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$base_oid" "$b
   fail "composed pre-push dispatcher did not preserve exactly one existing-hook invocation"
 [[ -x "$(dirname "$hook")/pre-push.d/50-push-safety" ]] ||
   fail "push-safety hook component was not installed"
+trusted_scanner="$hook_dir/pre-push.d/.push-safety/check-push-safety.sh"
+trusted_allow="$hook_dir/pre-push.d/.push-safety/check-push-safety.allow"
+[[ -x "$trusted_scanner" && -f "$trusted_allow" && ! -L "$trusted_scanner" && ! -L "$trusted_allow" ]] ||
+  fail "trusted push-safety assets were not installed as regular files"
 [[ -L "$hook_dir/pre-push.fba-existing" ]] ||
   fail "existing relative hook was not preserved beside its original path"
+
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$repo/scripts/check-push-safety.sh"
+printf '%s\t%s\n' 'attack[.]txt:openai-secret' '.*' >> "$repo/scripts/check-push-safety.allow"
+printf 'token=%s%s\n' 'sk-' 'cccccccccccccccccccccccccccccccc' > "$repo/attack.txt"
+git -C "$repo" add scripts/check-push-safety.sh scripts/check-push-safety.allow attack.txt
+git -C "$repo" commit -q -m "attempt scanner bypass"
+attack_oid="$(git -C "$repo" rev-parse HEAD)"
+if mutable_scanner_out="$(printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$attack_oid" "$tip_oid" |
+  (cd "$repo" && "$hook" origin "$repo") 2>&1)"; then
+  fail "outgoing scanner and allow-list changes bypassed the installed enforcement copy"
+fi
+[[ "$mutable_scanner_out" == *"attack.txt@$attack_oid"*"[openai-secret]"* ]] ||
+  fail "trusted enforcement copy did not scan the malicious outgoing snapshot: $mutable_scanner_out"
+git -C "$repo" reset -q --hard "$tip_oid"
 
 capture_fail_bin="$TMP/capture-fail-bin"
 mkdir -p "$capture_fail_bin"
@@ -321,6 +339,16 @@ fi
 [[ "$missing_enforcement_out" == *"required enforcement hook is missing or not executable"* ]] ||
   fail "missing enforcement failure was unclear: $missing_enforcement_out"
 chmod +x "$hook_dir/pre-push.d/50-push-safety"
+
+rm "$hook_dir/pre-push.d/50-push-safety"
+ln -s "$TMP/missing-enforcement" "$hook_dir/pre-push.d/50-push-safety"
+if symlinked_component_out="$("$repo/scripts/check-push-safety.sh" --install-hook 2>&1)"; then
+  fail "expected a dangling managed hook symlink to be rejected"
+fi
+[[ "$symlinked_component_out" == *"refusing symlinked managed hook component"* ]] ||
+  fail "managed hook symlink failure was unclear: $symlinked_component_out"
+rm "$hook_dir/pre-push.d/50-push-safety"
+"$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
 
 mv "$private_policy" "$private_policy.saved"
 if stale_policy_out="$(

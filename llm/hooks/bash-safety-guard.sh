@@ -193,15 +193,63 @@ def normalize(segment):
                     continue
                 break
             continue
+        if executable in {"nice", "nohup", "time", "timeout"}:
+            idx += 1
+            while idx < len(segment):
+                token = segment[idx]
+                if token == "--":
+                    idx += 1
+                    break
+                if executable == "nice" and (re.fullmatch(r"-\d+", token) or token.startswith("--adjustment=")):
+                    idx += 1
+                    continue
+                if executable == "nice" and token in {"-n", "--adjustment"}:
+                    if idx + 1 >= len(segment):
+                        raise ValueError("missing nice adjustment")
+                    idx += 2
+                    continue
+                if executable == "nohup" and not token.startswith("-"):
+                    break
+                if executable == "time" and token in {"-p", "-l", "--quiet", "--verbose"}:
+                    idx += 1
+                    continue
+                if executable == "time" and token in {"-o", "--output", "-f", "--format"}:
+                    if idx + 1 >= len(segment):
+                        raise ValueError("missing time option value")
+                    idx += 2
+                    continue
+                if executable == "time" and token.startswith(("--output=", "--format=")):
+                    idx += 1
+                    continue
+                if executable == "timeout" and token in {"-k", "--kill-after", "-s", "--signal"}:
+                    if idx + 1 >= len(segment):
+                        raise ValueError("missing timeout option value")
+                    idx += 2
+                    continue
+                if executable == "timeout" and token.startswith(("--kill-after=", "--signal=")):
+                    idx += 1
+                    continue
+                if executable == "timeout" and token in {"--foreground", "--preserve-status", "--verbose"}:
+                    idx += 1
+                    continue
+                if executable == "timeout" and not token.startswith("-"):
+                    idx += 1
+                    break
+                if token.startswith("-"):
+                    raise ValueError("unknown process wrapper option")
+                break
+            continue
         break
 
-    if idx < len(segment):
-        executable = os.path.basename(segment[idx])
-        if has_eval_string(executable, segment[idx + 1:]):
+    for candidate in range(idx, len(segment)):
+        executable = os.path.basename(segment[candidate])
+        if has_eval_string(executable, segment[candidate + 1:]):
             raise RuntimeError("local interpreter command string")
 
-    if idx < len(segment) and os.path.basename(segment[idx]) == "git":
-        return prefix + ["git"] + segment[idx + 1:]
+    git_positions = [candidate for candidate in range(idx, len(segment)) if os.path.basename(segment[candidate]) == "git"]
+    if git_positions:
+        git_index = git_positions[0]
+        return prefix + ["git"] + segment[git_index + 1:]
     return original
 
 try:
@@ -352,7 +400,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 
@@ -381,13 +429,14 @@ def is_push_segment(segment):
             "--namespace=",
             "--exec-path=",
             "--super-prefix=",
+            "--config-env=",
         )):
             idx += 1
             continue
         if token in global_no_value_options:
             idx += 1
             continue
-        return False
+        return "push" in segment[idx + 1:]
     return False
 
 
@@ -421,7 +470,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 def strip_env_assignments(segment):
@@ -448,6 +497,7 @@ def push_args_for_segment(segment):
             "--namespace=",
             "--exec-path=",
             "--super-prefix=",
+            "--config-env=",
         )):
             idx += 1
             continue
@@ -533,7 +583,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 def strip_env_assignments(segment):
@@ -554,7 +604,7 @@ def push_args_for_segment(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -623,6 +673,8 @@ agent_push_policy_is_valid() {
     type == "object"
     and (.version | type == "number")
     and (.scratch_branches | valid_branch_class)
+    and (.scratch_branches.must_not_have_open_pr == true)
+    and (.scratch_branches.must_not_be_pr_base == true)
     and (.yolo_branches | valid_branch_class)
   ' "$policy_path" >/dev/null 2>&1
 }
@@ -720,6 +772,16 @@ is_scratch_remote_token() {
   return 1
 }
 
+scratch_branch_has_no_open_pr() {
+  local branch="$1" root open_heads open_bases
+  root=$(git_context rev-parse --show-toplevel 2>/dev/null) || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  open_heads=$(cd "$root" && gh pr list --state open --head "$branch" --limit 1 --json number 2>/dev/null) || return 1
+  open_bases=$(cd "$root" && gh pr list --state open --base "$branch" --limit 1 --json number 2>/dev/null) || return 1
+  jq -e 'type == "array" and length == 0' >/dev/null 2>&1 <<< "$open_heads" || return 1
+  jq -e 'type == "array" and length == 0' >/dev/null 2>&1 <<< "$open_bases"
+}
+
 current_branch_is_yolo() {
   local branch
   branch=$(git_context symbolic-ref --quiet --short HEAD 2>/dev/null || git_context branch --show-current 2>/dev/null || true)
@@ -774,6 +836,7 @@ global_value_options = {
     "--namespace",
     "--exec-path",
     "--super-prefix",
+    "--config-env",
 }
 global_no_value_options = {
     "--bare",
@@ -804,6 +867,7 @@ def commit_args(segment):
             "--namespace=",
             "--exec-path=",
             "--super-prefix=",
+            "--config-env=",
         )):
             idx += 1
             continue
@@ -849,7 +913,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 def strip_env_assignments(segment):
@@ -870,7 +934,7 @@ def git_subcommand(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -913,7 +977,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 def strip_env_assignments(segment):
@@ -934,7 +998,7 @@ def git_subcommand(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -1087,7 +1151,7 @@ try:
 except ValueError:
     sys.exit(0)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 segments = []
@@ -1120,7 +1184,7 @@ def push_args_for_segment(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith("--git-dir=") or token.startswith("--work-tree=") or token.startswith("--namespace=") or token.startswith("--exec-path=") or token.startswith("--super-prefix="):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -1186,6 +1250,9 @@ if not refspecs:
     sys.exit(0)
 
 refspec = refspecs[0]
+if any(char in refspec for char in "$`{}[]*?") or refspec.startswith("~"):
+    print("__DYNAMIC__")
+    sys.exit(0)
 if refspec.startswith("+"):
     refspec = refspec[1:]
 if ":" in refspec:
@@ -1228,7 +1295,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--bare", "--no-replace-objects", "--no-optional-locks", "--no-pager", "-p", "--paginate", "-P"}
 
 def strip_env_assignments(segment):
@@ -1249,7 +1316,7 @@ def push_args_for_segment(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -1314,7 +1381,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+global_value_options = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
 global_no_value_options = {"--literal-pathspecs", "--no-optional-locks", "--no-pager"}
 
 def push_args_for_segment(segment):
@@ -1333,7 +1400,7 @@ def push_args_for_segment(segment):
         if token in global_value_options and idx + 1 < len(segment):
             idx += 2
             continue
-        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=")):
+        if token.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=", "--super-prefix=", "--config-env=")):
             idx += 1
             continue
         if token in global_no_value_options:
@@ -2511,6 +2578,9 @@ check_git_force() {
 # check_git_force.
 check_push_guard() {
   is_git_push_command || return
+  if printf '%s' "$GIT_COMMAND" | grep -Eiq 'core[.]hooksPath'; then
+    deny "Blocked: git pushes must not override core.hooksPath."
+  fi
   local target_branch
   target_branch=$(git_push_target_branch_from_command)
   case "$target_branch" in
@@ -2519,6 +2589,9 @@ check_push_guard() {
       ;;
     ""|__MULTI__|__MULTI_PUSH__|__BROAD__)
       deny "Blocked: bare git push is not allowed. Name the target branch explicitly, e.g. git push origin <branch>."
+      ;;
+    __DYNAMIC__)
+      deny "Blocked: git push refspecs must be literal and must not use shell expansion."
       ;;
     __DELETE__)
       local delete_info delete_remote delete_target
@@ -2543,6 +2616,9 @@ check_push_guard() {
     fi
     if git_push_has_any_force_from_command; then
       deny "Blocked: scratch branch pushes must not force-update remote history."
+    fi
+    if ! scratch_branch_has_no_open_pr "$target_branch"; then
+      deny "Blocked: could not confirm that the scratch branch is absent from open PR heads and bases."
     fi
   fi
 }

@@ -350,7 +350,7 @@ alias rrc='source ~/.zshrc'
 
 # Git aliases
 alias gca='git commit --amend'
-alias gcane='gca --no-edit --no-verify'
+alias gcane='gca --no-edit'
 alias gpo='git push origin'
 alias gpofwl='gpo --force-with-lease'
 alias gpu='git push upstream'

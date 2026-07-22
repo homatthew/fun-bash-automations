@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..129"
+echo "1..137"
 
 read_allow=$(run_guard "gh api /gists/example-id")
 [[ -z "$read_allow" ]] || fail "expected gist read to be allowed, got: $read_allow"
@@ -324,6 +324,15 @@ fba_repo="$TEST_TMP/fun-bash-automations"
 git init -q "$fba_repo"
 git -C "$fba_repo" checkout -q -b main
 git -C "$fba_repo" remote add origin git@github.com:example/fun-bash-automations.git
+guard_bin="$TEST_TMP/guard-bin"
+mkdir -p "$guard_bin"
+cat > "$guard_bin/gh" <<'SH'
+#!/usr/bin/env bash
+[[ "${GUARD_GH_FAIL:-0}" == "0" ]] || exit 1
+printf '%s\n' "${GUARD_GH_PRS:-[]}"
+SH
+chmod +x "$guard_bin/gh"
+export PATH="$guard_bin:$PATH"
 fba_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin main")
 expect_contains "$fba_push_block" "Deliver protected branches through no-mistakes"
 echo "ok 59 - ordinary fun-bash-automations main push is blocked"
@@ -406,6 +415,30 @@ scratch_push_llm_allow=$(
 )
 [[ -z "$scratch_push_llm_allow" ]] || fail "expected LLM_AGENT_WORK_MODE remote_scratch scratch push to be allowed, got: $scratch_push_llm_allow"
 echo "ok 60i - scratch branch push is allowed with LLM_AGENT_WORK_MODE=remote_scratch"
+
+scratch_open_head_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GUARD_GH_PRS='[{"headRefName":"scratch/agent/checkpoint","baseRefName":"main"}]'
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/checkpoint"
+)
+expect_contains "$scratch_open_head_block" "absent from open PR heads and bases"
+echo "ok 60i2 - scratch branch push is blocked when it is an open PR head"
+
+scratch_open_base_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GUARD_GH_PRS='[{"headRefName":"feature/work","baseRefName":"scratch/agent/base"}]'
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/base"
+)
+expect_contains "$scratch_open_base_block" "absent from open PR heads and bases"
+echo "ok 60i3 - scratch branch push is blocked when it is an open PR base"
+
+scratch_pr_query_block=$(
+  export AGENT_WORK_MODE=remote_scratch
+  export GUARD_GH_FAIL=1
+  run_guard_with_workdir "$fba_repo" "git push origin scratch/agent/checkpoint"
+)
+expect_contains "$scratch_pr_query_block" "absent from open PR heads and bases"
+echo "ok 60i4 - scratch branch push fails closed when PR state is unavailable"
 
 feature_delete_block=$(run_guard_with_workdir "$fba_repo" "git push origin --delete feature/feature")
 expect_contains "$feature_delete_block" "deleting remote branches is only allowed for configured yolo branches"
@@ -654,9 +687,25 @@ command_git_push_block=$(run_guard "command git push origin master")
 expect_contains "$command_git_push_block" "pushing directly to master"
 echo "ok 86 - command-wrapped git push is blocked"
 
+nice_shell_wrapper_block=$(run_guard "nice bash -c 'git push origin HEAD:main'")
+expect_contains "$nice_shell_wrapper_block" "local code-interpreter command strings are not allowed"
+echo "ok 86a - process wrappers cannot hide local shell command strings"
+
+unknown_git_wrapper_block=$(run_guard "opaque-wrapper git push origin master")
+expect_contains "$unknown_git_wrapper_block" "pushing directly to master"
+echo "ok 86b - unknown execution wrappers cannot hide git pushes"
+
 env_git_config_block=$(run_guard "env SESSION=test git config --global core.hooksPath /tmp/hooks")
 expect_contains "$env_git_config_block" "git config mutations are not allowed"
 echo "ok 87 - env-wrapped git config mutation is blocked"
+
+config_env_push_block=$(run_guard "HOOKS=/tmp/empty git --config-env=core.hooksPath=HOOKS push origin HEAD:main")
+expect_contains "$config_env_push_block" "must not override core.hooksPath"
+echo "ok 87a - git config-env cannot disable hooks for a push"
+
+config_push_block=$(run_guard "git -c core.hooksPath=/tmp/empty push origin feature/x")
+expect_contains "$config_push_block" "must not override core.hooksPath"
+echo "ok 87b - git inline config cannot disable hooks for a push"
 
 absolute_git_reset_block=$(run_guard "/usr/bin/git reset --hard")
 expect_contains "$absolute_git_reset_block" "git reset --hard"
@@ -685,6 +734,10 @@ echo "ok 93 - malformed env split-string fails closed"
 shell_wrapper_block=$(run_guard "bash -c 'git -c core.hooksPath=/dev/null push origin HEAD:main'")
 expect_contains "$shell_wrapper_block" "local code-interpreter command strings are not allowed"
 echo "ok 93a - local shell wrappers cannot bypass git checks"
+
+dynamic_refspec_block=$(run_guard "git push origin HEAD:ma{in,ster}")
+expect_contains "$dynamic_refspec_block" "refspecs must be literal"
+echo "ok 93a2 - dynamic push refspecs are blocked"
 
 stacked_shell_wrapper_block=$(run_guard "command env zsh -lc 'git config --global core.hooksPath /dev/null'")
 expect_contains "$stacked_shell_wrapper_block" "local code-interpreter command strings are not allowed"

@@ -83,6 +83,10 @@ toon_val() {
     printf '"'
 }
 
+toon_field() {
+    printf '%s%s: %s\n' "$1" "$2" "$(toon_val "$3")"
+}
+
 # --- progress (stderr only) ----------------------------------------------
 log() { printf '%s\n' "$*" >&2; }
 
@@ -96,9 +100,9 @@ section_pool() {
     log "kun-status: probing treehouse pool..."
     if ! command -v treehouse >/dev/null 2>&1; then
         printf 'pool:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: treehouse not installed\n'
-        printf '  help: install treehouse to enable the worktree pool\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'treehouse not installed'
+        toon_field '  ' help 'install treehouse to enable the worktree pool'
         return
     fi
 
@@ -115,17 +119,17 @@ section_pool() {
     # report it with a nonzero exit code.
     if printf '%s' "$body" | grep -qiE 'No worktrees in pool'; then
         printf 'pool:\n'
-        printf '  status: empty\n'
+        toon_field '  ' status empty
         printf '  count: 0\n'
-        printf '  help: Run `treehouse get` to acquire a worktree\n'
+        toon_field '  ' help 'Run `treehouse get` to acquire a worktree'
         return
     fi
 
     if [[ $rc -ne 0 ]]; then
         [[ -z "$body" ]] || log "kun-status: treehouse status output: $body"
         printf 'pool:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: treehouse status failed (exit %s)\n' "$rc"
+        toon_field '  ' status unavailable
+        toon_field '  ' reason "treehouse status failed (exit $rc)"
         return
     fi
 
@@ -140,13 +144,13 @@ section_pool() {
     local n="${#lines[@]}"
     if [[ $n -eq 0 ]]; then
         printf 'pool:\n'
-        printf '  status: empty\n'
+        toon_field '  ' status empty
         printf '  count: 0\n'
         return
     fi
 
     printf 'pool:\n'
-    printf '  status: active\n'
+    toon_field '  ' status active
     printf '  count: %s\n' "$n"
     printf 'pool_worktrees[%s]{entry}:\n' "$n"
     local ln
@@ -165,9 +169,9 @@ section_gate() {
     log "kun-status: probing no-mistakes gate..."
     if ! command -v no-mistakes >/dev/null 2>&1; then
         printf 'gate:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: no-mistakes not installed\n'
-        printf '  help: install no-mistakes to enable the validation gate\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'no-mistakes not installed'
+        toon_field '  ' help 'install no-mistakes to enable the validation gate'
         return
     fi
 
@@ -183,45 +187,45 @@ section_gate() {
 
     if [[ -z "$status_text" ]]; then
         printf 'gate:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: no-mistakes returned no output (exit %s)\n' "$rc"
+        toon_field '  ' status unavailable
+        toon_field '  ' reason "no-mistakes returned no output (exit $rc)"
         return
     fi
 
     # not initialized for this repo → a clear, actionable state (not a crash).
     if printf '%s' "$status_text" | grep -qiE 'not initialized'; then
         printf 'gate:\n'
-        printf '  status: not-initialized\n'
-        printf '  reason: no-mistakes gate not set up in this repository\n'
-        printf '  help: Run `no-mistakes init` to enable the gate here\n'
+        toon_field '  ' status not-initialized
+        toon_field '  ' reason 'no-mistakes gate not set up in this repository'
+        toon_field '  ' help 'Run `no-mistakes init` to enable the gate here'
         return
     fi
     if printf '%s' "$status_text" | grep -qiE 'not (in|inside) a git repository'; then
         printf 'gate:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: not inside a git repository\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'not inside a git repository'
         return
     fi
     if printf '%s' "$status_text" | grep -qiE 'no runs'; then
         printf 'gate:\n'
-        printf '  status: idle\n'
+        toon_field '  ' status idle
         printf '  runs: 0\n'
-        printf '  help: Run `no-mistakes axi run` to validate changes\n'
+        toon_field '  ' help 'Run `no-mistakes axi run` to validate changes'
         return
     fi
     if [[ $rc -ne 0 ]]; then
         [[ -z "$out" ]] || log "kun-status: no-mistakes status output: $out"
         [[ -z "$err" ]] || log "kun-status: no-mistakes status error: $err"
         printf 'gate:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: no-mistakes status failed (exit %s)\n' "$rc"
+        toon_field '  ' status unavailable
+        toon_field '  ' reason "no-mistakes status failed (exit $rc)"
         return
     fi
 
     # Active or recent run: no-mistakes already emits AXI TOON. Re-key it
     # under our `gate` namespace and pass its structured lines through.
     printf 'gate:\n'
-    printf '  status: reported\n'
+    toon_field '  ' status reported
     printf '%s\n' "$out" | sed 's/^/  /'
 }
 
@@ -232,9 +236,9 @@ section_crew() {
     log "kun-status: probing firstmate crew (tmux fm-*)..."
     if ! command -v tmux >/dev/null 2>&1; then
         printf 'crew:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: tmux not installed\n'
-        printf '  help: firstmate crewmates run in tmux windows named fm-*\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'tmux not installed'
+        toon_field '  ' help 'firstmate crewmates run in tmux windows named fm-*'
         return
     fi
 
@@ -245,9 +249,9 @@ section_crew() {
 
     if [[ $rc -ne 0 ]]; then
         printf 'crew:\n'
-        printf '  status: offline\n'
+        toon_field '  ' status offline
         printf '  count: 0\n'
-        printf '  reason: no tmux server running\n'
+        toon_field '  ' reason 'no tmux server running'
         return
     fi
 
@@ -257,16 +261,16 @@ section_crew() {
 
     if [[ -z "$fm" ]]; then
         printf 'crew:\n'
-        printf '  status: idle\n'
+        toon_field '  ' status idle
         printf '  count: 0\n'
-        printf '  help: crewmates appear as tmux windows named fm-*; launch via firstmate\n'
+        toon_field '  ' help 'crewmates appear as tmux windows named fm-*; launch via firstmate'
         return
     fi
 
     local n
     n="$(printf '%s\n' "$fm" | grep -c . )"
     printf 'crew:\n'
-    printf '  status: active\n'
+    toon_field '  ' status active
     printf '  count: %s\n' "$n"
     printf 'crew_members[%s]{name,window,active,cmd}:\n' "$n"
     local name win act cmd
@@ -319,22 +323,22 @@ section_wake() {
 
     if [[ $probed -eq 0 ]]; then
         printf 'wake:\n'
-        printf '  status: unavailable\n'
-        printf '  reason: no scheduler available (crontab/launchctl not found)\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'no scheduler available (crontab/launchctl not found)'
         return
     fi
 
     local n="${#entries[@]}"
     if [[ $n -eq 0 ]]; then
         printf 'wake:\n'
-        printf '  status: empty\n'
+        toon_field '  ' status empty
         printf '  count: 0\n'
-        printf '  reason: no dedicated wake-queue source; no matching cron/launchd jobs\n'
+        toon_field '  ' reason 'no dedicated wake-queue source; no matching cron/launchd jobs'
         return
     fi
 
     printf 'wake:\n'
-    printf '  status: scheduled\n'
+    toon_field '  ' status scheduled
     printf '  count: %s\n' "$n"
     printf 'wake_jobs[%s]{source,job}:\n' "$n"
     local src job e
@@ -355,12 +359,12 @@ while [[ $# -gt 0 ]]; do
         -h|--help) print_help; exit 0 ;;
         --) shift; break ;;
         -*)
-            printf 'error: unknown flag: %s\n' "$1"
-            printf 'help: kun-status [--pool] [--gate] [--crew] [--wake] | --help\n'
+            output="$(toon_field '' error "unknown flag: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+            printf '%s' "$output"
             exit 2 ;;
         *)
-            printf 'error: unexpected argument: %s\n' "$1"
-            printf 'help: kun-status [--pool] [--gate] [--crew] [--wake] | --help\n'
+            output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+            printf '%s' "$output"
             exit 2 ;;
     esac
     shift
@@ -372,12 +376,15 @@ if [[ $any -eq 0 ]]; then
 fi
 
 # --- home view header (identity, per AXI §10) -----------------------------
-printf 'bin: %s\n' "$(self_path)"
-printf 'description: %s\n' "$DESC"
-
-[[ $want_pool -eq 1 ]] && section_pool
-[[ $want_gate -eq 1 ]] && section_gate
-[[ $want_crew -eq 1 ]] && section_crew
-[[ $want_wake -eq 1 ]] && section_wake
+output="$({
+    toon_field '' bin "$(self_path)"
+    toon_field '' description "$DESC"
+    [[ $want_pool -eq 1 ]] && section_pool
+    [[ $want_gate -eq 1 ]] && section_gate
+    [[ $want_crew -eq 1 ]] && section_crew
+    [[ $want_wake -eq 1 ]] && section_wake
+    true
+})"
+printf '%s' "$output"
 
 exit 0

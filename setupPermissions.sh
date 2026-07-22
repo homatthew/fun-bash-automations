@@ -207,10 +207,10 @@ fi
 
 # Create symlinks for dotfiles
 rm -f ~/.vimrc
-ln -s ~/repos/fun-bash-automations/.vimrc ~/.vimrc
+ln -s "$ROOT_DIR/.vimrc" ~/.vimrc
 
 rm -f ~/.zshrc
-ln -s ~/repos/fun-bash-automations/.zshrc ~/.zshrc
+ln -s "$ROOT_DIR/.zshrc" ~/.zshrc
 
 rm -f ~/.ideavimrc
 ln -s ~/.vimrc ~/.ideavimrc
@@ -218,7 +218,7 @@ ln -s ~/.vimrc ~/.ideavimrc
 # Create symlinks for zsh config files
 echo "Setting up zsh config symlinks..."
 rm -f ~/.zsh/personal.zsh
-ln -s ~/repos/fun-bash-automations/zsh/personal.zsh ~/.zsh/personal.zsh
+ln -s "$ROOT_DIR/zsh/personal.zsh" ~/.zsh/personal.zsh
 echo "✓ personal.zsh symlinked"
 
 # ==============================================================================
@@ -228,7 +228,7 @@ echo ""
 echo "Setting up Ghostty configuration..."
 mkdir -p ~/.config/ghostty
 rm -f ~/.config/ghostty/config
-ln -s ~/repos/fun-bash-automations/ghostty/config ~/.config/ghostty/config
+ln -s "$ROOT_DIR/ghostty/config" ~/.config/ghostty/config
 echo "✓ Ghostty config symlinked"
 
 # ==============================================================================

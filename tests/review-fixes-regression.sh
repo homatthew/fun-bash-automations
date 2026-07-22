@@ -69,5 +69,10 @@ grep -Fq 'CROSS_REPO_CONTEXT_ALLOWLIST' "$ROOT/claude/agents/cross-repo-context.
 if rg -n 'List ~/repos|\.context/repo-insights|git commit -m "second-brain' "$ROOT/claude/agents/cross-repo-context.md" >/dev/null; then
   fail "cross-repo agent still inventories or persists sibling repository data"
 fi
+grep -Fq "alias gcane='gca --no-edit'" "$ROOT/zsh/personal.zsh" ||
+  fail "gcane still hides hook bypass behavior"
+if rg -n 'gcane.*no-verify' "$ROOT/QoL.md" "$ROOT/zsh/personal.zsh" >/dev/null; then
+  fail "public gcane documentation still exposes a hidden hook bypass"
+fi
 
 echo "review fixes regression passed"

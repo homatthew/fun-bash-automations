@@ -59,7 +59,7 @@ Press `Ctrl+G` then the second key:
 | Alias | Command |
 |-------|---------|
 | `gca` | `git commit --amend` |
-| `gcane` | `git commit --amend --no-edit --no-verify` |
+| `gcane` | `git commit --amend --no-edit` |
 | `gpo` | `git push origin` |
 | `gpofwl` | `git push origin --force-with-lease` |
 | `gpu` | `git push upstream` |
