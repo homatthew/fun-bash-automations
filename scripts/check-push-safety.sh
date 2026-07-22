@@ -638,7 +638,7 @@ scan_pre_push() {
       fi
     fi
     while IFS= read -r commit; do
-      [[ -n "$commit" ]] && scan_commit "$commit"
+      [[ -z "$commit" ]] || scan_commit "$commit"
     done <<< "$commits"
   done
 }

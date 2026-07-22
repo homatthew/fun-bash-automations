@@ -264,6 +264,14 @@ fi
 [[ "$advertised_out" == *"boundary.txt@$private_oid"* ]] ||
   fail "new-ref scan trusted mutable tracking refs: $advertised_out"
 
+git -C "$repo" push -q "$advertised_remote" "$tip_oid:refs/heads/already-advertised"
+if ! already_advertised_out="$(printf 'refs/heads/feature/clean %s refs/heads/feature/clean %040d\n' "$tip_oid" 0 |
+  "$repo/scripts/check-push-safety.sh" --pre-push origin "$advertised_remote" 2>&1)"; then
+  fail "new-ref scan rejected a commit already advertised by the remote: $already_advertised_out"
+fi
+[[ "$already_advertised_out" == *"push-safety scan clean (pre-push)"* ]] ||
+  fail "already-advertised new-ref scan did not report success: $already_advertised_out"
+
 hook_log="$TMP/existing-hook.log"
 hook="$(git -C "$repo" rev-parse --git-path hooks/pre-push)"
 case "$hook" in
