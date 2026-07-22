@@ -1,0 +1,11 @@
+# Ghostty configuration
+# https://ghostty.org/docs/config/reference
+
+# Disable Ghostty's shell integration title setting
+# This allows our custom zsh hooks to control the terminal title
+# showing directory name and git branch (e.g., "fun-bash-automations (main)")
+# See: https://github.com/anthropics/claude-code/issues/4765
+shell-integration-features = no-title
+
+# Agent hooks emit Ghostty-native OSC 9 desktop notifications.
+desktop-notifications = true

@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE="all"
+EXTERNAL_SKILLS_DIRS=("")
+
+# Optional install log: when FBA_DEPLOY_LOG is set, every projection action is
+# appended there (used by dotfiles workspace installers to share a unified log).
+fba_log() {
+    local msg="$*"
+    if [[ -n "${FBA_DEPLOY_LOG:-}" ]]; then
+        printf '[%s] [fba-deploy] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$FBA_DEPLOY_LOG" || true
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage: fba-deploy [--claude-only | --codex-only | --shared-only] [--external-skills-dir <dir>]
+
+Project repo-owned LLM config from fun-bash-automations into local runtimes.
+
+Modes:
+  --claude-only  Update ~/.claude plus shared AGENTS/skills
+  --codex-only   Update ~/.codex plus shared AGENTS/skills
+  --shared-only  Update only shared AGENTS/skills in both runtimes
+  --external-skills-dir <dir>
+                  Add skills from an explicitly selected external directory
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --claude-only)
+            MODE="claude"
+            ;;
+        --codex-only)
+            MODE="codex"
+            ;;
+        --shared-only)
+            MODE="shared"
+            ;;
+        --external-skills-dir)
+            [[ $# -ge 2 ]] || { echo "--external-skills-dir requires a directory" >&2; exit 1; }
+            EXTERNAL_SKILLS_DIRS+=("$2")
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+"$ROOT/scripts/check-push-safety.sh"
+if [[ "${FBA_DEPLOY_SKIP_GIT_HOOK:-0}" != "1" ]]; then
+    "$ROOT/scripts/check-push-safety.sh" --install-hook
+fi
+
+codex_base_url() {
+    printf '%s\n' "${CODEX_BASE_URL:-https://api.openai.com/v1}"
+}
+
+codex_provider_name() {
+    printf '%s\n' "${CODEX_PROVIDER_NAME:-OpenAI}"
+}
+
+canonical_path() {
+    python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+link_path() {
+    local source_path="$1"
+    local dest_path="$2"
+    local source_target dest_target
+
+    source_target="$(canonical_path "$source_path")"
+    [[ -e "$source_target" ]] || {
+        echo "Projection source does not exist: $source_path" >&2
+        return 1
+    }
+
+    if command -v chflags >/dev/null 2>&1; then
+        chflags -h nouchg "$dest_path" 2>/dev/null || true
+    fi
+
+    if [[ -L "$dest_path" ]]; then
+        dest_target="$(canonical_path "$dest_path")"
+        if [[ "$dest_target" == "$source_target" ]]; then
+            return 0
+        fi
+        echo "Refusing to replace unmanaged projection: $dest_path" >&2
+        return 1
+    elif [[ -e "$dest_path" ]]; then
+        echo "Refusing to replace unmanaged projection: $dest_path" >&2
+        return 1
+    fi
+
+    ln -s "$source_target" "$dest_path"
+    dest_target="$(canonical_path "$dest_path")"
+    [[ -L "$dest_path" && "$dest_target" == "$source_target" ]] || {
+        rm -f "$dest_path"
+        echo "Projection target did not resolve to its source: $dest_path" >&2
+        return 1
+    }
+}
+
+copy_path() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if command -v chflags >/dev/null 2>&1; then
+        chflags -h nouchg "$dest_path" 2>/dev/null || true
+    fi
+
+    if [[ -L "$dest_path" || -f "$dest_path" ]]; then
+        rm -f "$dest_path"
+    elif [[ -d "$dest_path" ]]; then
+        echo "Refusing to replace directory with file: $dest_path" >&2
+        return 1
+    fi
+
+    cp "$source_path" "$dest_path"
+}
+
+retired_repo_managed_skill_names() {
+    printf '%s\n' \
+        address-comments-by \
+        commit-push-pr \
+        notify \
+        verify-build \
+        worktree-dev
+}
+
+is_retired_repo_managed_skill_dir() {
+    local name="$1"
+    local dest_path="$2"
+    local skill_file=""
+    if [[ -f "$dest_path/SKILL.md" ]]; then
+        skill_file="$dest_path/SKILL.md"
+    elif [[ -f "$dest_path/skill.md" ]]; then
+        skill_file="$dest_path/skill.md"
+    else
+        return 1
+    fi
+
+    case "$name" in
+        address-comments-by)
+            grep -Fq "View and address GitHub PR review comments by a specific reviewer" "$skill_file"
+            ;;
+        commit-push-pr)
+            grep -Fq "name: commit-push-pr" "$skill_file" &&
+                grep -Fq "Commit, push, and create a PR in one workflow" "$skill_file"
+            ;;
+        notify)
+            grep -Fq "name: notify" "$skill_file" &&
+                grep -Fq "Send a macOS notification to alert the user with context about what's ready" "$skill_file"
+            ;;
+        verify-build)
+            grep -Fq "name: verify-build" "$skill_file" &&
+                grep -Fq "Verify the build passes and fix any issues" "$skill_file"
+            ;;
+        worktree-dev)
+            grep -Fq "name: worktree-dev" "$skill_file" &&
+                grep -Fq "Create a worktree and develop changes in isolation" "$skill_file"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+prune_retired_repo_managed_skills() {
+    local home_dir="$1"
+    local name dest_path target
+    while IFS= read -r name; do
+        dest_path="$home_dir/skills/$name"
+        [[ -e "$dest_path" || -L "$dest_path" ]] || continue
+        if [[ -L "$dest_path" ]]; then
+            target="$(readlink "$dest_path" || true)"
+            case "$target" in
+                "$ROOT/claude/skills/$name"|"$ROOT/claude/skills/$name/"*|"$ROOT/llm/skills/$name"|"$ROOT/llm/skills/$name/"*)
+                    rm -f "$dest_path"
+                    fba_log "pruned retired repo-managed skill symlink: $dest_path"
+                    ;;
+            esac
+        elif [[ -d "$dest_path" ]] && is_retired_repo_managed_skill_dir "$name" "$dest_path"; then
+            rm -rf "$dest_path"
+            fba_log "pruned retired repo-managed skill directory: $dest_path"
+        fi
+    done < <(retired_repo_managed_skill_names)
+}
+
+project_shared_hooks() {
+    local target_hooks_dir="$1"
+    mkdir -p "$target_hooks_dir"
+    for hook in "$ROOT"/llm/hooks/*.sh; do
+        [[ -f "$hook" ]] || continue
+        copy_path "$hook" "$target_hooks_dir/$(basename "$hook")"
+        chmod +x "$target_hooks_dir/$(basename "$hook")"
+    done
+}
+
+extract_toml_table_headers() {
+    awk '
+        /^\[\[[^]]+\]\]$/ {
+            line = $0
+            sub(/^\[\[/, "", line)
+            sub(/\]\]$/, "", line)
+            print line
+            next
+        }
+        /^\[[^]]+\]$/ {
+            line = $0
+            sub(/^\[/, "", line)
+            sub(/\]$/, "", line)
+            print line
+        }
+    ' "$@"
+}
+
+append_preserved_codex_config_sections() {
+    local existing_config="$1"
+    local managed_headers="$2"
+    local preserve_mcp="${FBA_DEPLOY_PRESERVE_CODEX_MCP:-1}"
+    [[ -f "$existing_config" ]] || return 0
+
+    awk -v preserve_mcp="$preserve_mcp" '
+        NR == FNR {
+            managed[$0] = 1
+            next
+        }
+        function is_managed_table(table, key) {
+            for (key in managed) {
+                if (table == key || index(table, key ".") == 1) {
+                    return 1
+                }
+            }
+            return 0
+        }
+        function is_preserved_table(table) {
+            return (table ~ /^hooks\.state(\.|$)/ ||
+                    table == "tui.model_availability_nux" ||
+                    (preserve_mcp == "1" && table ~ /^mcp_servers\./) ||
+                    table ~ /^marketplaces\./ ||
+                    table ~ /^plugins\./ ||
+                    table ~ /^projects\./)
+        }
+        /^\[[^]]+\]$/ {
+            table = $0
+            sub(/^\[/, "", table)
+            sub(/\]$/, "", table)
+            keep = is_preserved_table(table) && !is_managed_table(table)
+        }
+        keep {
+            print
+            emitted = 1
+        }
+        END {
+            if (emitted) {
+                print ""
+            }
+        }
+    ' "$managed_headers" "$existing_config"
+}
+
+render_codex_config() {
+    local base_url="$1"
+    local provider_name="$2"
+    local target="$HOME/.codex/config.toml"
+    local tmp managed_headers
+    tmp="$(mktemp "$HOME/.codex/config.toml.XXXXXX")"
+    managed_headers="$(mktemp "$HOME/.codex/managed-codex-tables.XXXXXX")"
+
+    render_toml_template "$ROOT/codex/config.toml" "$base_url" "$provider_name" > "$tmp"
+    if [[ -f "$ROOT/codex/mcp.toml" ]]; then
+        {
+            printf '\n# Portable Codex MCP allowlist\n'
+            render_toml_template "$ROOT/codex/mcp.toml" "$base_url" "$provider_name"
+        } >> "$tmp"
+        extract_toml_table_headers "$ROOT/codex/mcp.toml" > "$managed_headers"
+    fi
+    append_preserved_codex_config_sections "$target" "$managed_headers" >> "$tmp"
+    rm -f "$managed_headers"
+    mv "$tmp" "$target"
+    chmod 600 "$target"
+}
+
+render_toml_template() {
+    local template="$1" base_url="$2" provider_name="$3"
+    python3 - "$template" "$base_url" "$provider_name" "$ROOT" <<'PY'
+import json
+import pathlib
+import sys
+
+template, base_url, provider_name, root = sys.argv[1:]
+text = pathlib.Path(template).read_text(encoding="utf-8")
+quoted = {
+    '"__CODEX_BASE_URL__"': json.dumps(base_url, ensure_ascii=False),
+    '"__CODEX_PROVIDER_NAME__"': json.dumps(provider_name, ensure_ascii=False),
+}
+for marker, value in quoted.items():
+    text = text.replace(marker, value)
+text = text.replace("__FBA_ROOT__", json.dumps(root, ensure_ascii=False)[1:-1])
+sys.stdout.write(text)
+PY
+}
+
+project_shared() {
+    local home_dir="$1"
+    mkdir -p "$home_dir/skills"
+    prune_retired_repo_managed_skills "$home_dir"
+
+    if [[ -f "$ROOT/llm/AGENTS.md" ]]; then
+        link_path "$ROOT/llm/AGENTS.md" "$home_dir/AGENTS.md"
+    fi
+    for policy_file in agent-push-policy.json agent-push-policy.schema.json; do
+        if [[ -f "$ROOT/llm/$policy_file" ]]; then
+            link_path "$ROOT/llm/$policy_file" "$home_dir/$policy_file"
+        fi
+    done
+
+    for skill_dir in "$ROOT"/llm/skills/*/; do
+        [[ -d "$skill_dir" ]] || continue
+        local name
+        name="$(basename "$skill_dir")"
+        link_path "$skill_dir" "$home_dir/skills/$name"
+    done
+
+    local external_skills_dir
+    for external_skills_dir in "${EXTERNAL_SKILLS_DIRS[@]}"; do
+        [[ -n "$external_skills_dir" ]] || continue
+        [[ -d "$external_skills_dir" ]] || {
+            echo "External skills directory does not exist: $external_skills_dir" >&2
+            return 1
+        }
+        for skill_dir in "$external_skills_dir"/*/; do
+            [[ -d "$skill_dir" ]] || continue
+            local name
+            name="$(basename "$skill_dir")"
+            link_path "$skill_dir" "$home_dir/skills/$name"
+        done
+    done
+}
+
+deploy_claude() {
+    mkdir -p "$HOME/.claude/agents" "$HOME/.claude/skills" "$HOME/.claude/hooks"
+
+    if [[ -f "$ROOT/claude/CLAUDE.md" ]]; then
+        link_path "$ROOT/claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+    fi
+
+    project_shared "$HOME/.claude"
+
+    if [[ -f "$ROOT/claude/settings.json" ]]; then
+        copy_path "$ROOT/claude/settings.json" "$HOME/.claude/settings.json"
+        fba_log "projected portable claude/settings.json"
+    fi
+
+    if [[ -f "$ROOT/claude/statusline.sh" ]]; then
+        copy_path "$ROOT/claude/statusline.sh" "$HOME/.claude/statusline.sh"
+        chmod +x "$HOME/.claude/statusline.sh"
+    fi
+
+    for agent in "$ROOT"/claude/agents/*.md; do
+        [[ -f "$agent" ]] || continue
+        link_path "$agent" "$HOME/.claude/agents/$(basename "$agent")"
+    done
+
+    project_shared_hooks "$HOME/.claude/hooks"
+    for hook in "$ROOT"/claude/hooks/*.sh; do
+        [[ -f "$hook" ]] || continue
+        copy_path "$hook" "$HOME/.claude/hooks/$(basename "$hook")"
+        chmod +x "$HOME/.claude/hooks/$(basename "$hook")"
+    done
+
+    # macOS-only extras: placeholder Claude Notify.app bundle and the forked
+    # VS Code OSC notifier extension. Skipped on Linux workspaces where they
+    # would error out, and skippable via FBA_DEPLOY_SKIP_MAC_EXTRAS=1.
+    if [[ "${FBA_DEPLOY_SKIP_MAC_EXTRAS:-0}" != "1" && "$(uname -s)" == "Darwin" ]]; then
+        if [[ -x "$ROOT/bin/install-claude-notify-app" ]]; then
+            "$ROOT/bin/install-claude-notify-app" || true
+        fi
+        if [[ -x "$ROOT/bin/install-osc-notifier" && -n "${OSC_NOTIFIER_REPO_URL:-}" && -n "${OSC_NOTIFIER_PUBLISHER:-}" ]]; then
+            "$ROOT/bin/install-osc-notifier" || true
+        fi
+    fi
+}
+
+deploy_codex() {
+    local base_url provider_name
+    base_url="$(codex_base_url)"
+    provider_name="$(codex_provider_name)"
+
+    mkdir -p "$HOME/.codex" "$HOME/.codex/skills" "$HOME/.codex/hooks"
+    project_shared "$HOME/.codex"
+
+    if [[ -f "$ROOT/codex/config.toml" ]]; then
+        render_codex_config "$base_url" "$provider_name"
+    fi
+
+    if [[ -f "$ROOT/codex/hooks.json" ]]; then
+        copy_path "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
+    fi
+
+    project_shared_hooks "$HOME/.codex/hooks"
+}
+
+case "$MODE" in
+    all)
+        deploy_claude
+        deploy_codex
+        ;;
+    claude)
+        deploy_claude
+        ;;
+    codex)
+        deploy_codex
+        ;;
+    shared)
+        mkdir -p "$HOME/.claude" "$HOME/.codex"
+        project_shared "$HOME/.claude"
+        project_shared "$HOME/.codex"
+        ;;
+esac
+
+echo "Projected fun-bash-automations LLM config ($MODE)"

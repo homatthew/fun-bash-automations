@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# kun-stack-verify — verify the pinned Kun stack is installed at the right
+# versions. Required tools must be present and version-matched; optional tools
+# (lavish-axi, firstmate) are presence-tolerant and only warn when absent.
+#
+# Exit 0 when every required tool passes. Usage: kun-stack-verify [--quiet]
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+MANIFEST="${KUN_STACK_MANIFEST:-$SCRIPT_DIR/../llm/kun-stack/manifest.json}"
+. "$SCRIPT_DIR/kun-stack-version-lib.sh"
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+command -v jq >/dev/null 2>&1 || { echo "kun-stack-verify: jq is required" >&2; exit 1; }
+[ -f "$MANIFEST" ] || { echo "kun-stack-verify: manifest not found: $MANIFEST" >&2; exit 1; }
+
+expand() { printf '%s' "${1/#\~/$HOME}"; }
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+
+probe_version() {
+  local bin="$1" match="$2" policy="$3"; shift 3
+  command -v "$bin" >/dev/null 2>&1 || return 2   # 2 = absent
+  local out line
+  out=$("$bin" "$@" 2>&1) || return 1
+  line=$(kun_version_line "$bin" "$out") || return 1
+  [[ -n "$line" ]] || return 1
+  kun_version_line_matches "$line" "$match" "$policy" && return 0 # 0 = match
+  return 1                                          # 1 = present, wrong version
+}
+
+fail=0
+say "Kun stack verification ($MANIFEST):"
+for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
+  kind=$(jq -r --arg t "$name" '.tools[$t].kind' "$MANIFEST")
+  required=$(jq -r --arg t "$name" '.tools[$t].required // false' "$MANIFEST")
+  want=$(jq -r --arg t "$name" '.tools[$t].version' "$MANIFEST")
+
+  if [ "$kind" = "git" ]; then
+    dest=$(expand "$(jq -r --arg t "$name" '.tools[$t].dest' "$MANIFEST")")
+    ref=$(jq -r --arg t "$name" '.tools[$t].ref' "$MANIFEST")
+    actual=
+    expected=
+    if git -C "$dest" rev-parse --git-dir >/dev/null 2>&1; then
+      actual=$(git -C "$dest" rev-parse 'HEAD^{commit}' 2>/dev/null || true)
+      expected=$(git -C "$dest" rev-parse "${ref}^{commit}" 2>/dev/null || true)
+    fi
+    if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
+      say "  PASS  $name (git) at pinned ref $ref"
+    elif [ -n "$actual" ]; then
+      if [ "$required" = "true" ]; then
+        say "  FAIL  $name (git) is $actual, want $ref"; fail=1
+      else
+        say "  warn  $name (git) is $actual, want $ref (optional)"
+      fi
+    elif [ "$required" = "true" ]; then
+      say "  FAIL  $name (git) missing at $dest"; fail=1
+    else
+      say "  warn  $name (git) absent at $dest (optional)"
+    fi
+    continue
+  fi
+
+  bin=$(jq -r --arg t "$name" '.tools[$t].bin // empty' "$MANIFEST")
+  match=$(jq -r --arg t "$name" '.tools[$t].version_match // empty' "$MANIFEST")
+  policy=$(jq -r --arg t "$name" '.tools[$t].version_policy // empty' "$MANIFEST")
+  vargs=()
+  while IFS= read -r _a; do [ -n "$_a" ] && vargs+=("$_a"); done \
+    < <(jq -r --arg t "$name" '.tools[$t].version_args[]? // empty' "$MANIFEST")
+
+  set +e
+  probe_version "$bin" "$match" "$policy" "${vargs[@]}"; rc=$?
+  set -e
+  case "$rc" in
+    0) say "  PASS  $name $want" ;;
+    2) if [ "$required" = "true" ]; then say "  FAIL  $name missing (want $want)"; fail=1
+       else say "  warn  $name absent (optional; run via npx)"; fi ;;
+    1) if [ "$required" = "true" ]; then say "  FAIL  $name present but not $want"; fail=1
+       else say "  warn  $name present, version != $want (optional)"; fi ;;
+  esac
+done
+
+if [ "$fail" -eq 0 ]; then
+  say "kun-stack-verify: OK (all required tools present and pinned)"
+  exit 0
+fi
+say "kun-stack-verify: FAILED (run kun-stack-install)"
+exit 1

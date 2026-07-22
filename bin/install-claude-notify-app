@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Install the "Claude Notify.app" placeholder bundle at ~/Applications/.
+#
+# Why this exists:
+#   terminal-notifier -sender com.anthropic.claudefordesktop hangs indefinitely
+#   on at least one macOS 15.x install (Claude.app's own notification endpoint
+#   appears unreachable to `usernoted`, uncorrectable by lsregister, tccutil
+#   reset, or ncprefs surgery).
+#
+# Workaround: ship a tiny placeholder .app under our own bundle id that
+#   carries Claude's real icon (copied from Claude.app's Assets.car).
+#   notify.sh passes the configured sender bundle; the banner renders
+#   with Claude's icon and delivery never blocks.
+#
+# The install is idempotent: re-running overwrites the bundle's contents in
+# place and re-registers with Launch Services.
+
+set -euo pipefail
+
+BUNDLE_ID="${CLAUDE_NOTIFY_BUNDLE_ID:-dev.fun-bash-automations.claude-notify}"
+APP_PATH="$HOME/Applications/Claude Notify.app"
+SRC_CLAUDE_APP="/Applications/Claude.app"
+SRC_ASSETS="$SRC_CLAUDE_APP/Contents/Resources/Assets.car"
+
+[[ "$BUNDLE_ID" =~ ^[A-Za-z0-9.-]+$ ]] || {
+  echo "install-claude-notify-app: invalid CLAUDE_NOTIFY_BUNDLE_ID" >&2
+  exit 1
+}
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "install-claude-notify-app: macOS only; skipping" >&2
+  exit 0
+fi
+
+if [[ ! -d "$SRC_CLAUDE_APP" ]]; then
+  echo "install-claude-notify-app: /Applications/Claude.app not found; skipping" >&2
+  exit 0
+fi
+
+if [[ ! -f "$SRC_ASSETS" ]]; then
+  echo "install-claude-notify-app: $SRC_ASSETS not found; skipping" >&2
+  exit 0
+fi
+
+mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
+cp "$SRC_ASSETS" "$APP_PATH/Contents/Resources/Assets.car"
+
+cat > "$APP_PATH/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key><string>Claude Code</string>
+  <key>CFBundleName</key><string>Claude Code</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>ClaudeNotify</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>Claude</string>
+  <key>LSUIElement</key><true/>
+  <key>LSBackgroundOnly</key><true/>
+</dict>
+</plist>
+PLIST
+
+cat > "$APP_PATH/Contents/MacOS/ClaudeNotify" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "$APP_PATH/Contents/MacOS/ClaudeNotify"
+
+touch "$APP_PATH"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$APP_PATH"
+fi
+
+echo "install-claude-notify-app: ready at $APP_PATH (bundle id: $BUNDLE_ID)"

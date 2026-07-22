@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "description": "Pinned manifest for the Kun Chen OSS agent stack (treehouse / gnhf / no-mistakes / lavish-axi / firstmate). Drives bin/kun-stack-{install,verify,uninstall}. Idempotent via version-probe + marker files. Bump a version here, re-run kun-stack-install.",
+  "drive_bootstrap": false,
+  "marker_dir": "~/.local/state/kun-stack",
+  "tools": {
+    "treehouse": {
+      "kind": "go",
+      "module": "github.com/kunchenguid/treehouse",
+      "version": "v1.8.0",
+      "bin": "treehouse",
+      "version_args": ["--version"],
+      "version_match": "v1.8.0",
+      "self_update": "treehouse update",
+      "role": "Pooled pre-warmed git worktrees (substrate for parallel agents).",
+      "required": true
+    },
+    "no-mistakes": {
+      "kind": "go",
+      "module": "github.com/kunchenguid/no-mistakes/cmd/no-mistakes",
+      "version": "v1.32.2",
+      "bin": "no-mistakes",
+      "version_args": ["--version"],
+      "version_match": "1.32.0",
+      "version_policy": "same_minor_or_newer_patch",
+      "self_update": "no-mistakes update",
+      "role": "The automated delivery gate (review/test/lint/docs -> push -> PR).",
+      "required": true
+    },
+    "gnhf": {
+      "kind": "npm",
+      "package": "gnhf",
+      "version": "0.1.41",
+      "bin": "gnhf",
+      "version_args": ["--version"],
+      "version_match": "0.1.41",
+      "role": "Long-run single-objective autonomous loop (depth). Replaced ralph.",
+      "required": true
+    },
+    "lavish-axi": {
+      "kind": "npm",
+      "package": "lavish-axi",
+      "version": "0.1.31",
+      "bin": "lavish-axi",
+      "invoke": "npx -y lavish-axi",
+      "version_args": ["--version"],
+      "version_match": "0.1",
+      "role": "Plan-of-record / human review surface. Usually run via npx; global install optional.",
+      "required": false
+    },
+    "firstmate": {
+      "kind": "git",
+      "repo": "https://github.com/kunchenguid/firstmate.git",
+      "ref": "e2e730f",
+      "dest": "~/repos/firstmate",
+      "role": "Crew orchestrator (breadth). An AGENTS.md directory, NOT a binary; launch your agent inside it.",
+      "required": false
+    }
+  },
+  "notes": {
+    "go_toolchain": "go install requires a Go toolchain (>=1.21). kun-stack-install probes for `go`; if absent it logs and skips go tools (use the upstream install.sh as a fallback).",
+    "axi": "axi is the AXI interface standard (see the `axi` skill), surfaced by lavish-axi and no-mistakes axi; there is no separate `axi` binary to pin here.",
+    "drive_bootstrap": "false: kun-stack-install never auto-runs treehouse init / no-mistakes init / firstmate bootstrap. Those are per-repo, opt-in, and run explicitly."
+  }
+}

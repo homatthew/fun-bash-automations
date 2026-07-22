@@ -96,6 +96,37 @@ Press `Ctrl+G` then the second key:
 | `to_mp3 <file>` | Convert any audio file to MP3 |
 | `webm_to_mp3` | Convert all .webm files in directory |
 
+### Agent Delivery Workflow
+
+Finishing and shipping work goes through agent-driven tooling rather than a
+manual approval CLI:
+
+| Tool | Description |
+|------|-------------|
+| `/ship` | Finish-the-job entrypoint for a single change; runs the `no-mistakes` gate, then pushes to the configured target and opens/updates the PR |
+| `no-mistakes` | The delivery gate itself: automated code review, tests, lint, and docs before anything reaches the push target |
+| `firstmate` | Orchestrates a crew of agents for breadth across many tasks |
+| `gnhf` | Long-run single-objective loop for depth on one goal |
+| `treehouse` | Provides isolated, pooled worktrees for parallel agent work |
+
+Local review still uses Neovim Diffview and the optional 99/Codex helper:
+
+| Keybinding | Action |
+|------------|--------|
+| `Space g c` | Open AI-assisted local review thread UI that breaks vague notes into agent-actionable asks |
+| `a/r/e/q` | In the review thread panel: accept/save, reply/refine, edit/save, or cancel |
+| `Space r l` | Cycle Diffview split layouts while reviewing |
+| `Space r u` | Open a unified inline-style `git diff base..head` buffer |
+| `Space 9 s` | Ask the optional 99/Codex helper to search the current repo/diff |
+| `Space 9 v` | In visual mode, ask Codex for a suggested edit and store it as a local review comment |
+
+Protected-branch pushes (main/master/develop/trunk), bare/ambiguous
+`git push`, plain `git push --force`, and `git add -A` are blocked by the git
+main pre-push hook plus `bash-safety-guard.sh`; `--force-with-lease` is still
+allowed where appropriate.
+
+Requires: `jq`, `yq` (mikefarah), `gh`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
+
 ---
 
 ## Vim Features
@@ -144,7 +175,6 @@ Press `Ctrl+G` then the second key:
 ├── .zshrc              → ~/.zshrc (symlink)
 ├── .vimrc              → ~/.vimrc (symlink)
 ├── zsh/
-│   ├── personal.zsh    → ~/.zsh/personal.zsh (symlink)
-│   └── netflix.zsh     → ~/.zsh/netflix.zsh (symlink)
+│   └── personal.zsh    → ~/.zsh/personal.zsh (symlink)
 └── setupPermissions.sh  # Run to install everything
 ```

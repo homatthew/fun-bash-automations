@@ -1,24 +1,59 @@
 #!/bin/bash
 # Setup script for zsh configuration
-# Run this once to set up symlinks and install dependencies
+# Run this once to set up symlinks and install dependencies.
+# Cross-platform: macOS (Homebrew) + Linux (Homebrew or apt/dnf).
 
 set -e
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$ROOT_DIR/scripts/check-push-safety.sh"
+"$ROOT_DIR/scripts/check-push-safety.sh" --install-hook
 
 echo "=============================================="
 echo "Setting up zsh environment..."
 echo "=============================================="
 
 # ==============================================================================
-# Helper functions for symlink protection
+# OS detection + portable brew prefix
 # ==============================================================================
-# Unlock a symlink (remove immutable flag) - silently succeeds if file doesn't exist
+OS="$(uname -s)"
+IS_MAC=false
+IS_LINUX=false
+case "$OS" in
+	Darwin) IS_MAC=true ;;
+	Linux)  IS_LINUX=true ;;
+esac
+
+# Resolve Homebrew prefix (differs per platform / CPU). Falls back to
+# likely candidates if `brew --prefix` isn't available.
+if command -v brew &> /dev/null; then
+	BREW_PREFIX="$(brew --prefix)"
+elif [ -d /opt/homebrew ]; then
+	BREW_PREFIX=/opt/homebrew
+elif [ -d /home/linuxbrew/.linuxbrew ]; then
+	BREW_PREFIX=/home/linuxbrew/.linuxbrew
+elif [ -d /usr/local/Homebrew ]; then
+	BREW_PREFIX=/usr/local
+else
+	BREW_PREFIX=""
+fi
+
+# ==============================================================================
+# Helper functions for symlink protection (macOS only)
+# ==============================================================================
+# macOS has `chflags uchg` which makes a symlink immutable at the VFS layer.
+# Linux has no direct equivalent for symlinks (chattr +i doesn't apply), so
+# lock/unlock become no-ops there. Agents already treat lock as best-effort.
 unlock_symlink() {
-	[ -L "$1" ] && chflags -h nouchg "$1" 2>/dev/null || true
+	if $IS_MAC && [ -L "$1" ]; then
+		chflags -h nouchg "$1" 2>/dev/null || true
+	fi
 }
 
-# Lock a symlink (set immutable flag) - prevents accidental deletion/replacement
 lock_symlink() {
-	[ -L "$1" ] && chflags -h uchg "$1"
+	if $IS_MAC && [ -L "$1" ]; then
+		chflags -h uchg "$1"
+	fi
 }
 
 # Track locked symlinks for summary
@@ -29,8 +64,6 @@ paths=(
 	"rebase-all-branches/rebaseAllBranches.sh"
 	"rp/rp-completion.sh"
 	"rp/rp.sh"
-	"ghe-cli/ghe"
-	"ghe-cli/ghe-fix-proxy"
 )
 
 for path in ${paths[@]}
@@ -80,7 +113,7 @@ if command -v brew &> /dev/null; then
 	fi
 
 	# zsh-autosuggestions - fish-like suggestions
-	if [ ! -f /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+	if [ ! -f "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]; then
 		echo "Installing zsh-autosuggestions..."
 		brew install zsh-autosuggestions
 		echo "✓ zsh-autosuggestions installed"
@@ -89,7 +122,7 @@ if command -v brew &> /dev/null; then
 	fi
 
 	# zsh-syntax-highlighting
-	if [ ! -f /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+	if [ ! -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]; then
 		echo "Installing zsh-syntax-highlighting..."
 		brew install zsh-syntax-highlighting
 		echo "✓ zsh-syntax-highlighting installed"
@@ -97,18 +130,47 @@ if command -v brew &> /dev/null; then
 		echo "✓ zsh-syntax-highlighting already installed"
 	fi
 
-	# terminal-notifier - for Claude Code completion notifications
-	if ! command -v terminal-notifier &> /dev/null; then
-		echo "Installing terminal-notifier..."
-		brew install terminal-notifier
-		echo "✓ terminal-notifier installed"
+	# jq - JSON processor, used pervasively by hooks and the no-mistakes gate
+	if ! command -v jq &> /dev/null; then
+		echo "Installing jq..."
+		brew install jq
+		echo "✓ jq installed"
 	else
-		echo "✓ terminal-notifier already installed"
+		echo "✓ jq already installed"
+	fi
+
+	# yq (mikefarah) - YAML processor; used for hook/config YAML (e.g. .no-mistakes.yaml)
+	if ! command -v yq &> /dev/null; then
+		echo "Installing yq..."
+		brew install yq
+		echo "✓ yq installed"
+	else
+		echo "✓ yq already installed"
+	fi
+
+	# gh - GitHub CLI, used for PR lookup and the code-review skill
+	if ! command -v gh &> /dev/null; then
+		echo "Installing gh..."
+		brew install gh
+		echo "✓ gh installed"
+	else
+		echo "✓ gh already installed"
+	fi
+
+	# sqlite3 ships with macOS; beads (bd) uses it for the local issue DB.
+	# Verify it's reachable and warn if not.
+	if ! command -v sqlite3 &> /dev/null; then
+		echo "⚠ sqlite3 not found on PATH — beads (bd) local issue DB will be unavailable."
+		echo "  macOS usually ships sqlite3 at /usr/bin/sqlite3; check your PATH."
+	else
+		echo "✓ sqlite3 available ($(command -v sqlite3))"
 	fi
 else
 	echo "⚠ Homebrew not found. Skipping package installation."
 	echo "  Install Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
 fi
+
+bash "$ROOT_DIR/scripts/setup-desktop-notifications.sh"
 
 # ==============================================================================
 # Git completion scripts
@@ -159,82 +221,94 @@ rm -f ~/.zsh/personal.zsh
 ln -s ~/repos/fun-bash-automations/zsh/personal.zsh ~/.zsh/personal.zsh
 echo "✓ personal.zsh symlinked"
 
-rm -f ~/.zsh/netflix.zsh
-ln -s ~/repos/fun-bash-automations/zsh/netflix.zsh ~/.zsh/netflix.zsh
-echo "✓ netflix.zsh symlinked"
-
 # ==============================================================================
-# Claude Code Configuration
+# Ghostty Configuration
 # ==============================================================================
 echo ""
-echo "Setting up Claude Code configuration..."
-
-# Create ~/.claude directory structure if it doesn't exist
-mkdir -p ~/.claude/agents ~/.claude/skills
-
-# Symlink CLAUDE.md (NOT protected - Claude writes to this file)
-rm -f ~/.claude/CLAUDE.md
-ln -s ~/repos/fun-bash-automations/claude/CLAUDE.md ~/.claude/CLAUDE.md
-echo "✓ CLAUDE.md symlinked"
-
-# Symlink settings.json (NOT protected - Claude writes to this file)
-rm -f ~/.claude/settings.json
-ln -s ~/repos/fun-bash-automations/claude/settings.json ~/.claude/settings.json
-echo "✓ settings.json symlinked"
-
-# Symlink agents (individual files, protected)
-for agent in ~/repos/fun-bash-automations/claude/agents/*.md; do
-	name=$(basename "$agent")
-	unlock_symlink ~/.claude/agents/"$name"
-	rm -f ~/.claude/agents/"$name"
-	ln -s "$agent" ~/.claude/agents/"$name"
-	lock_symlink ~/.claude/agents/"$name"
-	LOCKED_SYMLINKS+=("~/.claude/agents/$name")
-done
-echo "✓ agents symlinked (protected)"
-
-# Symlink skills (directories, protected)
-for skill in ~/repos/fun-bash-automations/claude/skills/*/; do
-	name=$(basename "$skill")
-	unlock_symlink ~/.claude/skills/"$name"
-	rm -rf ~/.claude/skills/"$name"
-	ln -s "$skill" ~/.claude/skills/"$name"
-	lock_symlink ~/.claude/skills/"$name"
-	LOCKED_SYMLINKS+=("~/.claude/skills/$name")
-done
-echo "✓ skills symlinked (protected)"
+echo "Setting up Ghostty configuration..."
+mkdir -p ~/.config/ghostty
+rm -f ~/.config/ghostty/config
+ln -s ~/repos/fun-bash-automations/ghostty/config ~/.config/ghostty/config
+echo "✓ Ghostty config symlinked"
 
 # ==============================================================================
-# ghe-cli Installation (Netflix GitHub Enterprise CLI wrapper)
+# VS Code OSC notifier fork
 # ==============================================================================
-echo ""
-echo "Setting up ghe-cli..."
-
-# Initialize ghe-cli submodule if needed
-if [ ! -f ~/repos/fun-bash-automations/ghe-cli/ghe ]; then
-	echo "Initializing ghe-cli submodule..."
-	git -C ~/repos/fun-bash-automations submodule update --init --recursive
-fi
-
-# Create ~/.local/bin if it doesn't exist
-mkdir -p ~/.local/bin
-
-# Symlink ghe scripts
-rm -f ~/.local/bin/ghe
-ln -s ~/repos/fun-bash-automations/ghe-cli/ghe ~/.local/bin/ghe
-echo "✓ ghe symlinked to ~/.local/bin/ghe"
-
-rm -f ~/.local/bin/ghe-fix-proxy
-ln -s ~/repos/fun-bash-automations/ghe-cli/ghe-fix-proxy ~/.local/bin/ghe-fix-proxy
-echo "✓ ghe-fix-proxy symlinked to ~/.local/bin/ghe-fix-proxy"
-
-# Remind about PATH
-if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+# The notify hooks drive a forked VS Code extension that binds an OSC 777
+# `tid` to the emitting terminal so banner clicks focus the right tab.
+# fba-deploy -> bin/install-osc-notifier handles build + install, but we
+# need the clone + vsce + node on PATH before that runs.
+if $IS_MAC && [ -n "${OSC_NOTIFIER_REPO_URL:-}" ] && [ -n "${OSC_NOTIFIER_PUBLISHER:-}" ]; then
 	echo ""
-	echo "⚠ Note: ~/.local/bin may not be in your PATH"
-	echo "  Add this to your ~/.zshrc if not present:"
-	echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+	echo "Checking configured VS Code OSC notifier..."
+
+	if command -v brew &> /dev/null && ! command -v node &> /dev/null; then
+		echo "Installing node (required for VS Code extension build)..."
+		brew install node
+		echo "✓ node installed"
+	fi
+
+	if command -v npm &> /dev/null; then
+		if ! npm ls -g --depth=0 @vscode/vsce >/dev/null 2>&1; then
+			echo "Installing @vscode/vsce globally..."
+			npm install -g @vscode/vsce
+			echo "✓ @vscode/vsce installed"
+		else
+			echo "✓ @vscode/vsce already installed"
+		fi
+	else
+		echo "⚠ npm not found; VS Code extension build will be skipped"
+	fi
+
+	OSC_NOTIFIER_REPO_DIR="${OSC_NOTIFIER_REPO_DIR:-$HOME/repos/vscode-terminal-osc-notifier}"
+	if [ ! -d "$OSC_NOTIFIER_REPO_DIR" ]; then
+		echo "Cloning configured OSC notifier..."
+		git clone "$OSC_NOTIFIER_REPO_URL" "$OSC_NOTIFIER_REPO_DIR"
+		echo "✓ notifier cloned"
+	else
+		echo "✓ notifier already cloned at $OSC_NOTIFIER_REPO_DIR"
+	fi
 fi
+
+# ==============================================================================
+# Claude + Codex Configuration
+# ==============================================================================
+echo ""
+echo "Setting up shared LLM configuration..."
+
+# Use the canonical projection path so setupPermissions stays aligned with
+# dotfiles installers and the portable LLM config model.
+"$ROOT_DIR/bin/fba-deploy"
+echo "✓ repo-owned Claude/Codex runtime files projected"
+
+# Re-lock selected symlinks after projection for local safety.
+lock_symlink ~/.claude/CLAUDE.md
+LOCKED_SYMLINKS+=("~/.claude/CLAUDE.md")
+lock_symlink ~/.claude/AGENTS.md
+LOCKED_SYMLINKS+=("~/.claude/AGENTS.md")
+lock_symlink ~/.codex/AGENTS.md
+LOCKED_SYMLINKS+=("~/.codex/AGENTS.md")
+
+for agent in ~/.claude/agents/*.md; do
+	[ -L "$agent" ] || continue
+	lock_symlink "$agent"
+	LOCKED_SYMLINKS+=("~/.claude/agents/$(basename "$agent")")
+done
+echo "✓ Claude agents symlinked (protected)"
+
+for skill in ~/.claude/skills/*; do
+	[ -L "$skill" ] || continue
+	lock_symlink "$skill"
+	LOCKED_SYMLINKS+=("~/.claude/skills/$(basename "$skill")")
+done
+echo "✓ shared skills symlinked to ~/.claude/skills (protected)"
+
+for skill in ~/.codex/skills/*; do
+	[ -L "$skill" ] || continue
+	lock_symlink "$skill"
+	LOCKED_SYMLINKS+=("~/.codex/skills/$(basename "$skill")")
+done
+echo "✓ shared skills symlinked to ~/.codex/skills (protected)"
 
 # ==============================================================================
 # Summary
@@ -254,9 +328,19 @@ echo "  Option+←/→ - Word navigation"
 echo "  z <dir>    - Jump to frequently used directory"
 echo ""
 echo "Protected symlinks (immutable, cannot be accidentally overwritten):"
-printf '  %s\n' "${LOCKED_SYMLINKS[@]}"
+if $IS_MAC; then
+	printf '  %s\n' "${LOCKED_SYMLINKS[@]}"
+	echo ""
+	echo "  To temporarily unlock: chflags -h nouchg <path>"
+	echo "  Re-run this script to re-lock after changes"
+else
+	echo "  (symlink locking only applies on macOS)"
+fi
 echo ""
-echo "  To temporarily unlock: chflags -h nouchg <path>"
-echo "  Re-run this script to re-lock after changes"
-echo ""
+if $IS_MAC && [ -n "${OSC_NOTIFIER_REPO_URL:-}" ] && [ -n "${OSC_NOTIFIER_PUBLISHER:-}" ]; then
+	echo "VS Code extension:"
+	echo "  ${OSC_NOTIFIER_PUBLISHER}.${OSC_NOTIFIER_NAME:-vscode-terminal-osc-notifier} (source: ${OSC_NOTIFIER_REPO_DIR:-$HOME/repos/vscode-terminal-osc-notifier})"
+	echo "  Installed by fba-deploy → bin/install-osc-notifier."
+	echo ""
+fi
 echo "Run 'source ~/.zshrc' to reload configuration."

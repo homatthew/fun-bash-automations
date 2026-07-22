@@ -1,0 +1,11 @@
+# Allow-list for check-push-safety.sh
+# Format: path:pattern-label<TAB>optional-content-regex
+# Comments start with #. Blank lines ignored.
+#
+# Fake token used by the Slack regression security stub.
+tests/notify-slack-regression\.sh:slack-bot-token	^[[:space:]]*token-service\) printf '[x]oxb-fake-token' ;;$
+
+# Portable Linuxbrew discovery uses its system-wide installation prefix.
+setupPermissions\.sh:absolute-home-path	^[[:space:]]*(elif \[ -d |BREW_PREFIX=)/home/[l]inuxbrew/\.linuxbrew( \]; then)?$
+zsh/personal\.zsh:absolute-home-path	^[^/]*/home/[l]inuxbrew/\.linuxbrew(/[^[:space:]]*)?[[:space:]\\]*$
+llm/hooks/beads-prime\.sh:absolute-home-path	^[^/]*/home/[l]inuxbrew/\.linuxbrew(/[^[:space:]]*)?[[:space:]\\]*$

@@ -1,0 +1,73 @@
+# no-mistakes per-repo config (RepoConfig) — sanctioned FBA baseline.
+#
+# This is the default no-mistakes pipeline config other repos copy. Keep it
+# aligned with upstream no-mistakes v1.32.x RepoConfig docs. Anything not listed
+# here inherits from ~/.no-mistakes/config.yaml or the built-in defaults.
+#
+# Pipeline order (fixed, not configurable):
+#   intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci
+#
+# See llm/no-mistakes-stages.md for what each stage does and the skip rule.
+#
+# There is NO per-stage `enabled: false` key. You cannot delete a stage in this
+# file. To run a pipeline without a stage, skip it at runtime:
+#   no-mistakes axi run --skip lint            # or: no-mistakes --skip lint,document
+# To stop a stage from auto-fixing (force a manual gate instead), set its
+# auto_fix to 0 below. NEVER --skip a stage that actually failed (see the doc).
+
+# Agent for no-mistakes code generation / fixes. The Kun-stack default is Codex;
+# `kun-stack-install` writes the same default to the global home, and `nm-home`
+# seeds per-worktree homes with this value for parallel gate runs. Options:
+# auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>.
+agent: codex
+
+# Per-repo command overrides. Empty string = auto-detect. These run shell
+# commands on the no-mistakes daemon host, so upstream no-mistakes reads
+# `commands.*` and `agent` from the trusted default-branch copy of this file by
+# default, not from the pushed feature-branch SHA. If the default-branch fetch
+# fails, those fields fail closed to empty values.
+commands:
+  lint: ""    # command the lint stage runs
+  test: "scripts/check-push-safety.sh --outgoing origin/main && for test in tests/*-regression.sh; do bash \"$test\" || exit $?; done"
+  format: ""  # formatter the push stage runs before pushing
+
+# Leave this false unless every pushed branch is trusted. When true, no-mistakes
+# honors `commands.*` and `agent` from the pushed branch instead of the
+# default-branch copy. This switch itself is read only from the trusted
+# default-branch copy, so a contributor cannot self-enable it from a branch.
+# allow_repo_commands: false
+
+# Paths the gate should not treat as source for review/findings (generated code,
+# vendored deps, fixtures). Gitignore-style globs.
+ignore_patterns: []
+  # - "**/generated/**"
+  # - "vendor/**"
+
+# Max follow-up auto-fix attempts per stage. 0 = no auto-fix: the stage stops at
+# a manual approval gate instead of having the agent fix and retry. These mirror
+# the sanctioned global defaults; keep them unless a repo needs different limits.
+# Setting a stage to 0 does NOT disable the stage — it still runs and gates.
+auto_fix:
+  rebase: 3    # retry rebase/conflict resolution
+  review: 0    # code-review findings are surfaced for a human decision, not auto-fixed
+  test: 3      # fix failing tests and re-run
+  document: 3  # document fixes also run during the initial document pass
+  lint: 3      # fix lint violations and re-run
+  ci: 3        # fix CI failures and re-run
+
+# User-intent extraction. When you push, no-mistakes reads recent local agent
+# transcripts, picks the session that produced the change, summarizes intent,
+# and feeds it to review/test/document/lint/PR so they judge against what you
+# meant — not just the diff. Repo-level overrides of the global defaults:
+intent:
+  enabled: true      # set false to disable transcript-based intent extraction
+  threshold: 0.2     # min confidence to attach a matched session
+  slack_days: 3      # how many days of transcript history to consider
+  # disabled_readers: [codex]   # skip specific agent transcript readers
+
+# Test-evidence handling for the test stage.
+test:
+  evidence:
+    store_in_repo: false  # keep evidence in a temp dir, NOT committed/pushed.
+                          # set true to commit evidence into `dir` so it shows on the PR.
+    # dir: .no-mistakes/evidence   # repo-relative dir used when store_in_repo: true

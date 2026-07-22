@@ -1,0 +1,5 @@
+[core]
+	excludesFile = ~/.config/git/ignore
+
+[pager]
+	branch = false

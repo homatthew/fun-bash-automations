@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# plan-to-lavish — render a markdown plan to a lavish-axi review surface on demand
+#
+# Converts a markdown plan (e.g. .claude/plans/*.md or any .md) into a clean,
+# self-contained HTML artifact under .lavish/<planname>.html, styled with the
+# Tailwind v4 + DaisyUI v5 CDN so it is portable and looks intentional. Optionally
+# opens it in Lavish Editor for human review and annotation.
+#
+# Usage:
+#   plan-to-lavish <plan.md> [--open]
+#
+#   <plan.md>   Path to a markdown plan file.
+#   --open      Run `lavish-axi <html>` to open the artifact and print the exact
+#               `lavish-axi poll <html>` command to collect annotations.
+#
+# Behavior:
+#   - stdout: the artifact path (only).
+#   - stderr: human guidance, the open/poll commands, conversion approach.
+#   - Conversion: prefers `pandoc` when available; otherwise uses a built-in
+#     markdown->HTML converter (degrades gracefully, never hard-fails).
+#   - The artifact is portable: CDN styles, no local-absolute asset paths.
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- lavish-axi contract (verified via `npx -y lavish-axi`, `lavish-axi design`)
+#   - artifacts live under .lavish/ in CWD by default
+#   - assets are referenced by relative paths, never a leading "/"
+#   - `lavish-axi <html>` opens/resumes a session
+#   - `lavish-axi poll <html>` long-polls for feedback (leave it running)
+#   - lavish does NOT auto-inject a design system; artifacts must be self-contained
+#   - documented fallback styling: Tailwind v4 + DaisyUI v5 via CDN
+LAVISH_CMD="lavish-axi"
+TAILWIND_CDN="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"
+DAISYUI_CDN="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css"
+DAISYUI_THEMES_CDN="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css"
+DAISYUI_THEME="luxury"
+
+usage() {
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+log() { printf '%s\n' "$*" >&2; }
+
+PLAN=""
+OPEN=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --open) OPEN=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) log "plan-to-lavish: unknown option: $1"; usage >&2; exit 2 ;;
+        *)
+            if [[ -z "$PLAN" ]]; then PLAN="$1"; shift
+            else log "plan-to-lavish: unexpected extra argument: $1"; exit 2; fi
+            ;;
+    esac
+done
+
+if [[ -z "$PLAN" ]]; then
+    log "plan-to-lavish: missing <plan.md>"
+    usage >&2
+    exit 2
+fi
+
+if [[ ! -f "$PLAN" ]]; then
+    log "plan-to-lavish: plan file not found: $PLAN"
+    exit 1
+fi
+
+# Derive the artifact name from the plan filename (strip directory + .md).
+PLAN_BASE="$(basename "$PLAN")"
+PLAN_NAME="${PLAN_BASE%.*}"
+[[ -n "$PLAN_NAME" ]] || PLAN_NAME="plan"
+
+# Title: first H1 in the markdown, else the plan name.
+TITLE="$(grep -m1 -E '^# +' "$PLAN" 2>/dev/null | sed -E 's/^# +//; s/[[:space:]]+$//' || true)"
+[[ -n "$TITLE" ]] || TITLE="$PLAN_NAME"
+
+OUT_DIR=".lavish"
+OUT="$OUT_DIR/$PLAN_NAME.html"
+mkdir -p "$OUT_DIR"
+
+# --- HTML escaping helper (used by the built-in converter) ------------------
+html_escape() {
+    # Escapes & < > so raw markdown text renders as literal HTML text.
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# --- Built-in markdown -> HTML body converter (pandoc fallback) -------------
+# Intentionally small but covers what plans use: ATX headings, fenced code
+# blocks, pipe tables, ordered/unordered lists, blockquotes, horizontal rules,
+# paragraphs, and inline code/bold/italic/links. Output is a styled body.
+builtin_md_to_html() {
+    awk '
+    function esc(s) {
+        gsub(/&/, "\\&amp;", s)
+        gsub(/</, "\\&lt;", s)
+        gsub(/>/, "\\&gt;", s)
+        return s
+    }
+    # Wrap text matched by a paired-delimiter pattern in open/close tags.
+    # POSIX awk gsub() does not support \1 backreferences, so we scan manually
+    # with match()/substr(). `re` is a STRING (dynamic regex) matching the full
+    # delimited token (e.g. **x**) -- passing a /regex/ literal as an argument
+    # would coerce it against $0, so callers must pass quoted strings.
+    # `dl` is the delimiter byte length; `pre`/`post` are the replacement tags.
+    function wrap(s, re, dl, pre, post,   out, inner) {
+        out = ""
+        while (match(s, re) > 0) {
+            inner = substr(s, RSTART + dl, RLENGTH - 2 * dl)
+            out = out substr(s, 1, RSTART - 1) pre inner post
+            s = substr(s, RSTART + RLENGTH)
+        }
+        return out s
+    }
+    function attr(s) {
+        gsub(/"/, "\\&quot;", s)
+        gsub(/\047/, "\\&#39;", s)
+        return s
+    }
+    function safe_url(url,   lower) {
+        lower = tolower(url)
+        if (lower ~ /^https?:\/\// || lower ~ /^mailto:/) return 1
+        if (url ~ /^#/ || url ~ /^\// || url ~ /^\.\.?\//) return 1
+        if (url ~ /^[A-Za-z0-9._~-]+([\/?#][^:]*)?$/) return 1
+        return 0
+    }
+    # Replace [text](url) links manually (two distinct captures).
+    function links(s,   out, m, lt, url, sep) {
+        out = ""
+        while (match(s, /\[[^][]+\]\([^()]+\)/) > 0) {
+            m = substr(s, RSTART, RLENGTH)
+            sep = index(m, "](")
+            lt = substr(m, 2, sep - 2)
+            url = substr(m, sep + 2, length(m) - sep - 2)
+            if (safe_url(url)) {
+                out = out substr(s, 1, RSTART - 1) "<a class=\"link link-primary\" href=\"" attr(url) "\">" lt "</a>"
+            } else {
+                out = out substr(s, 1, RSTART - 1) lt
+            }
+            s = substr(s, RSTART + RLENGTH)
+        }
+        return out s
+    }
+    # inline formatting applied to already-escaped text
+    function inline(s) {
+        # inline code first so its contents are not further formatted
+        s = wrap(s, "`[^`]+`", 1, "<code class=\"px-1 py-0.5 rounded bg-base-300 text-accent text-sm\">", "</code>")
+        s = links(s)
+        # bold (** or __) before italic (*) so ** is not eaten as two * tokens
+        s = wrap(s, "\\*\\*[^*]+\\*\\*", 2, "<strong>", "</strong>")
+        s = wrap(s, "__[^_]+__", 2, "<strong>", "</strong>")
+        s = wrap(s, "\\*[^*]+\\*", 1, "<em>", "</em>")
+        return s
+    }
+    # Detect a markdown horizontal rule: a line of 3+ of the same -, *, or _,
+    # allowing spaces. POSIX awk lacks backreferences, so scan char by char.
+    function is_hr(line,   c, ch, i, k) {
+        c = line
+        gsub(/[[:space:]]/, "", c)
+        if (length(c) < 3) return 0
+        ch = substr(c, 1, 1)
+        if (ch != "-" && ch != "*" && ch != "_") return 0
+        for (i = 1; i <= length(c); i++) {
+            k = substr(c, i, 1)
+            if (k != ch) return 0
+        }
+        return 1
+    }
+    function close_list() {
+        if (in_ul) { print "</ul>"; in_ul = 0 }
+        if (in_ol) { print "</ol>"; in_ol = 0 }
+    }
+    function close_para() {
+        if (in_p) { print "</p>"; in_p = 0 }
+    }
+    function close_table() {
+        if (in_table) { print "</tbody></table></div>"; in_table = 0; tbl_header_done = 0 }
+    }
+    function flush_block() {
+        close_para(); close_list(); close_table()
+    }
+    BEGIN { in_code=0; in_ul=0; in_ol=0; in_p=0; in_table=0; tbl_header_done=0 }
+    {
+        line = $0
+
+        # fenced code blocks ``` ... ```
+        if (line ~ /^[[:space:]]*```/) {
+            if (in_code) {
+                print "</code></pre></div>"
+                in_code = 0
+            } else {
+                flush_block()
+                lang = line
+                sub(/^[[:space:]]*```/, "", lang)
+                gsub(/[[:space:]]/, "", lang)
+                print "<div class=\"mockup-code my-4 text-sm\"><pre><code>"
+                in_code = 1
+            }
+            next
+        }
+        if (in_code) {
+            print esc(line)
+            next
+        }
+
+        # blank line -> close paragraph/list
+        if (line ~ /^[[:space:]]*$/) {
+            close_para(); close_list(); close_table()
+            next
+        }
+
+        # horizontal rule
+        if (is_hr(line)) {
+            flush_block(); print "<div class=\"divider\"></div>"; next
+        }
+
+        # ATX headings
+        if (line ~ /^#{1,6} /) {
+            flush_block()
+            hashes = line; sub(/ .*/, "", hashes); level = length(hashes)
+            text = line; sub(/^#{1,6} +/, "", text)
+            txt = inline(esc(text))
+            if (level == 1)      print "<h1 class=\"text-3xl font-bold mt-2 mb-4 text-primary\">" txt "</h1>"
+            else if (level == 2) print "<h2 class=\"text-2xl font-semibold mt-8 mb-3 pb-1 border-b border-base-content/20\">" txt "</h2>"
+            else if (level == 3) print "<h3 class=\"text-xl font-semibold mt-6 mb-2\">" txt "</h3>"
+            else if (level == 4) print "<h4 class=\"text-lg font-semibold mt-4 mb-2\">" txt "</h4>"
+            else                 print "<h" level " class=\"font-semibold mt-3 mb-1\">" txt "</h" level ">"
+            next
+        }
+
+        # blockquote
+        if (line ~ /^[[:space:]]*> /) {
+            flush_block()
+            text = line; sub(/^[[:space:]]*> ?/, "", text)
+            print "<blockquote class=\"border-l-4 border-primary/60 pl-4 my-4 italic text-base-content/80\">" inline(esc(text)) "</blockquote>"
+            next
+        }
+
+        # pipe table rows
+        if (line ~ /^[[:space:]]*\|.*\|[[:space:]]*$/) {
+            # separator row like |---|---| -> skip but mark header complete
+            tmp = line
+            gsub(/[[:space:]|:-]/, "", tmp)
+            if (tmp == "" && in_table) { next }
+            close_para(); close_list()
+            row = line
+            sub(/^[[:space:]]*\|/, "", row)
+            sub(/\|[[:space:]]*$/, "", row)
+            n = split(row, cells, /\|/)
+            if (!in_table) {
+                print "<div class=\"overflow-x-auto my-4 rounded-box border border-base-content/10\"><table class=\"table table-zebra\">"
+                printf "<thead><tr>"
+                for (i = 1; i <= n; i++) { c = cells[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", c); printf "<th>%s</th>", inline(esc(c)) }
+                print "</tr></thead><tbody>"
+                in_table = 1
+                next
+            }
+            printf "<tr>"
+            for (i = 1; i <= n; i++) { c = cells[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", c); printf "<td>%s</td>", inline(esc(c)) }
+            print "</tr>"
+            next
+        } else if (in_table) {
+            close_table()
+        }
+
+        # unordered list
+        if (line ~ /^[[:space:]]*[-*+] /) {
+            close_para(); close_table()
+            if (in_ol) { print "</ol>"; in_ol = 0 }
+            if (!in_ul) { print "<ul class=\"list-disc pl-6 my-3 space-y-1\">"; in_ul = 1 }
+            text = line; sub(/^[[:space:]]*[-*+] +/, "", text)
+            print "<li>" inline(esc(text)) "</li>"
+            next
+        }
+
+        # ordered list
+        if (line ~ /^[[:space:]]*[0-9]+[.)] /) {
+            close_para(); close_table()
+            if (in_ul) { print "</ul>"; in_ul = 0 }
+            if (!in_ol) { print "<ol class=\"list-decimal pl-6 my-3 space-y-1\">"; in_ol = 1 }
+            text = line; sub(/^[[:space:]]*[0-9]+[.)] +/, "", text)
+            print "<li>" inline(esc(text)) "</li>"
+            next
+        }
+
+        # paragraph text
+        close_list(); close_table()
+        if (!in_p) { print "<p class=\"my-3 leading-relaxed\">"; in_p = 1 }
+        else { print "<br>" }
+        print inline(esc(line))
+    }
+    END {
+        if (in_code) print "</code></pre></div>"
+        flush_block()
+    }
+    '
+}
+
+sanitize_html() {
+    python3 "$SCRIPT_DIR/plan-to-lavish-sanitize.py"
+}
+
+# --- Choose conversion approach --------------------------------------------
+CONVERSION="builtin"
+BODY=""
+if command -v pandoc >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    CONVERSION="pandoc"
+    # Pandoc emits the body fragment; we wrap it in our own portable shell.
+    if ! BODY="$(pandoc --from=gfm-raw_html --to=html5 "$PLAN" 2>/dev/null | sanitize_html)"; then
+        log "plan-to-lavish: pandoc failed; falling back to built-in converter"
+        CONVERSION="builtin"
+        BODY="$(builtin_md_to_html <"$PLAN")"
+    fi
+else
+    BODY="$(builtin_md_to_html <"$PLAN")"
+fi
+
+# --- Assemble the self-contained, portable HTML artifact -------------------
+GENERATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+{
+    cat <<HTML_HEAD
+<!DOCTYPE html>
+<html lang="en" data-theme="$DAISYUI_THEME">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$(printf '%s' "$TITLE" | html_escape)</title>
+  <link rel="stylesheet" href="$DAISYUI_CDN">
+  <link rel="stylesheet" href="$DAISYUI_THEMES_CDN">
+  <script src="$TAILWIND_CDN"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :where(.grid, .flex) > * { min-width: 0; }
+    :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+    :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  </style>
+</head>
+<body class="bg-base-200 text-base-content min-h-screen">
+  <main class="mx-auto max-w-4xl p-6 lg:p-10">
+    <header class="mb-6">
+      <div class="flex flex-wrap items-center gap-2 text-sm text-base-content/60">
+        <span class="badge badge-primary badge-soft">plan</span>
+        <span class="badge badge-ghost">$(printf '%s' "$PLAN_BASE" | html_escape)</span>
+        <span class="badge badge-ghost">generated $GENERATED_AT</span>
+      </div>
+      <h1 class="text-4xl font-bold mt-3">$(printf '%s' "$TITLE" | html_escape)</h1>
+    </header>
+    <article class="card card-border bg-base-100 shadow-sm">
+      <div class="card-body prose-none">
+HTML_HEAD
+
+    printf '%s\n' "$BODY"
+
+    cat <<'HTML_TAIL'
+      </div>
+    </article>
+  </main>
+</body>
+</html>
+HTML_TAIL
+} >"$OUT"
+
+# --- Report ----------------------------------------------------------------
+log ""
+log "plan-to-lavish: wrote $OUT  (conversion: $CONVERSION)"
+log ""
+log "  Open for review:    $LAVISH_CMD $OUT"
+log "  Collect feedback:   $LAVISH_CMD poll $OUT"
+log ""
+
+if [[ "$OPEN" -eq 1 ]]; then
+    if ! command -v "$LAVISH_CMD" >/dev/null 2>&1; then
+        log "plan-to-lavish: '$LAVISH_CMD' not on PATH; trying via npx"
+        LAVISH_CMD="npx -y lavish-axi"
+    fi
+    log "plan-to-lavish: opening Lavish Editor..."
+    # shellcheck disable=SC2086
+    $LAVISH_CMD "$OUT" >&2 || log "plan-to-lavish: failed to open Lavish Editor (artifact still written)"
+    log ""
+    log "Now run this to collect annotations (long-polls; leave it running):"
+    log "  $LAVISH_CMD poll $OUT"
+fi
+
+# stdout: just the artifact path.
+printf '%s\n' "$OUT"

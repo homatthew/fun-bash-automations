@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# nm-home — derive a stable per-worktree NM_HOME path.
+#
+# By default prints the home for the current git worktree. Use --for <path> to
+# compute for another path, --mkdir to create it, --activate to point this
+# worktree's no-mistakes remote at that home, and --export to print shell exports
+# suitable for eval.
+set -euo pipefail
+
+START="."
+MKDIR=0
+EXPORT=0
+ACTIVATE=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: nm-home [--for <path>] [--mkdir] [--activate] [--export]
+
+Print a deterministic NM_HOME under ${NM_HOME_BASE:-~/.no-mistakes-homes}
+for the resolved git worktree containing <path> (or the current directory).
+
+--activate also writes this worktree's no-mistakes git remote to the matching
+gate repo under NM_HOME. This keeps concurrent git worktrees from sharing the
+same no-mistakes remote while their NM_HOME values are isolated.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --for)
+      [ "$#" -ge 2 ] || { echo "nm-home: --for needs a path" >&2; exit 2; }
+      START=$2
+      shift 2
+      ;;
+    --mkdir)
+      MKDIR=1
+      shift
+      ;;
+    --activate)
+      MKDIR=1
+      ACTIVATE=1
+      shift
+      ;;
+    --export|--print-env)
+      EXPORT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "nm-home: unknown arg $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[ -d "$START" ] || { echo "nm-home: not a directory: $START" >&2; exit 1; }
+ROOT=$(git -C "$START" rev-parse --show-toplevel 2>/dev/null) || {
+  echo "nm-home: not inside a git worktree: $START" >&2
+  exit 1
+}
+ROOT=$(cd "$ROOT" && pwd -P)
+COMMON_DIR=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git -C "$ROOT" rev-parse --git-common-dir)
+case "$COMMON_DIR" in
+  /*) ;;
+  *) COMMON_DIR=$(cd "$ROOT" && cd "$COMMON_DIR" && pwd -P) ;;
+esac
+if [ "$(basename "$COMMON_DIR")" = ".git" ]; then
+  REPO_ID_ROOT=$(dirname "$COMMON_DIR")
+else
+  REPO_ID_ROOT="$ROOT"
+fi
+REPO_ID_ROOT=$(cd "$REPO_ID_ROOT" && pwd -P)
+
+BASE="${NM_HOME_BASE:-$HOME/.no-mistakes-homes}"
+LABEL=$(basename "$ROOT" | tr -c '[:alnum:]._-' '-' | sed -E 's/^-+//; s/-+$//')
+[ -n "$LABEL" ] || LABEL=worktree
+
+hash_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk -v n="$1" '{print substr($1, 1, n)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk -v n="$1" '{print substr($1, 1, n)}'
+  else
+    cksum | awk -v n="$1" '{print substr($1, 1, n)}'
+  fi
+}
+
+if command -v shasum >/dev/null 2>&1; then
+  HASH=$(printf '%s' "$ROOT" | hash_text 16)
+elif command -v sha256sum >/dev/null 2>&1; then
+  HASH=$(printf '%s' "$ROOT" | hash_text 16)
+else
+  HASH=$(printf '%s' "$ROOT" | hash_text 16)
+fi
+REPO_ID=$(printf '%s' "$REPO_ID_ROOT" | hash_text 12)
+
+HOME_PATH="$BASE/$LABEL-$HASH"
+if [ "$MKDIR" -eq 1 ]; then
+  mkdir -p "$HOME_PATH"
+  if [ ! -f "$HOME_PATH/config.yaml" ]; then
+    cat > "$HOME_PATH/config.yaml" <<'EOF'
+# no-mistakes home-scoped configuration
+agent: codex
+EOF
+  fi
+fi
+
+if [ "$ACTIVATE" -eq 1 ]; then
+  GATE_PATH="$HOME_PATH/repos/$REPO_ID.git"
+  git -C "$ROOT" config extensions.worktreeConfig true
+  git -C "$ROOT" config --worktree remote.no-mistakes.url "$GATE_PATH"
+  git -C "$ROOT" config --worktree remote.no-mistakes.fetch '+refs/heads/*:refs/remotes/no-mistakes/*'
+fi
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+if [ "$EXPORT" -eq 1 ]; then
+  printf 'export NM_HOME=%s\n' "$(shell_quote "$HOME_PATH")"
+  printf 'export NM_HOME_AUTO=1\n'
+else
+  printf '%s\n' "$HOME_PATH"
+fi

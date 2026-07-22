@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Build and install the forked vscode-terminal-osc-notifier extension.
+#
+# Why this exists:
+#   llm/hooks/notify.sh and notify-slack.sh create macOS notifications
+#   whose click target is a vscode:// URI handled by this fork. The URI
+#   carries ancestor PIDs; the extension maps those to VS Code terminals
+#   and focuses the originating terminal/window.
+#
+# Idempotent: re-running pulls, rebuilds, re-packages, and re-installs.
+# Preserves all other keys in the VS Code User settings.json.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXT_REPO="${OSC_NOTIFIER_REPO_DIR:-$HOME/repos/vscode-terminal-osc-notifier}"
+EXT_REPO_URL="${OSC_NOTIFIER_REPO_URL:-}"
+EXT_PUBLISHER="${OSC_NOTIFIER_PUBLISHER:-}"
+EXT_NAME="${OSC_NOTIFIER_NAME:-vscode-terminal-osc-notifier}"
+UPSTREAM_PUBLISHER="${OSC_NOTIFIER_UPSTREAM_PUBLISHER:-wenbopan}"
+VSIX_OUT="${OSC_NOTIFIER_VSIX_OUT:-${TMPDIR:-/tmp}/osc-notifier.vsix}"
+VSCODE_SETTINGS="${VSCODE_SETTINGS:-$HOME/Library/Application Support/Code/User/settings.json}"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "install-osc-notifier: macOS only; skipping" >&2
+  exit 0
+fi
+
+if [[ -z "$EXT_REPO_URL" || -z "$EXT_PUBLISHER" ]]; then
+  echo "install-osc-notifier: set OSC_NOTIFIER_REPO_URL and OSC_NOTIFIER_PUBLISHER to opt in" >&2
+  exit 0
+fi
+
+require_cmd() {
+  local cmd="$1" hint="$2"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "install-osc-notifier: $cmd not on PATH — $hint" >&2
+    exit 1
+  fi
+}
+
+require_cmd git  "install Xcode Command Line Tools or brew install git"
+require_cmd node "brew install node"
+require_cmd npm  "brew install node"
+require_cmd jq   "brew install jq"
+require_cmd code "open VS Code → Cmd-Shift-P → \"Shell Command: Install 'code' command in PATH\""
+
+if [[ ! -d "$EXT_REPO" ]]; then
+  echo "install-osc-notifier: cloning $EXT_REPO_URL into $EXT_REPO" >&2
+  git clone "$EXT_REPO_URL" "$EXT_REPO"
+else
+  git -C "$EXT_REPO" pull --ff-only --quiet 2>/dev/null || true
+fi
+
+if ! grep -q 'cwdMatches' "$EXT_REPO/src/extension.ts" || ! grep -q 'findTerminalByPids' "$EXT_REPO/src/extension.ts"; then
+  echo "install-osc-notifier: $EXT_REPO/src/extension.ts is missing the cwd/pid focus patch." >&2
+  echo "  Either you're on upstream or the focus patch was reverted. Skipping build." >&2
+  exit 0
+fi
+
+cd "$EXT_REPO"
+EXT_VERSION="$(node -p "require('./package.json').version")"
+
+if [[ ! -d node_modules ]] || [[ package.json -nt node_modules ]]; then
+  echo "install-osc-notifier: npm install" >&2
+  npm install --silent
+fi
+
+echo "install-osc-notifier: building" >&2
+npm run build --silent
+
+echo "install-osc-notifier: packaging" >&2
+rm -f "$VSIX_OUT"
+npx --yes @vscode/vsce package --out "$VSIX_OUT" >/dev/null
+
+# Best-effort removal of the upstream copy so both don't race.
+code --uninstall-extension "${UPSTREAM_PUBLISHER}.${EXT_NAME}" >/dev/null 2>&1 || true
+
+code --install-extension "$VSIX_OUT" --force >/dev/null
+
+# Silence the extension's own OS banner + in-editor toast. We drive
+# the banner via alerter ourselves; leaving these enabled gives a
+# double notification. VS Code settings is jsonc (trailing commas +
+# line comments), which jq can't parse, so we use node — already a
+# prerequisite for the extension build.
+mkdir -p "$(dirname "$VSCODE_SETTINGS")"
+if [[ ! -f "$VSCODE_SETTINGS" ]]; then
+  printf '{}\n' > "$VSCODE_SETTINGS"
+fi
+node "$SCRIPT_DIR/update-jsonc-settings" "$VSCODE_SETTINGS"
+
+echo "osc-notifier: installed ${EXT_PUBLISHER}.${EXT_NAME}@${EXT_VERSION}"

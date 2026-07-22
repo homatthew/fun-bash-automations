@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# kun-stack-install — install/refresh the pinned Kun OSS agent stack.
+#
+# Driven by llm/kun-stack/manifest.json. Idempotent: each tool is version-probed
+# first and skipped when already at the pinned version (a marker file records
+# success). drive_bootstrap is false — this never runs treehouse init /
+# no-mistakes init / firstmate bootstrap; those are per-repo and explicit.
+#
+# Usage: kun-stack-install [--force] [tool ...]
+#   --force      reinstall even if the version probe already matches
+#   tool ...     only act on the named tools (default: all in the manifest)
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+MANIFEST="${KUN_STACK_MANIFEST:-$SCRIPT_DIR/../llm/kun-stack/manifest.json}"
+. "$SCRIPT_DIR/kun-stack-version-lib.sh"
+FORCE=0
+ONLY=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    -*) echo "kun-stack-install: unknown flag $arg" >&2; exit 2 ;;
+    *) ONLY+=("$arg") ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "kun-stack-install: jq is required" >&2; exit 1; }
+[ -f "$MANIFEST" ] || { echo "kun-stack-install: manifest not found: $MANIFEST" >&2; exit 1; }
+
+log()  { printf '[kun-stack] %s\n' "$*" >&2; }
+warn() { printf '[kun-stack] WARNING: %s\n' "$*" >&2; }
+
+expand() { printf '%s' "${1/#\~/$HOME}"; }
+
+MARKER_DIR=$(expand "$(jq -r '.marker_dir // "~/.local/state/kun-stack"' "$MANIFEST")")
+mkdir -p "$MARKER_DIR"
+export GOBIN="${GOBIN:-$HOME/.local/bin}"
+mkdir -p "$GOBIN"
+
+want_tool() {
+  [ "${#ONLY[@]}" -eq 0 ] && return 0
+  local t; for t in "${ONLY[@]}"; do [ "$t" = "$1" ] && return 0; done
+  return 1
+}
+
+probe_version() {
+  local bin="$1" match="$2" policy="$3"; shift 3
+  command -v "$bin" >/dev/null 2>&1 || return 1
+  local out line
+  out=$("$bin" "$@" 2>&1) || return 1
+  line=$(kun_version_line "$bin" "$out") || return 1
+  [[ -n "$line" ]] || return 1
+  kun_version_line_matches "$line" "$match" "$policy"
+}
+
+FAILED=()
+INSTALLED=()
+SKIPPED=()
+
+install_go() {
+  local name="$1" module="$2" version="$3"
+  if ! command -v go >/dev/null 2>&1; then
+    warn "$name needs a Go toolchain (go install) — go not found; skipping. Fallback: the tool's upstream install.sh."
+    return 1
+  fi
+  log "go install $module@$version (GOBIN=$GOBIN)"
+  GOBIN="$GOBIN" go install "$module@$version"
+}
+
+install_npm() {
+  local name="$1" package="$2" version="$3"
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "$name needs npm; not found; skipping."
+    return 1
+  fi
+  log "npm install -g $package@$version"
+  npm install -g "$package@$version" >&2
+}
+
+install_git() {
+  local name="$1" repo="$2" ref="$3" dest="$4" actual expected
+  dest=$(expand "$dest")
+  if git -C "$dest" rev-parse --git-dir >/dev/null 2>&1; then
+    log "$name: fetching $repo and checking out $ref in $dest"
+    git -C "$dest" fetch --quiet --all || warn "$name: fetch failed (offline?)"
+    git -C "$dest" checkout --quiet "$ref" || { warn "$name: checkout $ref failed"; return 1; }
+  else
+    log "$name: cloning $repo -> $dest @ $ref"
+    mkdir -p "$(dirname "$dest")"
+    git clone --quiet "$repo" "$dest" || { warn "$name: clone failed"; return 1; }
+    git -C "$dest" checkout --quiet "$ref" || { warn "$name: checkout $ref failed"; return 1; }
+  fi
+  actual=$(git -C "$dest" rev-parse 'HEAD^{commit}' 2>/dev/null) || return 1
+  expected=$(git -C "$dest" rev-parse "${ref}^{commit}" 2>/dev/null) || return 1
+  [ "$actual" = "$expected" ] || { warn "$name: checkout resolved to $actual, want $expected"; return 1; }
+}
+
+for name in $(jq -r '.tools | keys[]' "$MANIFEST"); do
+  want_tool "$name" || continue
+  kind=$(jq -r --arg t "$name" '.tools[$t].kind' "$MANIFEST")
+  required=$(jq -r --arg t "$name" '.tools[$t].required // false' "$MANIFEST")
+  bin=$(jq -r --arg t "$name" '.tools[$t].bin // empty' "$MANIFEST")
+  match=$(jq -r --arg t "$name" '.tools[$t].version_match // empty' "$MANIFEST")
+  policy=$(jq -r --arg t "$name" '.tools[$t].version_policy // empty' "$MANIFEST")
+  vargs=()
+  while IFS= read -r _a; do [ -n "$_a" ] && vargs+=("$_a"); done \
+    < <(jq -r --arg t "$name" '.tools[$t].version_args[]? // empty' "$MANIFEST")
+  marker="$MARKER_DIR/$name"
+
+  # Idempotent skip: marker present, version still matches, not forced.
+  if [ "$FORCE" -eq 0 ] && [ -n "$bin" ] && [ -n "$match" ] \
+     && probe_version "$bin" "$match" "$policy" "${vargs[@]}"; then
+    log "$name already satisfies version policy ($match${policy:+; $policy}) — skipping"
+    printf '%s\n' "$match" > "$marker"
+    SKIPPED+=("$name"); continue
+  fi
+
+  ok=0
+  case "$kind" in
+    go)  install_go  "$name" "$(jq -r --arg t "$name" '.tools[$t].module'  "$MANIFEST")" "$(jq -r --arg t "$name" '.tools[$t].version' "$MANIFEST")" && ok=1 ;;
+    npm) install_npm "$name" "$(jq -r --arg t "$name" '.tools[$t].package' "$MANIFEST")" "$(jq -r --arg t "$name" '.tools[$t].version' "$MANIFEST")" && ok=1 ;;
+    git) install_git "$name" "$(jq -r --arg t "$name" '.tools[$t].repo' "$MANIFEST")" "$(jq -r --arg t "$name" '.tools[$t].ref' "$MANIFEST")" "$(jq -r --arg t "$name" '.tools[$t].dest' "$MANIFEST")" && ok=1 ;;
+    *)   warn "$name: unknown kind '$kind'"; ;;
+  esac
+
+  if [ "$ok" -eq 1 ]; then
+    # git tools have no version_match; a successful pinned checkout is done.
+    if [ -z "$bin" ] || [ -z "$match" ] || probe_version "$bin" "$match" "$policy" "${vargs[@]}"; then
+      printf '%s\n' "${match:-$kind}" > "$marker"
+      INSTALLED+=("$name")
+    else
+      warn "$name: installed but version probe still does not match '$match'"
+      [ "$required" = "true" ] && FAILED+=("$name")
+    fi
+  else
+    [ "$required" = "true" ] && FAILED+=("$name") || warn "$name: optional, skipped"
+  fi
+done
+
+log "installed: ${INSTALLED[*]:-none} | up-to-date: ${SKIPPED[*]:-none}"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  warn "required tools failed: ${FAILED[*]}"
+  exit 1
+fi
+# Set the sanctioned no-mistakes default agent (codex — markedly faster than
+# claude for the gate steps; deep review still uses the dual code-review skill).
+# Only converts the "auto" default (or a missing config); an explicit non-codex
+# choice is left alone. Idempotent + portable (no sed -i).
+configure_no_mistakes_agent() {
+  local cfg="$HOME/.no-mistakes/config.yaml" want="codex" current
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  mkdir -p "$HOME/.no-mistakes"
+  if [ -f "$cfg" ] && grep -qE '^agent:' "$cfg"; then
+    current=$(grep -m1 -E '^agent:' "$cfg" | sed -E 's/^agent:[[:space:]]*//; s/[[:space:]]*$//')
+    if [ "$current" = "auto" ] || [ -z "$current" ]; then
+      awk -v a="$want" '/^agent:/{print "agent: " a; next} {print}' "$cfg" > "$cfg.tmp" \
+        && mv "$cfg.tmp" "$cfg" && log "no-mistakes default agent: auto -> $want"
+    else
+      log "no-mistakes agent left as '$current' (explicit choice)"
+    fi
+  else
+    printf 'agent: %s\n' "$want" >> "$cfg" && log "no-mistakes default agent -> $want"
+  fi
+}
+configure_no_mistakes_agent
+
+log "kun-stack install complete (drive_bootstrap=false: run treehouse init / no-mistakes init per-repo as needed)"

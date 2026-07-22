@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "canonical": {
+    "repo_agent_doc": "AGENTS.md",
+    "shared_agent_doc": "llm/AGENTS.md",
+    "agent_push_policy": "llm/agent-push-policy.json",
+    "agent_push_policy_schema": "llm/agent-push-policy.schema.json",
+    "shared_skills_dir": "llm/skills",
+    "shared_hooks_dir": "llm/hooks",
+    "codex_config_template": "codex/config.toml",
+    "codex_mcp_template": "codex/mcp.toml",
+    "codex_mcp_docs": "codex/MCP.md",
+    "codex_hooks_template": "codex/hooks.json",
+    "shared_command_guard_policy": "llm/command-guard-policy.md"
+  },
+  "adapters": {
+    "claude_repo_shim": "CLAUDE.md",
+    "claude_runtime_doc": "claude/CLAUDE.md"
+  },
+  "projections": {
+    "claude": {
+      "instructions": {
+        "~/.claude/CLAUDE.md": "claude/CLAUDE.md",
+        "~/.claude/AGENTS.md": "llm/AGENTS.md",
+        "~/.claude/agent-push-policy.json": "llm/agent-push-policy.json",
+        "~/.claude/agent-push-policy.schema.json": "llm/agent-push-policy.schema.json"
+      },
+      "skills_dir": {
+        "target": "~/.claude/skills",
+        "source": "llm/skills"
+      },
+      "hooks_dir": {
+        "target": "~/.claude/hooks",
+        "shared_source": "llm/hooks",
+        "harness_source": "claude/hooks"
+      }
+    },
+    "codex": {
+      "instructions": {
+        "~/.codex/AGENTS.md": "llm/AGENTS.md",
+        "~/.codex/agent-push-policy.json": "llm/agent-push-policy.json",
+        "~/.codex/agent-push-policy.schema.json": "llm/agent-push-policy.schema.json"
+      },
+      "skills_dir": {
+        "target": "~/.codex/skills",
+        "source": "llm/skills",
+        "preserve_entries": [
+          ".system"
+        ]
+      },
+      "hooks_dir": {
+        "target": "~/.codex/hooks",
+        "shared_source": "llm/hooks"
+      }
+    }
+  }
+}

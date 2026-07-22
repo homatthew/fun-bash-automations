@@ -1,0 +1,37 @@
+# Portable Codex configuration source-of-truth.
+# This file is copied/rendered into ~/.codex/config.toml by dotfiles installers.
+
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "high"
+model_provider = "openai-chat-completions"
+file_opener = "cursor"
+personality = "pragmatic"
+shell_environment_policy.inherit = "all"
+
+[analytics]
+enabled = false
+
+[feedback]
+enabled = false
+
+[features]
+hooks = true
+remote_connections = true
+
+[tui]
+notifications = [ "agent-turn-complete", "approval-requested" ]
+status_line = [
+  "model-with-reasoning",
+  "git-branch",
+  "current-dir",
+  "context-usage",
+]
+terminal_title = ["spinner", "project", "git-branch"]
+
+[model_providers.openai-chat-completions]
+name = "__CODEX_PROVIDER_NAME__"
+base_url = "__CODEX_BASE_URL__"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
