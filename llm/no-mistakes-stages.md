@@ -30,7 +30,7 @@ stage at runtime.
 | `document` | Updates docs/comments to match the change. | After test. |
 | `lint` | Runs the lint command and fixes violations. | After document. |
 | `push` | Formats (if a `format` command is set) and pushes to the configured target. | After lint. |
-| `pr` | Opens or updates the PR. | After push. |
+| `pr` | Opens or updates the PR when the configured target uses PR delivery; otherwise it is a no-op. | After push. |
 | `ci` | Monitors CI to a decision point or timeout (`ci_timeout`, global). On GitHub/GitLab, the monitor also watches mergeability and can rebase/fix actual merge conflicts while it remains active. | Last. |
 
 ## Configure / skip a stage

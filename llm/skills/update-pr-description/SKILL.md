@@ -6,9 +6,8 @@ description: Update an existing PR with a detailed, well-structured description
 # Update PR Description
 
 > **Related skills:**
-> - Your repository's PR creation workflow (if the PR doesn't exist yet)
-> - `/commit-push-pr` - Commit, push, and create PR in one workflow
-> - `/address-comments-by <reviewer>` - Address review comments
+> - Use the repository's delivery workflow, usually `/ship`, if the PR does not
+>   exist yet.
 
 Generate a comprehensive PR description for an existing PR based on the changes in the branch.
 
@@ -22,18 +21,19 @@ git branch --show-current
 gh pr view --json number,title,url
 
 # Understand the scope of changes
-git log main..HEAD --oneline
-git diff main..HEAD --stat
+base=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
+git log "$base"..HEAD --oneline
+git diff "$base"..HEAD --stat
 
 # Review the actual changes
-git diff main..HEAD
+git diff "$base"..HEAD
 ```
 
 ## PR Description Template
 
 Generate a description following this structure:
 
-```markdown
+````markdown
 ## What am I trying to do?
 
 [1-3 sentences explaining the high-level goal. Focus on the problem being solved, not the implementation details.]
@@ -98,8 +98,7 @@ graph LR
     D -->|No| F[OK]
 ```
 
-🤖 Generated with [Claude Code](https://claude.ai/code)
-```
+````
 
 ## Writing Guidelines
 
@@ -116,7 +115,8 @@ Use the `gh` binary and authentication configured for that host.
 
 ```bash
 # Find the PR number
-gh pr list --head $(git branch --show-current) --json number,title
+branch=$(git branch --show-current)
+gh pr list --head "$branch" --json number,title
 
 # Update the PR description
 gh pr edit {PR_NUMBER} --body "$(cat <<'EOF'
@@ -126,7 +126,7 @@ EOF
 ```
 
 **Important:**
-- Use the full PR Description Template above - do not abbreviate
+- Use the relevant template sections and omit sections that do not apply.
 
 ### For standard GitHub repos
 
@@ -136,23 +136,6 @@ gh pr edit --body "$(cat <<'EOF'
 EOF
 )"
 ```
-
-## Embedding images
-
-Upload images first, then paste the returned markdown reference into the description:
-
-```bash
-# Infers repo + host from current git remote (works on github.com and GHES)
-IMG=$(gh image screenshot.png)
-
-# Explicit repo
-IMG=$(gh image screenshot.png --repo owner/repo)
-# IMG = ![screenshot](https://<host>/user-attachments/assets/<uuid>)
-```
-
-Useful for "How would I use the new code?" (UI before/after) or architecture diagrams.
-Works on both github.com and GHES. Pass `--repo` when not in a git workspace.
-Install: `cd ~/repos/gh-image && make install-local`.
 
 ## Tips
 

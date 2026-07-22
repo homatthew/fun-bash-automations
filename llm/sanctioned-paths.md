@@ -47,8 +47,8 @@ beside it. When two tools could plausibly fit, this doc is the tiebreaker.
   `NM_HOME` and worktree-local gate remote, e.g.
   `eval "$(nm-home --for "$PWD" --mkdir --activate --export)"`.
 - **`/ship` skill** — finish-the-job for a single change. Drives the
-  no-mistakes gate: review / test / lint / docs → push → PR. Replaced `/go`
-  and push-gate.
+  no-mistakes gate through validation, then pushes to a PR or configured
+  direct-delivery target. Replaced `/go` and push-gate.
 - **`no-mistakes`** — the one automated delivery gate. Not push-gate, stack,
   or `pg`. Never bypass it.
 - **`code-review` skill** — the one deep-review path: dual Claude + Codex,

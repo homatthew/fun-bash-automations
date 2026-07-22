@@ -16,7 +16,8 @@ registries and private workspace policy in a local overlay.
 
 - Default to Local Mode until the user explicitly requests delivery.
 - Never bypass repository guards or validation gates.
-- Keep yolo behavior off unless the user explicitly selects it.
+- Treat optional yolo behavior as unavailable unless the repository's branch
+  policy explicitly enables it.
 - Surface missing tools or authentication instead of installing or mutating
   global state without consent.
 

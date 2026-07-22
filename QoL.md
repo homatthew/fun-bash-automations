@@ -103,29 +103,16 @@ manual approval CLI:
 
 | Tool | Description |
 |------|-------------|
-| `/ship` | Finish-the-job entrypoint for a single change; runs the `no-mistakes` gate, then pushes to the configured target and opens/updates the PR |
+| `/ship` | Finish-the-job entrypoint for a single change; runs the `no-mistakes` gate, then pushes to the configured target and opens or updates a PR when applicable |
 | `no-mistakes` | The delivery gate itself: automated code review, tests, lint, and docs before anything reaches the push target |
 | `firstmate` | Orchestrates a crew of agents for breadth across many tasks |
 | `gnhf` | Long-run single-objective loop for depth on one goal |
 | `treehouse` | Provides isolated, pooled worktrees for parallel agent work |
 
-Local review still uses Neovim Diffview and the optional 99/Codex helper:
-
-| Keybinding | Action |
-|------------|--------|
-| `Space g c` | Open AI-assisted local review thread UI that breaks vague notes into agent-actionable asks |
-| `a/r/e/q` | In the review thread panel: accept/save, reply/refine, edit/save, or cancel |
-| `Space r l` | Cycle Diffview split layouts while reviewing |
-| `Space r u` | Open a unified inline-style `git diff base..head` buffer |
-| `Space 9 s` | Ask the optional 99/Codex helper to search the current repo/diff |
-| `Space 9 v` | In visual mode, ask Codex for a suggested edit and store it as a local review comment |
-
-Protected-branch pushes (main/master/develop/trunk), bare/ambiguous
-`git push`, plain `git push --force`, and `git add -A` are blocked by the git
-main pre-push hook plus `bash-safety-guard.sh`; `--force-with-lease` is still
-allowed where appropriate.
-
-Requires: `jq`, `yq` (mikefarah), `gh`, `fzf`, `nvim`, `Diffview.nvim`, Codex CLI, and the optional 99 helper. All installed by dotfiles bootstrap.
+The shared command guard and branch policy are documented in
+`llm/command-guard-policy.md` and `llm/agent-push-policy.json`. Private editor
+review helpers and machine-specific dependencies belong in the private
+`dotfiles` overlay.
 
 ---
 

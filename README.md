@@ -149,13 +149,17 @@ attestation. Clear them only with `FBA_PUSH_SAFETY_CLEAR_POLICY=1` or
 
 The legacy `mh-netflix` ref is a one-time compatibility mirror, not a delivery
 branch. After the validated `main` snapshot is delivered, a maintainer may move
-that legacy ref outside repository automation and must verify both remote refs
-resolve to the same object:
+that legacy ref outside repository automation. Record the validated snapshot
+object before moving the mirror, then verify both remote refs resolve to that
+exact object:
 
 ```bash
+validated_oid=$(git rev-parse HEAD) # run from the unchanged validated checkout
 main_oid=$(git ls-remote --refs origin refs/heads/main | awk '{print $1}')
 legacy_oid=$(git ls-remote --refs origin refs/heads/mh-netflix | awk '{print $1}')
-test -n "$main_oid" && test "$main_oid" = "$legacy_oid"
+test -n "$validated_oid" && \
+  test "$main_oid" = "$validated_oid" && \
+  test "$legacy_oid" = "$validated_oid"
 ```
 
 The shared push policy (`llm/agent-push-policy.json`) defines **delivery**

@@ -24,7 +24,7 @@
       "version_match": "1.32.0",
       "version_policy": "same_minor_or_newer_patch",
       "self_update": "no-mistakes update",
-      "role": "The automated delivery gate (review/test/lint/docs -> push -> PR).",
+      "role": "The automated delivery gate (review/test/document/lint -> configured push target; PR when applicable).",
       "required": true
     },
     "gnhf": {

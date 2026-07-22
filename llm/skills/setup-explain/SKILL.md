@@ -18,16 +18,17 @@ as a lavish artifact (`plan-to-lavish` / lavish) if they'd like it visual.
 no-mistakes = the gate · gnhf = the long-run loop · lavish = the plan/review UI.**
 
 You are the **captain**: you talk to one agent and it runs the rest. You only
-have to touch two gates — **approve the plan**, and **answer findings / review
-the PR**. Everything between those is automated.
+have to touch two gates: **approve the plan**, then **answer findings and review
+the result**. Everything between those is automated.
 
 ## The day-to-day flow
 
 1. **Track work in beads.** `bd ready` is your queue; beads is the source of
    truth and survives compaction. Everything else is downstream of it.
 2. **One change → `/ship`.** Work on a feature branch, then `/ship`: it verifies,
-   `/simplify`s, and hands off to the **no-mistakes** gate (automated review →
-   test → lint → docs → push → PR). Never push straight to `main`.
+   `/simplify`s, and hands off to the **no-mistakes** gate (automated validation
+   → push → PR or a configured direct-delivery target).
+   Never hand-push straight to a protected branch.
 3. **Many tasks → firstmate (`fm`).** Launch the crew with `fm`; talk to the
    first mate as captain. It spawns crewmates in tmux windows, each in its own
    **treehouse** worktree, supervises them, and ships each through the same
@@ -48,7 +49,7 @@ the PR**. Everything between those is automated.
 
 | You want to… | Reach for |
 |---|---|
-| Finish + ship one change | `/ship` (→ no-mistakes → PR) |
+| Finish + ship one change | `/ship` (→ no-mistakes → configured target) |
 | Run several tasks in parallel | `fm` (firstmate crew) |
 | Grind one objective to done | `gnhf` (bounded) |
 | An isolated checkout to work in | `treehouse get` |

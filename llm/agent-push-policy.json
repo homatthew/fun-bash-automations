@@ -1,7 +1,7 @@
 {
   "$schema": "./agent-push-policy.schema.json",
   "version": 2,
-  "model": "Feature branches ship through the no-mistakes gate (review/test/lint/docs) to a PR or a configured direct-delivery target. The git-level main pre-push hook and bash-safety-guard.sh block unconfigured protected-branch and bare/ambiguous pushes. push-gate (durable leases, semantic-scope approval, Dolt stack trunks) was retired; do not reintroduce its fields.",
+  "model": "Feature branches ship through the no-mistakes gate (review/test/document/lint) to a PR or a configured direct-delivery target. The git-level main pre-push hook and bash-safety-guard.sh block unconfigured protected-branch and bare/ambiguous pushes. push-gate (durable leases, semantic-scope approval, Dolt stack trunks) was retired; do not reintroduce its fields.",
   "no_mistakes_branches": {
     "purpose": "Default delivery path: a feature branch validated by the no-mistakes gate before it reaches the configured push target and opens/updates a PR. Drive it via the /ship skill or the no-mistakes skill.",
     "prefixes": ["feature/", "fix/"],
