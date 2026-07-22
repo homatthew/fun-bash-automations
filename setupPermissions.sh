@@ -7,7 +7,6 @@ set -e
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$ROOT_DIR/scripts/check-push-safety.sh"
-"$ROOT_DIR/scripts/check-push-safety.sh" --install-hook
 
 echo "=============================================="
 echo "Setting up zsh environment..."
@@ -66,9 +65,9 @@ paths=(
 	"rp/rp.sh"
 )
 
-for path in ${paths[@]}
+for path in "${paths[@]}"
 do
-	chmod +x "$path"
+	chmod +x "$ROOT_DIR/$path"
 done
 
 # ==============================================================================

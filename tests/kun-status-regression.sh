@@ -88,4 +88,12 @@ data = pathlib.Path(sys.argv[1]).read_bytes()
 raise SystemExit(0 if data and not data.endswith((b"\n", b"\r")) else 1)
 PY
 
+set +e
+PATH="$TMP/bin:/usr/bin:/bin" "$ROOT/bin/kun-status" -- unexpected > "$TMP/double-dash.toon" 2> "$TMP/double-dash.err"
+double_dash_rc=$?
+set -e
+[[ "$double_dash_rc" -eq 2 ]] || fail "kun-status accepted an operand after --"
+grep -Fq 'error: "unexpected argument: unexpected"' "$TMP/double-dash.toon" ||
+  fail "operand after -- did not produce a structured usage error"
+
 echo "kun status regression passed"

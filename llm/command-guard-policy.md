@@ -37,6 +37,13 @@ Codex, and future harnesses.
 - Block bare `git push` and remote-only `git push origin`. The command must
   name the target branch or refspec explicitly, e.g. `git push origin <branch>`,
   so guard classification never depends on hidden current-branch/upstream state.
+- Reject push-time Git configuration injection through `-c`, `--config-env`,
+  `GIT_CONFIG_*`, `HOME`, or `XDG_CONFIG_HOME`. A push cannot replace the
+  enrolled hook path through direct or included configuration.
+- Normalize known process wrappers and command-string interpreters before
+  classifying a command. Unknown executor-shaped wrappers fail closed, while
+  arguments to data-only commands such as `echo` are not promoted to
+  executables.
 - Require explicit user approval before any delivery or PR-eligible push.
   Non-delivery scratch branch pushes are governed by the scratch branch class
   below.
@@ -66,6 +73,12 @@ suggest, run, or document any of the following to get a blocked push through:
 - Editing guard or gate internal state by hand to force a push
 - Calling `git push` to a protected branch after the guard blocks, expecting an
   env override to unblock it — there is none
+
+The installed pre-push boundary runs from `/bin/sh`, fixes `PATH`, removes shell
+startup injection variables, and launches the enrolled Bash scanner with a
+minimal environment. `fba-deploy` does not update that boundary. A maintainer
+must explicitly re-enroll audited scanner and allow-list digests when those
+assets change.
 
 ### Scratch branch class
 

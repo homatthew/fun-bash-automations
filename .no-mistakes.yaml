@@ -1,7 +1,7 @@
 # no-mistakes per-repo config (RepoConfig) — sanctioned FBA baseline.
 #
 # This is the default no-mistakes pipeline config other repos copy. Keep it
-# aligned with upstream no-mistakes v1.32.x RepoConfig docs. Anything not listed
+# aligned with upstream no-mistakes v1.40.x RepoConfig docs. Anything not listed
 # here inherits from ~/.no-mistakes/config.yaml or the built-in defaults.
 #
 # Pipeline order (fixed, not configurable):

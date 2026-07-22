@@ -51,7 +51,8 @@ bin/fba-deploy --claude-only
 ```
 
 `fba-deploy` renders shared config into `~/.claude` and `~/.codex`. It does not
-install private dotfiles overlays.
+install private dotfiles overlays or re-enroll Git hook trust. Hook enrollment
+is a separate, explicitly audited operation described under Delivery Policy.
 
 ### Full Private Workspace Install
 
@@ -118,9 +119,8 @@ logic belong in the `dotfiles` overlay.
 5. Edit shared skills in `llm/skills/*/SKILL.md`.
 6. Edit portable Codex MCPs in `codex/mcp.toml` and document install/auth notes
    in `codex/MCP.md`.
-7. Run `bin/fba-deploy` after changing projected runtime files. It also installs
-   the composable pre-push boundary hook and pins the local no-mistakes binary
-   identity used for direct `main` delivery.
+7. Run `bin/fba-deploy` after changing projected runtime files. Projection does
+   not modify the independently enrolled pre-push boundary.
 8. Verify projection with:
 
 ```bash
@@ -135,17 +135,37 @@ push or invokes an explicit finish workflow. The finish-the-job entrypoint is th
 `/ship` skill, which runs the `no-mistakes` gate (automated code review, tests,
 lint, docs) before pushing. Do not create PRs for this direct-push repository.
 Run `scripts/check-push-safety.sh --install-hook` before the first delivery from
-a newly prepared checkout, supplying `FBA_NO_MISTAKES_TRUSTED_PATH` and
-`FBA_NO_MISTAKES_TRUSTED_SHA256` from a private trust policy. The hook fails
-closed when that independently trusted identity is absent or no longer matches.
+a newly prepared checkout. Hook enrollment requires independently audited
+digests for the public scanner and allow-list, plus the private no-mistakes
+identity used for protected delivery:
+
+```bash
+export FBA_PUSH_SAFETY_TRUSTED_SCANNER_SHA256='<audited scanner SHA-256>'
+export FBA_PUSH_SAFETY_TRUSTED_ALLOW_SHA256='<audited allow-list SHA-256>'
+export FBA_NO_MISTAKES_TRUSTED_PATH='<audited no-mistakes executable>'
+export FBA_NO_MISTAKES_TRUSTED_SHA256='<audited no-mistakes SHA-256>'
+
+test "$(shasum -a 256 scripts/check-push-safety.sh | awk '{print $1}')" = \
+  "$FBA_PUSH_SAFETY_TRUSTED_SCANNER_SHA256"
+test "$(shasum -a 256 scripts/check-push-safety.allow | awk '{print $1}')" = \
+  "$FBA_PUSH_SAFETY_TRUSTED_ALLOW_SHA256"
+scripts/check-push-safety.sh --install-hook
+```
+
+Copy the expected digests from an audited release or checkpoint. Do not derive
+the expected values from an unaudited outgoing worktree and immediately trust
+them. `fba-deploy` and `setupPermissions.sh` never run hook enrollment, so a
+routine projection cannot replace the trusted scanner, allow-list, dispatcher,
+or execution environment. The hook fails closed when an enrolled asset or the
+independently trusted no-mistakes identity no longer matches.
 Environment-specific publication detectors can be supplied from a private
 tab-separated policy file through `FBA_PUSH_SAFETY_POLICY_FILE`; the public
 scanner retains only portable credential and filesystem-boundary detectors.
 Hook installation records the explicitly selected external policy path in the
 local Git hook directory so later pushes fail closed against the same policy.
-Routine reinstall validates and preserves that policy and the no-mistakes trust
-attestation. Clear them only with `FBA_PUSH_SAFETY_CLEAR_POLICY=1` or
-`FBA_NO_MISTAKES_CLEAR_TRUST=1`.
+Re-enrollment validates and preserves the selected policy and no-mistakes trust
+attestation. Clear them only during an explicit audited enrollment with
+`FBA_PUSH_SAFETY_CLEAR_POLICY=1` or `FBA_NO_MISTAKES_CLEAR_TRUST=1`.
 
 The legacy `mh-netflix` ref is a one-time compatibility mirror, not a delivery
 branch. After the validated `main` snapshot is delivered, a maintainer may move

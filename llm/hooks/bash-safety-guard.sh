@@ -180,6 +180,7 @@ def normalize(segment):
                     segment = segment[:idx] + split_args + segment[idx + 1:]
                     continue
                 if assignment.match(token):
+                    prefix.append(token)
                     idx += 1
                     continue
                 if token in {"-i", "--ignore-environment", "-0", "--null", "--"}:
@@ -241,10 +242,30 @@ def normalize(segment):
             continue
         break
 
-    for candidate in range(idx, len(segment)):
-        executable = os.path.basename(segment[candidate])
-        if has_eval_string(executable, segment[candidate + 1:]):
+    if idx >= len(segment):
+        return original
+
+    executable = os.path.basename(segment[idx])
+    args = segment[idx + 1:]
+    if has_eval_string(executable, args):
+        raise RuntimeError("local interpreter command string")
+
+    if executable == "watch" and any(re.search(r"\bgit\b.*\bpush\b", token) for token in args):
+        raise RuntimeError("local interpreter command string")
+    if executable in {"awk", "gawk", "mawk", "nawk"}:
+        if any(token in {"-f", "--file"} or token.startswith(("-f", "--file=")) for token in args):
             raise RuntimeError("local interpreter command string")
+        if any(re.search(r"\bsystem\s*\(", token) for token in args):
+            raise RuntimeError("local interpreter command string")
+
+    if executable == "git":
+        return prefix + ["git"] + args
+
+    data_only_commands = {
+        "cat", "echo", "false", "grep", "head", "printf", "rg", "tail", "test", "true", "wc",
+    }
+    if executable in data_only_commands:
+        return original
 
     git_positions = [candidate for candidate in range(idx, len(segment)) if os.path.basename(segment[candidate]) == "git"]
     if git_positions:
@@ -441,6 +462,59 @@ def is_push_segment(segment):
 
 
 sys.exit(0 if any(is_push_segment(segment) for segment in segments) else 1)
+PY
+}
+
+git_push_uses_config_injection() {
+  python3 - "$GIT_COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+try:
+    lexer = shlex.shlex(sys.argv[1].replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+unsafe_environment = {
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_COUNT", "HOME", "XDG_CONFIG_HOME",
+}
+
+for segment in segments:
+    index = 0
+    injected = False
+    while index < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[index]):
+        name = segment[index].split("=", 1)[0]
+        if name in unsafe_environment or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            injected = True
+        index += 1
+    if index >= len(segment) or segment[index] != "git":
+        continue
+    index += 1
+    while index < len(segment) and segment[index] != "push":
+        token = segment[index]
+        if token in {"-c", "--config-env"} or token.startswith(("-c", "--config-env=")):
+            injected = True
+        index += 1
+    if index < len(segment) and segment[index] == "push" and injected:
+        sys.exit(0)
+
+sys.exit(1)
 PY
 }
 
@@ -2578,8 +2652,8 @@ check_git_force() {
 # check_git_force.
 check_push_guard() {
   is_git_push_command || return
-  if printf '%s' "$GIT_COMMAND" | grep -Eiq 'core[.]hooksPath'; then
-    deny "Blocked: git pushes must not override core.hooksPath."
+  if git_push_uses_config_injection || printf '%s' "$GIT_COMMAND" | grep -Eiq 'core[.]hooksPath'; then
+    deny "Blocked: git pushes must not override core.hooksPath or inject Git configuration."
   fi
   local target_branch
   target_branch=$(git_push_target_branch_from_command)

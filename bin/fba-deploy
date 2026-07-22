@@ -59,9 +59,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 "$ROOT/scripts/check-push-safety.sh"
-if [[ "${FBA_DEPLOY_SKIP_GIT_HOOK:-0}" != "1" ]]; then
-    "$ROOT/scripts/check-push-safety.sh" --install-hook
-fi
 
 codex_base_url() {
     printf '%s\n' "${CODEX_BASE_URL:-https://api.openai.com/v1}"

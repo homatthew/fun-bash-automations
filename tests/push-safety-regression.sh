@@ -18,6 +18,13 @@ sha256_file() {
   fi
 }
 
+install_hook() {
+  local target="$1"
+  FBA_PUSH_SAFETY_TRUSTED_SCANNER_SHA256="$(sha256_file "$target/scripts/check-push-safety.sh")" \
+    FBA_PUSH_SAFETY_TRUSTED_ALLOW_SHA256="$(sha256_file "$target/scripts/check-push-safety.allow")" \
+    "$target/scripts/check-push-safety.sh" --install-hook
+}
+
 make_repo() {
   local repo="$1"
   mkdir -p "$repo/scripts"
@@ -291,10 +298,28 @@ HOOK
 chmod +x "$hook_dir/existing-hook-target"
 ln -s existing-hook-target "$hook"
 
-"$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+legacy_log="$TMP/legacy-hook.log"
+mkdir -p "$hook_dir/pre-push.d"
+cat > "$hook_dir/pre-push.d/legacy-helper" <<HOOK
+printf 'legacy\n' >> '$legacy_log'
+HOOK
+cat > "$hook_dir/pre-push.d/10-existing-pre-push" <<'HOOK'
+#!/bin/sh
+. "$(dirname "$0")/legacy-helper"
+cat >/dev/null
+HOOK
+chmod +x "$hook_dir/pre-push.d/10-existing-pre-push"
+
+if missing_asset_trust_out="$("$repo/scripts/check-push-safety.sh" --install-hook 2>&1)"; then
+  fail "expected hook enrollment without independently supplied digests to fail"
+fi
+[[ "$missing_asset_trust_out" == *"independently audited scanner digest"* ]] ||
+  fail "missing asset trust failure was unclear: $missing_asset_trust_out"
+
+install_hook "$repo" >/dev/null
 (
   unset FBA_PUSH_SAFETY_POLICY_FILE
-  "$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+  install_hook "$repo" >/dev/null
 )
 policy_pointer="$hook_dir/pre-push.d/45-push-safety-policy"
 [[ "$(cat "$policy_pointer")" == "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$private_policy")" ]] ||
@@ -302,6 +327,10 @@ policy_pointer="$hook_dir/pre-push.d/45-push-safety-policy"
 printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$base_oid" "$base_oid" | "$hook" origin "$repo" >/dev/null
 [[ "$(wc -l < "$hook_log" | tr -d ' ')" == "1" ]] ||
   fail "composed pre-push dispatcher did not preserve exactly one existing-hook invocation"
+[[ "$(wc -l < "$legacy_log" | tr -d ' ')" == "1" ]] ||
+  fail "legacy child hook did not run from its original directory"
+[[ -x "$hook_dir/pre-push.d/10-existing-pre-push" ]] ||
+  fail "legacy child hook was relocated during enrollment"
 [[ -x "$(dirname "$hook")/pre-push.d/50-push-safety" ]] ||
   fail "push-safety hook component was not installed"
 trusted_scanner="$hook_dir/pre-push.d/.push-safety/check-push-safety.sh"
@@ -323,6 +352,18 @@ if mutable_scanner_out="$(printf 'refs/heads/feature/test %s refs/heads/feature/
 fi
 [[ "$mutable_scanner_out" == *"attack.txt@$attack_oid"*"[openai-secret]"* ]] ||
   fail "trusted enforcement copy did not scan the malicious outgoing snapshot: $mutable_scanner_out"
+
+spoof_runtime="$TMP/spoof-runtime"
+mkdir -p "$spoof_runtime"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$spoof_runtime/bash"
+printf '%s\n' 'exit 0' > "$spoof_runtime/bash-env"
+chmod +x "$spoof_runtime/bash"
+if inherited_runtime_out="$(printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$attack_oid" "$tip_oid" |
+  (cd "$repo" && PATH="$spoof_runtime:$PATH" BASH_ENV="$spoof_runtime/bash-env" "$hook" origin "$repo") 2>&1)"; then
+  fail "inherited PATH/BASH_ENV bypassed trusted scanner execution"
+fi
+[[ "$inherited_runtime_out" == *"attack.txt@$attack_oid"*"[openai-secret]"* ]] ||
+  fail "scrubbed hook runtime did not execute the trusted scanner: $inherited_runtime_out"
 git -C "$repo" reset -q --hard "$tip_oid"
 
 capture_fail_bin="$TMP/capture-fail-bin"
@@ -332,12 +373,9 @@ cat > "$capture_fail_bin/cat" <<'STUB'
 exit 9
 STUB
 chmod +x "$capture_fail_bin/cat"
-if capture_fail_out="$(printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$base_oid" "$base_oid" |
-  PATH="$capture_fail_bin:$PATH" "$hook" origin "$repo" 2>&1)"; then
-  fail "expected dispatcher input capture failure to block the push"
-fi
-[[ "$capture_fail_out" == *"failed to capture pre-push input"* ]] ||
-  fail "dispatcher input capture failure was unclear: $capture_fail_out"
+printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$base_oid" "$base_oid" |
+  PATH="$capture_fail_bin:$PATH" "$hook" origin "$repo" >/dev/null ||
+  fail "dispatcher trusted an inherited PATH override"
 
 chmod -x "$hook_dir/pre-push.d/50-push-safety"
 if missing_enforcement_out="$(printf 'refs/heads/feature/test %s refs/heads/feature/test %s\n' "$base_oid" "$base_oid" |
@@ -350,18 +388,18 @@ chmod +x "$hook_dir/pre-push.d/50-push-safety"
 
 rm "$hook_dir/pre-push.d/50-push-safety"
 ln -s "$TMP/missing-enforcement" "$hook_dir/pre-push.d/50-push-safety"
-if symlinked_component_out="$("$repo/scripts/check-push-safety.sh" --install-hook 2>&1)"; then
+if symlinked_component_out="$(install_hook "$repo" 2>&1)"; then
   fail "expected a dangling managed hook symlink to be rejected"
 fi
 [[ "$symlinked_component_out" == *"refusing symlinked managed hook component"* ]] ||
   fail "managed hook symlink failure was unclear: $symlinked_component_out"
 rm "$hook_dir/pre-push.d/50-push-safety"
-"$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+install_hook "$repo" >/dev/null
 
 mv "$private_policy" "$private_policy.saved"
 if stale_policy_out="$(
   unset FBA_PUSH_SAFETY_POLICY_FILE
-  "$repo/scripts/check-push-safety.sh" --install-hook 2>&1
+  install_hook "$repo" 2>&1
 )"; then
   fail "expected routine reinstall to reject an unreadable persisted policy"
 fi
@@ -370,10 +408,10 @@ fi
 mv "$private_policy.saved" "$private_policy"
 (
   unset FBA_PUSH_SAFETY_POLICY_FILE
-  FBA_PUSH_SAFETY_CLEAR_POLICY=1 "$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+  FBA_PUSH_SAFETY_CLEAR_POLICY=1 install_hook "$repo" >/dev/null
 )
 [[ ! -e "$policy_pointer" ]] || fail "explicit policy clear did not remove the persisted pointer"
-"$repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+install_hook "$repo" >/dev/null
 
 gate_repo="$TMP/gate-repo"
 make_repo "$gate_repo"
@@ -383,7 +421,7 @@ git -C "$gate_repo" remote add origin "$gate_remote"
 mkdir -p "$TMP/genuine" "$TMP/spoof"
 ln -s /bin/bash "$TMP/genuine/no-mistakes"
 ln -s /bin/sh "$TMP/spoof/no-mistakes"
-PATH="$TMP/genuine:$PATH" "$gate_repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+PATH="$TMP/genuine:$PATH" install_hook "$gate_repo" >/dev/null
 gate_attestation="$(git -C "$gate_repo" rev-parse --git-path hooks/pre-push.d/40-no-mistakes.attestation)"
 case "$gate_attestation" in
   /*) ;;
@@ -394,30 +432,30 @@ trusted_no_mistakes="$(python3 -c 'import os,sys; print(os.path.realpath(sys.arg
 trusted_hash="$(sha256_file "$trusted_no_mistakes")"
 if mismatched_trust_out="$(FBA_NO_MISTAKES_TRUSTED_PATH="$TMP/genuine/no-mistakes" \
   FBA_NO_MISTAKES_TRUSTED_SHA256="$(printf '0%.0s' {1..64})" \
-  "$gate_repo/scripts/check-push-safety.sh" --install-hook 2>&1)"; then
+  install_hook "$gate_repo" 2>&1)"; then
   fail "expected a mismatched independent digest to be rejected"
 fi
 [[ "$mismatched_trust_out" == *"trusted no-mistakes digest does not match"* ]] ||
   fail "mismatched trust failure was unclear: $mismatched_trust_out"
 FBA_NO_MISTAKES_TRUSTED_PATH="$TMP/genuine/no-mistakes" \
   FBA_NO_MISTAKES_TRUSTED_SHA256="$trusted_hash" \
-  "$gate_repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+  install_hook "$gate_repo" >/dev/null
 attestation_before="$(cat "$gate_attestation")"
-"$gate_repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+install_hook "$gate_repo" >/dev/null
 [[ "$(cat "$gate_attestation")" == "$attestation_before" ]] ||
   fail "routine hook reinstall did not preserve no-mistakes trust"
 printf '%s\t%s\n' "$trusted_no_mistakes" "$(printf '0%.0s' {1..64})" > "$gate_attestation"
-if stale_trust_out="$("$gate_repo/scripts/check-push-safety.sh" --install-hook 2>&1)"; then
+if stale_trust_out="$(install_hook "$gate_repo" 2>&1)"; then
   fail "expected routine reinstall to reject stale persisted trust"
 fi
 [[ "$stale_trust_out" == *"trusted no-mistakes digest does not match"* ]] ||
   fail "persisted trust validation failure was unclear: $stale_trust_out"
 printf '%s\n' "$attestation_before" > "$gate_attestation"
-FBA_NO_MISTAKES_CLEAR_TRUST=1 "$gate_repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+FBA_NO_MISTAKES_CLEAR_TRUST=1 install_hook "$gate_repo" >/dev/null
 [[ ! -e "$gate_attestation" ]] || fail "explicit trust clear did not remove the attestation"
 FBA_NO_MISTAKES_TRUSTED_PATH="$TMP/genuine/no-mistakes" \
   FBA_NO_MISTAKES_TRUSTED_SHA256="$trusted_hash" \
-  "$gate_repo/scripts/check-push-safety.sh" --install-hook >/dev/null
+  install_hook "$gate_repo" >/dev/null
 NO_MISTAKES_GATE=1 "$TMP/genuine/no-mistakes" -c \
   'git -C "$1" push -q origin HEAD:main; rc=$?; sleep 0.1; exit "$rc"' sh "$gate_repo" ||
   fail "pinned no-mistakes binary could not deliver main"

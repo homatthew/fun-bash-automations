@@ -41,7 +41,10 @@ while tokens and assignment.match(tokens[0]):
 if not tokens:
     sys.exit(1)
 
-command = os.path.basename(tokens[0])
+if "/" in tokens[0] or environment:
+    sys.exit(1)
+
+command = tokens[0]
 args = tokens[1:]
 
 singletons = {
@@ -164,12 +167,6 @@ if command == "sed":
         index += 1
     sys.exit(0 if scripts and all(sed_script_is_safe(script) for script in scripts) else 1)
 
-if command == "awk":
-    source = " ".join(args)
-    if re.search(r"\bsystem\s*\(", source):
-        sys.exit(1)
-    sys.exit(0)
-
 if command == "date":
     index = 0
     while index < len(args):
@@ -198,34 +195,25 @@ if command == "defaults":
 if command != "git" or not args:
     sys.exit(1)
 
-unsafe_git_environment = {"GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_CONFIG_COUNT"}
-if any(name in unsafe_git_environment or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")) for name in environment):
-    sys.exit(1)
-
 subcommand = args[0]
 subargs = args[1:]
-read_only = {
-    "status", "diff", "log", "show", "blame", "rev-parse", "ls-files",
-    "ls-tree", "ls-remote", "describe", "cat-file", "merge-base", "shortlog",
-    "for-each-ref", "show-ref", "whatchanged", "grep", "name-rev",
-    "check-ref-format",
-}
-if subcommand in read_only:
-    unsafe_options = {
-        "--output",
-        "--ext-diff",
-        "--textconv",
-        "--open-files-in-pager",
-        "--filters",
-        "--upload-pack",
+if subcommand == "status":
+    safe_status = {
+        "-s", "--short", "-b", "--branch", "--show-stash", "--ahead-behind",
+        "--no-ahead-behind", "--porcelain", "--long", "--untracked-files",
+        "--ignored", "--ignore-submodules", "--column", "--no-column",
+        "--no-renames", "--find-renames", "-z", "--null", "--",
     }
-    if any(
-        arg in unsafe_options
-        or any(arg.startswith(option + "=") for option in unsafe_options)
-        for arg in subargs
-    ):
-        sys.exit(1)
-    sys.exit(0)
+    safe_prefixes = (
+        "--porcelain=", "--untracked-files=", "--ignored=", "--ignore-submodules=",
+        "--column=", "--find-renames=",
+    )
+    sys.exit(0 if all(not arg.startswith("-") or arg in safe_status or arg.startswith(safe_prefixes) for arg in subargs) else 1)
+if subcommand == "rev-parse":
+    unsafe_rev_parse = {"--parseopt", "--sq-quote"}
+    sys.exit(1 if any(arg in unsafe_rev_parse for arg in subargs) else 0)
+if subcommand in {"merge-base", "show-ref", "name-rev", "check-ref-format"}:
+    sys.exit(0 if all(arg != "--output" and not arg.startswith("--output=") for arg in subargs) else 1)
 if subcommand == "branch":
     mutating = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--force", "-t", "--track", "--no-track", "--recurse-submodules", "--create-reflog", "--delete", "--move", "--copy", "--edit-description", "--set-upstream-to", "--unset-upstream", "-u"}
     if any(arg in mutating or arg.startswith("--set-upstream-to=") for arg in subargs):

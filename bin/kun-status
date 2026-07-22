@@ -370,6 +370,12 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+if [[ $# -gt 0 ]]; then
+    output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+    printf '%s' "$output"
+    exit 2
+fi
+
 # Default = all sections.
 if [[ $any -eq 0 ]]; then
     want_pool=1 want_gate=1 want_crew=1 want_wake=1

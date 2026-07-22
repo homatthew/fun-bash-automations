@@ -59,6 +59,11 @@ grep -Fq 'CLAUDE_NOTIFY_BUNDLE_ID:-dev.fun-bash-automations.claude-notify' "$ROO
 
 grep -Fq 'bash \"$test\" || exit $?' "$ROOT/.no-mistakes.yaml" ||
   fail "no-mistakes regression loop does not fail fast"
+if rg -n -- '--install-hook' "$ROOT/bin/fba-deploy" "$ROOT/setupPermissions.sh" >/dev/null; then
+  fail "routine projection still re-enrolls mutable pre-push assets"
+fi
+grep -Fq 'FBA_PUSH_SAFETY_TRUSTED_SCANNER_SHA256' "$ROOT/README.md" ||
+  fail "delivery documentation omits independent scanner enrollment"
 jq -e 'has("skipDangerousModePermissionPrompt") | not' "$ROOT/claude/settings.json" >/dev/null ||
   fail "Claude dangerous-mode prompt suppression remains enabled"
 if rg -n 'claude-slack-(bot-token|channel|user-id)' "$ROOT/llm/hooks" >/dev/null; then

@@ -695,6 +695,18 @@ unknown_git_wrapper_block=$(run_guard "opaque-wrapper git push origin master")
 expect_contains "$unknown_git_wrapper_block" "pushing directly to master"
 echo "ok 86b - unknown execution wrappers cannot hide git pushes"
 
+echo_git_data_allow=$(run_guard "echo git push origin main")
+[[ -z "$echo_git_data_allow" ]] || fail "expected data-only echo to stay allowed, got: $echo_git_data_allow"
+echo "ok 86c - data-only command arguments are not promoted to executables"
+
+watch_git_push_block=$(run_guard "watch 'git push origin HEAD:main'")
+expect_contains "$watch_git_push_block" "local code-interpreter command strings are not allowed"
+echo "ok 86d - watch command strings cannot hide git pushes"
+
+awk_git_push_block=$(run_guard "awk 'BEGIN { system(\"git push origin HEAD:main\") }'")
+expect_contains "$awk_git_push_block" "local code-interpreter command strings are not allowed"
+echo "ok 86e - AWK system calls cannot hide git pushes"
+
 env_git_config_block=$(run_guard "env SESSION=test git config --global core.hooksPath /tmp/hooks")
 expect_contains "$env_git_config_block" "git config mutations are not allowed"
 echo "ok 87 - env-wrapped git config mutation is blocked"
@@ -706,6 +718,18 @@ echo "ok 87a - git config-env cannot disable hooks for a push"
 config_push_block=$(run_guard "git -c core.hooksPath=/tmp/empty push origin feature/x")
 expect_contains "$config_push_block" "must not override core.hooksPath"
 echo "ok 87b - git inline config cannot disable hooks for a push"
+
+include_config_push_block=$(run_guard "git -c include.path=/tmp/disable-hooks push origin feature/x")
+expect_contains "$include_config_push_block" "inject Git configuration"
+echo "ok 87c - indirect inline Git configuration cannot disable hooks"
+
+global_config_push_block=$(run_guard "GIT_CONFIG_GLOBAL=/tmp/disable-hooks git push origin feature/x")
+expect_contains "$global_config_push_block" "inject Git configuration"
+echo "ok 87d - Git config-source environment overrides cannot disable hooks"
+
+env_global_config_push_block=$(run_guard "env GIT_CONFIG_GLOBAL=/tmp/disable-hooks git push origin feature/x")
+expect_contains "$env_global_config_push_block" "inject Git configuration"
+echo "ok 87e - env-wrapped Git config-source overrides cannot disable hooks"
 
 absolute_git_reset_block=$(run_guard "/usr/bin/git reset --hard")
 expect_contains "$absolute_git_reset_block" "git reset --hard"
