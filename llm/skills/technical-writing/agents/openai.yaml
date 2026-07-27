@@ -1,0 +1,4 @@
+interface:
+  display_name: "Technical Writing"
+  short_description: "Make technical prose clear, concrete, and AI-retrievable."
+  default_prompt: "Improve this technical writing so each section is self-contained, concrete, and easy for humans and LLMs to retrieve and act on."

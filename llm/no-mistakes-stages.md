@@ -40,8 +40,10 @@ Stages are tuned, not toggled. Two levers:
 - **auto_fix (per stage, in `.no-mistakes.yaml`)** — max follow-up fix attempts.
   `0` means the stage does **not** auto-fix; it stops at a manual approval gate
   instead. `0` does not disable the stage — it still runs and still gates.
-  `review` defaults to `0` (findings are a human decision). Keys: `rebase`,
-  `review`, `test`, `document`, `lint`, `ci`.
+  `review` and `document` default to `0` in the Kun-stack baseline: review
+  findings and documentation edits are audited, but they park for a decision so
+  the gate does not create unrelated churn. Keys: `rebase`, `review`, `test`,
+  `document`, `lint`, `ci`.
 
 - **commands (per stage, in `.no-mistakes.yaml`)** — override the `lint`, `test`,
   and `format` commands. Empty string = auto-detect from the repo.

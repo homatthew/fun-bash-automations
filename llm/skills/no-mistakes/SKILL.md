@@ -49,6 +49,11 @@ the same way once the work is committed on a feature branch.
   validates committed history, not your uncommitted working tree.
 - You must be on a **feature branch**, not the repository's default branch.
 - The repository must already be initialized with `no-mistakes init`.
+- The daemon must have a runnable configured pipeline agent: a supported native
+  agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through
+  `acpx`. You are the AXI driver, not
+  an implicit pipeline-agent backend. If none is available, the run fails
+  before its first step; `no-mistakes doctor` reports the configuration problem.
 
 If any of these is not met, `axi run` returns an `error:` with the exact command
 to fix it - read it and act on it (commit your work, or create a branch). If the
@@ -58,7 +63,7 @@ wrong.
 Before starting, run `no-mistakes axi` (home view).
 If it shows an active run on your current branch, inspect it with `no-mistakes axi status`.
 If it is parked at a gate, drive it with `no-mistakes axi respond`.
-Reattach an in-flight run by re-running `no-mistakes axi run` when it still matches your current `HEAD`.
+Reattach an in-flight run by re-running `no-mistakes axi run` when it still matches your current `HEAD` - either as the submitted head or as the current pipeline head.
 Only `no-mistakes axi abort` it when you mean to discard that run before starting over; aborting is a between-runs action, never a way to take over or bypass a gate while a run is still going (see [Validate and decide](#validate-and-decide)).
 If it shows an active run on another branch, leave that run alone and start validation for your current branch with `no-mistakes axi run --intent "..."`.
 
@@ -79,6 +84,28 @@ constraints or approaches they ruled in or out, and anything they explicitly
 asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
+
+### State the boundary, not just the goal
+
+`--intent` is the only scope signal the review, fix, and document agents get. A
+goal-only intent reads as an invitation: the fixer is told to fix the deepest
+practical cause and to worry about the same class of bug elsewhere, so anything
+you leave unstated becomes fair game. Name the edges explicitly:
+
+- **Objective** - what the user set out to accomplish, in their terms.
+- **In scope** - the surfaces, endpoints, backends, or files this change may touch.
+- **Out of scope** - adjacent surfaces you deliberately did *not* touch, and why.
+  Be concrete: "derived keys for leases, scan metadata, and continuation tokens
+  are follow-ups, not part of this fix."
+- **Settled decisions** - choices already made that must not be relitigated,
+  including ones that look wrong without context.
+- **Budget** - roughly how big this should be ("a focused fix in 2-3 files"),
+  so later rounds have something to measure growth against.
+
+Treat this as immutable for the run. Reviewer discoveries do not rewrite the
+objective; they become follow-ups unless the user widens the scope. If the user
+does widen it, restate the whole boundary in the next `--intent` rather than
+letting it drift silently.
 
 ## Validate and decide
 
@@ -101,6 +128,13 @@ Run the pipeline and decide on its findings as they come up:
    the run is parked at an approval or fix-review gate and waiting for you to
    send `axi respond`. The field is observability only: it does not change
    gate resolution, auto-resume the run, or make `--yes` the default.
+   While a step is actively `running` or `fixing`, `axi status` may include
+   `active_steps` with `active_for`, `last_activity`, a native `agent_pid` when
+   a subprocess agent is running, and the current round such as `round 1`,
+   `auto-fix 1/3`, or `fix 2`. If `last_activity` is prefixed with
+   `quiet`, no step log or native-agent lifecycle activity has arrived for
+   longer than `step_quiet_warning`. Treat that as a liveness clue, not as
+   permission to cancel, rerun, or edit the worktree yourself.
 2. If the output contains a `gate:` object, the pipeline is waiting on you.
    Read its `findings` table. Each finding has an `id`, `severity`,
    `file`, `description`, and an `action` that tells you how the
@@ -129,6 +163,40 @@ Run the pipeline and decide on its findings as they come up:
    # skip this step
    no-mistakes axi respond --action skip
    ```
+   Before you send `--action fix`, classify each finding you are about to
+   authorize against the boundary you stated in `--intent`:
+
+   - **In-intent blocker** - the change is wrong or unsafe for its stated
+     objective. Fix it now.
+   - **Regression introduced by this diff** - this run broke something that
+     worked before. Fix it now.
+   - **Adjacent** - a real problem in code this change merely sits near, or the
+     same class of bug on a surface you declared out of scope. **Do not fix it
+     in this run.** Note it for a follow-up and leave it out of `--findings`.
+   - **Cleanup** - naming, comments, formatting, or docs on files this change
+     did not otherwise touch. Leave it.
+
+   Only the first two belong in `--findings`. The `action` field tells you how
+   the pipeline classified a finding's *risk*; it does not tell you whether
+   fixing it is inside the user's scope. That judgment is yours, and
+   `--action fix` on an adjacent finding is how a narrow fix turns into a
+   sprawling one. When a finding is adjacent but you think it genuinely should
+   be fixed now, that is a scope change - ask the user, do not decide it at the
+   gate.
+
+   Watch cumulative growth, not just the last round. Before each fix round,
+   compare the current diff against the budget you stated:
+
+   ```sh
+   git diff --shortstat $(git merge-base HEAD origin/main)
+   ```
+
+   Round-by-round each step looks reasonable; the damage is cumulative. If the
+   diff has grown past roughly double your stated budget, stop and reconcile
+   with the user before authorizing more fixes. A narrow fix that has quietly
+   become a large one is worth a sentence to the user even when every individual
+   round was defensible.
+
    While a run is active, never fix findings by editing the code yourself -
    the pipeline owns both the findings and the fixes. Your job at a gate is to
    decide and respond; `--action fix` has the pipeline apply the fix and
@@ -167,6 +235,16 @@ Run the pipeline and decide on its findings as they come up:
      never mid-run to circumvent a gate. Do not leave the user at a `failed`
      outcome without either retrying or explaining what blocks it.
 
+Before any post-pipeline local commit or fresh run, read the structured `branch_sync` object returned by AXI home, status, or a drive result.
+Only when its `next_action.code` is `sync`, run `no-mistakes axi sync` first.
+That guarded sync may be a strict fast-forward or a content-equivalent diverged advance that anchors the pre-sync head before moving the branch with reset semantics; genuine divergence stays blocked.
+If it reports `next_action.code` is `continue_active_run`, the pipeline still owns the branch: run the reported command, keep driving the active run, and do not make local follow-up commits.
+When `next_action.code` is `recover_custody`, a terminal run left unpublished pipeline commits preserved in the local gate: run `no-mistakes axi sync --recover` to return custody and fast-forward to the preserved head, or `no-mistakes rerun` to resume validating it instead.
+A dirty or diverged worktree makes the recovery refuse with explicit choices; `--keep-local` keeps your current head while the preserved commits stay anchored under `refs/no-mistakes/recover/<run>`.
+If synchronization is blocked, process that structured state instead of improvising reset, stash, merge, rebase, force, or branch replacement.
+After synchronization, commit the follow-up on top and re-run `no-mistakes axi run --intent "..."` with the original user intent.
+This preserves every prior gate-fix commit regardless of its configured subject.
+
 The CI step deliberately keeps watching the PR after checks pass, so
 `axi run` returns `checks-passed` the moment checks are green rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
@@ -191,6 +269,49 @@ format - what was validated and what was found. If the output includes a
 `fixes` table, the pipeline fixed findings your original change missed:
 acknowledge those misses and explicitly list each fix so the user can easily
 review them.
+
+## Keep the delivered change proportional
+
+The review gate is not the only place scope leaks. Check these before the run
+pushes.
+
+**Test proportionality.** Automated rounds add a test per RPC or per call site,
+which produces many near-identical cases that all prove the same thing. Prefer
+one test per distinct code path: if several endpoints funnel through the same
+validation or helper, one case covers them, plus a case for each path that
+genuinely bypasses it. When test additions run past roughly twice the
+implementation additions, that is a signal to compress rather than approve.
+
+**Document write-set.** When the document step gates, look at what it actually
+touched, not just whether the prose reads well:
+
+```sh
+git show --stat HEAD
+```
+
+Push back on edits to functional code, global policy files (`AGENTS.md`,
+`.agents/rules/**`, `CLAUDE.md`), or unrelated docs unless policy work was in
+your stated intent - a fix should not quietly rewrite the repo's standing rules.
+Also watch for whitespace-only churn: a trailing-newline or reflow edit to a file
+the change did not otherwise touch adds diff noise and reviewer confusion for no
+benefit. And confirm the step did not *delete* documentation an earlier round
+added; a later consolidation pass can leave a doc deliverable unmet.
+
+**History.** The pipeline commits per gate, so a finished run can carry a long
+tail of `no-mistakes(review):` and `no-mistakes(document):` commits, plus commits
+that only repair earlier rounds. That history documents the pipeline, not the
+change. Before the PR is reviewed, reshape it into a small number of commits
+organized by domain - implementation, tests, docs - and verify you did not alter
+the result:
+
+```sh
+git diff <old-head> HEAD --stat   # must be empty
+```
+
+If rounds have rewritten each other enough that an interactive rebase is
+painful, rebuilding the branch from the base and re-applying the final state as
+clean commits is usually faster and safer. Never drop a pipeline fix while
+reshaping: the tree must come out identical.
 
 ## Escalate `ask-user` findings
 
@@ -224,16 +345,34 @@ run without checking back.
 
 ```sh
 no-mistakes axi               # home view: current branch, active runs, next steps
-no-mistakes axi status        # full detail of the resolved run
+no-mistakes axi status        # full detail plus cached branch_sync when relevant
+no-mistakes axi sync --check  # freshly verify an offered synchronization plan
+no-mistakes axi sync          # apply only an offered guarded synchronization
+no-mistakes axi sync --recover  # return custody after a terminal run left unpublished pipeline commits
 no-mistakes axi logs --step <name> --full   # full log output of one step
 no-mistakes axi abort         # cancel the current-branch active run
 no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside its worktree)
 ```
 
+An active run advances the branch on its own, so any SHA you quote goes stale
+without warning. When you hand the branch to a reviewer - a person, another
+agent, or yourself in a later session - name the pushed SHA rather than saying
+"the branch", and have the reviewer work from that SHA. When review findings come
+back, re-verify the current head before acting on them:
+
+```sh
+git ls-remote origin <branch>   # authoritative head
+```
+
+If it moved, check the intervening commits before treating any finding as open:
+the run may have already fixed it, and re-fixing a resolved finding is its own
+source of churn.
+
 ## Reading the output
 
 - Output is TOON: `key: value` pairs, `name[N]{cols}:` tables, and `help[N]:` hints.
 - A non-terminal run object may include `awaiting_agent: parked <duration>` immediately after `status`; that means the run is parked at a gate awaiting your `axi respond`.
+- A run object with a `running` or `fixing` step may include an `active_steps` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The `help` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as `error: ...` on stdout with a `help` list; act on the suggestion.
 - Exit codes: `0` success, no-op, or normal decision gates, `1` failed or cancelled final outcomes, `2` bad usage.
@@ -246,10 +385,13 @@ note: Review auto-fix is disabled by default (auto_fix.review: 0; a repo or glob
 findings[2]{id,severity,file,line,action,description}:
   r1,warning,internal/pipeline/executor.go,,auto-fix,Error from os.Remove is ignored
   r2,error,cmd/no-mistakes/main.go,,ask-user,New --force flag bypasses the confirm prompt
-help[3]:
-  no-mistakes axi respond --action fix --findings r1
-  no-mistakes axi respond --action approve
-  A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a gate, respond; loop until an outcome.
+help[6]:
+  Run `no-mistakes axi respond --action approve` to accept this step and continue
+  Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)
+  Run `no-mistakes axi respond --action skip` to skip this step
+  Run `no-mistakes axi logs --step review --full` to read the full step log
+  A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.
+  Commit post-pipeline follow-up work on top of the existing branch so every pipeline fix commit remains present. Never abort-and-restart, reset, or replace the branch in a way that drops prior gate-fix commits.
 ```
 
 Read the `action` column per row: decide `r1` (auto-fix) on your own

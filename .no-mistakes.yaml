@@ -51,7 +51,7 @@ auto_fix:
   rebase: 3    # retry rebase/conflict resolution
   review: 0    # code-review findings are surfaced for a human decision, not auto-fixed
   test: 3      # fix failing tests and re-run
-  document: 3  # document fixes also run during the initial document pass
+  document: 0  # docs are audited, but doc edits park for a decision to avoid churn
   lint: 3      # fix lint violations and re-run
   ci: 3        # fix CI failures and re-run
 

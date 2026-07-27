@@ -692,6 +692,7 @@ ssh-command-gate-list() {
 
 alias cld='claude'
 alias cldr='claude --resume'
+alias cursor='cursor-agent'
 
 # ==============================================================================
 # Beads task memory

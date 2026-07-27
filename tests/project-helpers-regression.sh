@@ -39,6 +39,33 @@ completion_output="$(zsh -fc 'autoload -Uz compinit; compinit -C; source "$FBA_R
 deferred_completion_output="$(zsh -fc 'source "$FBA_ROOT/zsh/personal.zsh"; autoload -Uz compinit; compinit -C; _fba_register_pending_compdefs; print -- "${_comps[proj]} ${_comps[rp]}"')"
 [[ "$deferred_completion_output" == "_proj_completion _rp_completion" ]]
 
+# Ghostty-over-SSH autosuggestion async handling. zsh-autosuggestions decides
+# async purely on whether ZSH_AUTOSUGGEST_USE_ASYNC *exists*, not its value, so
+# the only way to turn async off is to unset it after the plugin loads. Assert on
+# ${+VAR} (presence) for that reason -- asserting a value would pass while async
+# stayed on. A stub under HOME guarantees some plugin is always found, so these
+# checks do not depend on a system zsh-autosuggestions install.
+mkdir -p "$TMP_HOME/.zsh/zsh-autosuggestions"
+printf 'typeset -g ZSH_AUTOSUGGEST_USE_ASYNC=\n' \
+    > "$TMP_HOME/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh"
+
+async_present() {
+    env -u SSH_CONNECTION -u SSH_TTY -u TERM_PROGRAM -u ZSH_AUTOSUGGEST_USE_ASYNC "$@" \
+        zsh -fc "$source_personal; print -- \${+ZSH_AUTOSUGGEST_USE_ASYNC}"
+}
+
+# Ghostty over SSH: async off, whichever way ghostty is detected.
+[[ "$(async_present SSH_CONNECTION='127.0.0.1 1111 127.0.0.1 22' TERM_PROGRAM=ghostty)" == 0 ]]
+[[ "$(async_present SSH_TTY=/dev/pts/1 TERM=xterm-ghostty)" == 0 ]]
+
+# Ghostty locally, or SSH in another terminal: leave async alone.
+[[ "$(async_present TERM_PROGRAM=ghostty TERM=xterm-ghostty)" == 1 ]]
+[[ "$(async_present SSH_TTY=/dev/pts/1 TERM=xterm-256color)" == 1 ]]
+
+# An explicit user setting wins over the ghostty-over-SSH workaround.
+[[ "$(env SSH_TTY=/dev/pts/1 TERM=xterm-ghostty ZSH_AUTOSUGGEST_USE_ASYNC=1 \
+    zsh -fc "$source_personal; print -- \${+ZSH_AUTOSUGGEST_USE_ASYNC}")" == 1 ]]
+
 mkdir -p "$TMP_HOME/.treehouse/worktrees/demo" "$TMP_HOME/outside-repo"
 git -C "$TMP_HOME/.treehouse/worktrees/demo" init -q
 git -C "$TMP_HOME/outside-repo" init -q
