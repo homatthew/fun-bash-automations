@@ -6,7 +6,8 @@ This file is Claude-specific runtime guidance layered on top of shared policy.
 
 ## Notifications
 
-- Custom Claude alert hooks are disabled in `claude/settings.json`.
+- The portable baseline registers no alert hooks. Where `notify.sh` is
+  registered locally, it owns alerts; `fba-deploy` preserves that registration.
 - Do not call `terminal-notifier` manually.
 
 ## Claude Runtime Files

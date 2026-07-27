@@ -209,6 +209,47 @@ project_shared_hooks() {
     done
 }
 
+repo_managed_hook_names() {
+    local dir
+    for dir in "$ROOT/llm/hooks" "$ROOT/claude/hooks" "$ROOT/codex/hooks"; do
+        [[ -d "$dir" ]] || continue
+        for hook in "$dir"/*.sh; do
+            [[ -f "$hook" ]] && basename "$hook"
+        done
+    done
+}
+
+# Project a repo-owned runtime JSON file (~/.claude/settings.json,
+# ~/.codex/hooks.json) without clobbering state this repo does not own.
+#
+# Both files are live runtime state: the Claude enterprise wrapper writes env
+# and auth keys into settings.json, cmux registers its own hooks in hooks.json,
+# and the dotfiles overlay adds internal guards. A plain copy silently dropped
+# all of it on every deploy. Repo-owned keys and hook registrations still win,
+# so retiring a hook here still removes it downstream -- a registration counts
+# as ours when its script is one of repo_managed_hook_names.
+merge_runtime_json() {
+    local source_path="$1"
+    local dest_path="$2"
+
+    if [[ ! -f "$dest_path" ]]; then
+        copy_path "$source_path" "$dest_path"
+        return
+    fi
+
+    local merged
+    merged="$(mktemp)"
+    if ! repo_managed_hook_names |
+        python3 "$ROOT/bin/fba-merge-runtime-json.py" "$source_path" "$dest_path" >"$merged"; then
+        rm -f "$merged"
+        echo "Failed to merge $source_path into $dest_path" >&2
+        return 1
+    fi
+
+    cat "$merged" >"$dest_path"
+    rm -f "$merged"
+}
+
 extract_toml_table_headers() {
     awk '
         /^\[\[[^]]+\]\]$/ {
@@ -361,7 +402,7 @@ deploy_claude() {
     project_shared "$HOME/.claude"
 
     if [[ -f "$ROOT/claude/settings.json" ]]; then
-        copy_path "$ROOT/claude/settings.json" "$HOME/.claude/settings.json"
+        merge_runtime_json "$ROOT/claude/settings.json" "$HOME/.claude/settings.json"
         fba_log "projected portable claude/settings.json"
     fi
 
@@ -408,7 +449,7 @@ deploy_codex() {
     fi
 
     if [[ -f "$ROOT/codex/hooks.json" ]]; then
-        copy_path "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
+        merge_runtime_json "$ROOT/codex/hooks.json" "$HOME/.codex/hooks.json"
     fi
 
     project_shared_hooks "$HOME/.codex/hooks"
