@@ -3,16 +3,23 @@ set -euo pipefail
 
 # fba-deploy projects ~/.claude/settings.json and ~/.codex/hooks.json into live
 # files that other tools also write: the Claude enterprise wrapper (env, auth),
-# cmux (its own hook registrations), and the dotfiles private overlay (internal
-# guards). It used to copy over them, silently dropping all of it every deploy.
+# cmux (its own hook registrations), the dotfiles private overlay (internal
+# guards), and the user by hand (local alert hooks). It used to copy over them,
+# silently dropping all of it every deploy.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MERGE="$ROOT/bin/fba-merge-runtime-json.py"
 TMP="$(mktemp -d -t fba-runtime-json-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-# bash-safety-guard.sh and notify.sh are repo-owned; the rest are foreign.
-managed=$'bash-safety-guard.sh\nnotify.sh\nbeads-prime.sh'
+# Hook registrations are kept when their script exists, so the fixtures need
+# real files. gone.sh is deliberately never created.
+export HOME="$TMP"
+mkdir -p "$TMP/.claude/hooks" "$TMP/.cmux/hooks"
+for script in bash-safety-guard.sh notify.sh beads-prime.sh dgw-write-guard.sh; do
+    touch "$TMP/.claude/hooks/$script"
+done
+touch "$TMP/.cmux/hooks/cmux-feed.sh" "$TMP/.cmux/hooks/cmux-session-start.sh"
 
 cat >"$TMP/repo.json" <<'JSON'
 {
@@ -20,9 +27,6 @@ cat >"$TMP/repo.json" <<'JSON'
   "hooks": {
     "PreToolUse": [
       {"matcher": "Bash", "hooks": [{"command": "~/.claude/hooks/bash-safety-guard.sh", "type": "command"}]}
-    ],
-    "Stop": [
-      {"matcher": "", "hooks": [{"command": "~/.claude/hooks/notify.sh", "type": "command"}]}
     ]
   },
   "model": "repo-model",
@@ -38,13 +42,11 @@ cat >"$TMP/live.json" <<'JSON'
     "PreToolUse": [
       {"matcher": "Bash", "hooks": [{"command": "~/.claude/hooks/bash-safety-guard.sh", "type": "command"}]},
       {"matcher": "Bash", "hooks": [{"command": "~/.claude/hooks/dgw-write-guard.sh", "type": "command"}]},
-      {"hooks": [{"command": "~/.cmux/hooks/cmux-feed-PreToolUse.sh", "type": "command"}]}
+      {"matcher": "Bash", "hooks": [{"command": "~/.claude/hooks/gone.sh", "type": "command"}]},
+      {"hooks": [{"command": "~/.cmux/hooks/cmux-feed.sh", "type": "command"}]}
     ],
     "Stop": [
       {"matcher": "", "hooks": [{"command": "~/.claude/hooks/notify.sh", "type": "command"}]}
-    ],
-    "PostCompact": [
-      {"hooks": [{"command": "~/.cmux/hooks/cmux-feed-PostCompact.sh", "type": "command"}]}
     ],
     "SessionStart": [
       {"hooks": [
@@ -59,7 +61,7 @@ cat >"$TMP/live.json" <<'JSON'
 }
 JSON
 
-printf '%s\n' "$managed" | python3 "$MERGE" "$TMP/repo.json" "$TMP/live.json" >"$TMP/out.json"
+python3 "$MERGE" "$TMP/repo.json" "$TMP/live.json" >"$TMP/out.json"
 
 python3 - "$TMP/out.json" <<'PY'
 import json, sys
@@ -90,41 +92,35 @@ check("repo env must win", merged["env"]["DISABLE_AUTOUPDATER"] == "1")
 check("permissions must union", merged["permissions"]["allow"] == ["Bash(git status:*)", "Bash(ls:*)"])
 
 pre = commands("PreToolUse")
-# A repo-owned hook registered on both sides must not be duplicated.
+# A registration present on both sides must not be duplicated.
 check("repo hook must appear once", pre.count("~/.claude/hooks/bash-safety-guard.sh") == 1)
 # Foreign registrations survive: private overlay and third-party alike.
 check("private overlay hook must survive", "~/.claude/hooks/dgw-write-guard.sh" in pre)
-check("cmux hook must survive", "~/.cmux/hooks/cmux-feed-PreToolUse.sh" in pre)
+check("cmux hook must survive", "~/.cmux/hooks/cmux-feed.sh" in pre)
+# A registration whose script is gone is a dead pointer and gets dropped.
+check("dead registration must be dropped", "~/.claude/hooks/gone.sh" not in pre)
 
-# A whole event only the live file knows about survives.
-check("live-only event must survive", commands("PostCompact") == ["~/.cmux/hooks/cmux-feed-PostCompact.sh"])
+# A local opt-in to a hook this repo ships but does not register must survive:
+# the portable baseline registers no alert hooks, but a machine may want them.
+check("local notify opt-in must survive", commands("Stop") == ["~/.claude/hooks/notify.sh"])
 
-# Repo hooks registered only in the repo still land.
-check("repo notify hook must land", commands("Stop") == ["~/.claude/hooks/notify.sh"])
-
-# A group mixing repo-owned and foreign hooks keeps only the foreign entries,
-# so the repo copy is not duplicated but the third-party one is not lost.
+# Mixed groups keep every live entry whose script exists.
 sess = commands("SessionStart")
-check("mixed group must drop the managed duplicate", "~/.claude/hooks/beads-prime.sh" not in sess)
-check("mixed group must keep the foreign hook", sess == ["~/.cmux/hooks/cmux-session-start.sh"])
+check("mixed group must keep both live hooks",
+      sess == ["~/.claude/hooks/beads-prime.sh", "~/.cmux/hooks/cmux-session-start.sh"])
+
+# Merging twice must be a no-op.
 PY
 
-# Retiring a repo hook must still remove it downstream.
-cat >"$TMP/repo-retired.json" <<'JSON'
-{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "~/.claude/hooks/bash-safety-guard.sh", "type": "command"}]}]}}
-JSON
-printf '%s\n' "$managed" | python3 "$MERGE" "$TMP/repo-retired.json" "$TMP/live.json" >"$TMP/retired.json"
-python3 - "$TMP/retired.json" <<'PY'
-import json, sys
-merged = json.load(open(sys.argv[1]))
-stop = [h["command"] for g in merged["hooks"].get("Stop", []) for h in g["hooks"]]
-if stop:
-    print(f"runtime-json merge: retired repo hook must not persist, got {stop}", file=sys.stderr)
-    raise SystemExit(1)
-PY
+python3 "$MERGE" "$TMP/repo.json" "$TMP/out.json" >"$TMP/twice.json"
+if ! diff -q "$TMP/out.json" "$TMP/twice.json" >/dev/null; then
+    echo "runtime-json merge: merging twice must be idempotent" >&2
+    diff "$TMP/out.json" "$TMP/twice.json" >&2 || true
+    exit 1
+fi
 
 # No live file yet: fba-deploy copies instead of merging.
-if printf '%s\n' "$managed" | python3 "$MERGE" "$TMP/repo.json" "$TMP/missing.json" 2>/dev/null; then
+if python3 "$MERGE" "$TMP/repo.json" "$TMP/missing.json" 2>/dev/null; then
     echo "runtime-json merge: expected failure on a missing live file" >&2
     exit 1
 fi

@@ -209,25 +209,13 @@ project_shared_hooks() {
     done
 }
 
-repo_managed_hook_names() {
-    local dir
-    for dir in "$ROOT/llm/hooks" "$ROOT/claude/hooks" "$ROOT/codex/hooks"; do
-        [[ -d "$dir" ]] || continue
-        for hook in "$dir"/*.sh; do
-            [[ -f "$hook" ]] && basename "$hook"
-        done
-    done
-}
-
 # Project a repo-owned runtime JSON file (~/.claude/settings.json,
 # ~/.codex/hooks.json) without clobbering state this repo does not own.
 #
 # Both files are live runtime state: the Claude enterprise wrapper writes env
 # and auth keys into settings.json, cmux registers its own hooks in hooks.json,
-# and the dotfiles overlay adds internal guards. A plain copy silently dropped
-# all of it on every deploy. Repo-owned keys and hook registrations still win,
-# so retiring a hook here still removes it downstream -- a registration counts
-# as ours when its script is one of repo_managed_hook_names.
+# the dotfiles overlay adds internal guards, and a machine may opt into alert
+# hooks locally. A plain copy silently dropped all of it on every deploy.
 merge_runtime_json() {
     local source_path="$1"
     local dest_path="$2"
@@ -239,8 +227,7 @@ merge_runtime_json() {
 
     local merged
     merged="$(mktemp)"
-    if ! repo_managed_hook_names |
-        python3 "$ROOT/bin/fba-merge-runtime-json.py" "$source_path" "$dest_path" >"$merged"; then
+    if ! python3 "$ROOT/bin/fba-merge-runtime-json.py" "$source_path" "$dest_path" >"$merged"; then
         rm -f "$merged"
         echo "Failed to merge $source_path into $dest_path" >&2
         return 1
