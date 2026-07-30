@@ -183,16 +183,45 @@ link_path() {
         fi
         echo "Refusing to replace unmanaged projection: $dest_path" >&2
         return 1
-    elif [[ -f "$dest_path" ]] && cmp -s "$dest_path" "$source_target"; then
+    elif [[ -f "$dest_path" && ! -L "$dest_path" ]]; then
         # Re-adopt a byte-identical regular file. Harnesses materialise some
         # projections in place -- Claude Code rewrites ~/.claude/CLAUDE.md as a
         # regular file when user memory is edited -- which used to fail every
         # subsequent deploy with "unmanaged projection" even though the content
-        # was exactly what we would have linked to. Nothing can be lost by
-        # relinking a file we just proved identical, and the alternative is a
-        # deploy that stays broken until someone relinks by hand.
-        fba_log "re-adopting identical projection: $dest_path"
-        rm -f "$dest_path"
+        # was exactly what we would have linked to.
+        #
+        # Done by rename, never by delete-then-link. Comparing and then removing
+        # the same pathname is a race: the harness can rewrite the file between
+        # the two, and the removal would then discard content nobody had
+        # compared. It is also not recoverable if `ln -s` fails afterwards, which
+        # would leave the destination missing entirely.
+        #
+        # So: move the file aside first, compare the *moved* inode, and either
+        # link and drop the backup, or put the backup back untouched. Every exit
+        # path from here restores or replaces the destination.
+        local backup="$dest_path.fba-adopt.$$"
+        mv -f "$dest_path" "$backup" 2>/dev/null || {
+            echo "Refusing to replace unmanaged projection: $dest_path" >&2
+            return 1
+        }
+        if ! cmp -s "$backup" "$source_target"; then
+            mv -f "$backup" "$dest_path" 2>/dev/null || true
+            echo "Refusing to replace unmanaged projection: $dest_path" >&2
+            return 1
+        fi
+        if ! ln -s "$source_target" "$dest_path" 2>/dev/null; then
+            mv -f "$backup" "$dest_path" 2>/dev/null || true
+            echo "Projection link failed, restored the original: $dest_path" >&2
+            return 1
+        fi
+        fba_log "re-adopted identical projection: $dest_path"
+        rm -f "$backup"
+        dest_target="$(canonical_path "$dest_path")"
+        if [[ ! -L "$dest_path" || "$dest_target" != "$source_target" ]]; then
+            echo "Projection target did not resolve to its source: $dest_path" >&2
+            return 1
+        fi
+        return 0
     elif [[ -e "$dest_path" ]]; then
         echo "Refusing to replace unmanaged projection: $dest_path" >&2
         return 1
@@ -381,8 +410,23 @@ append_preserved_codex_config_sections() {
             sub(/^\[/, "", table)
             sub(/\]$/, "", table)
             keep = is_preserved_table(table) && !is_managed_table(table)
+            if (!keep) {
+                pending = 0
+            }
         }
+        # Hold blank lines back and only emit them once more kept content
+        # follows, so blanks between preserved tables survive but trailing ones
+        # are dropped. Printing them eagerly made every deploy preserve the
+        # previous run END blank and add another, growing the rendered config by
+        # one line per run.
         keep {
+            if ($0 ~ /^[[:space:]]*$/) {
+                pending++
+                next
+            }
+            for (; pending > 0; pending--) {
+                print ""
+            }
             print
             emitted = 1
         }

@@ -326,6 +326,29 @@ else
   fail "differing regular file was mishandled: $differ_out"
 fi
 
+# Adoption is done by rename, not delete-then-link, so no failure path may leave
+# the destination missing. Exercise link_path directly: driving a read-only
+# parent directory through a whole deploy is not worth the setup.
+relink_root="$TMP_ROOT/relink"
+mkdir -p "$relink_root/case-linkfail"
+{
+  printf 'set -uo pipefail\nfba_log() { :; }\n'
+  sed -n '/^canonical_path() {/,/^}/p' "$ROOT/bin/fba-deploy"
+  sed -n '/^link_path() {/,/^}/p' "$ROOT/bin/fba-deploy"
+} > "$relink_root/harness.sh"
+printf 'SOURCE CONTENT\n' > "$relink_root/source.md"
+printf 'SOURCE CONTENT\n' > "$relink_root/case-linkfail/dest.md"
+chmod 500 "$relink_root/case-linkfail"
+relink_out="$(cd "$relink_root" && . "$relink_root/harness.sh" && link_path "$relink_root/source.md" "$relink_root/case-linkfail/dest.md" 2>&1)" || true
+chmod 700 "$relink_root/case-linkfail"
+if [[ -f "$relink_root/case-linkfail/dest.md" ]] \
+  && [[ "$(cat "$relink_root/case-linkfail/dest.md")" == 'SOURCE CONTENT' ]] \
+  && ! ls "$relink_root/case-linkfail" | grep -q 'fba-adopt'; then
+  pass "adoption restores the original when linking fails"
+else
+  fail "adoption lost the destination when linking failed: $relink_out"
+fi
+
 missing_skills=()
 for skill_dir in "$ROOT"/llm/skills/*/; do
   name="$(basename "$skill_dir")"
