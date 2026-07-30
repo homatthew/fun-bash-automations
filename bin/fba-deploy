@@ -60,40 +60,95 @@ done
 
 "$ROOT/scripts/check-push-safety.sh"
 
-# Read a key from the existing rendered provider table so a deploy that runs
-# without CODEX_BASE_URL/CODEX_PROVIDER_NAME preserves whatever endpoint the
-# machine is already pointed at. Without this, a bare `fba-deploy` on a host
-# configured for a private gateway silently re-renders the template with the
-# public default and reroutes model traffic. Safe to read here: deploy_codex
-# resolves both values before render_codex_config replaces the file.
+# Read a key off the endpoint this machine is already pointed at, so a deploy
+# that runs without CODEX_BASE_URL/CODEX_PROVIDER_NAME preserves it. Without
+# this, a bare `fba-deploy` on a host configured for a private gateway silently
+# re-renders the template with the public default and reroutes model traffic.
+#
+# Two things this deliberately does not do cheaply. It resolves the table named
+# by the existing top-level `model_provider` rather than the first
+# `[model_providers.*]` it sees, because an unrelated (possibly public) provider
+# table must never override the selected one. And it parses with tomllib rather
+# than matching lines, because valid TOML takes shapes a regex quietly misses
+# (`base_url="x"`, quoted keys, indented headers, literal strings, inline
+# comments) and every miss here is a silent downgrade to the public endpoint.
+#
+# Exits non-zero when an existing config cannot be parsed, so callers fail
+# closed. Safe to read here: deploy_codex resolves both values before
+# render_codex_config replaces the file.
 codex_existing_provider_value() {
     local key="$1" config="$HOME/.codex/config.toml"
     [[ -f "$config" ]] || return 0
-    awk -v key="$key" '
-        /^\[model_providers\./ { in_provider = 1; next }
-        /^\[/ { in_provider = 0 }
-        in_provider && $1 == key {
-            sub(/^[^=]*=[[:space:]]*/, "")
-            gsub(/^"|"$/, "")
-            print
-            exit
-        }
-    ' "$config"
+    python3 - "$config" "$key" <<'PY'
+import sys
+import tomllib
+
+config_path, key = sys.argv[1:]
+try:
+    with open(config_path, "rb") as handle:
+        config = tomllib.load(handle)
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"cannot parse {config_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+selected = config.get("model_provider")
+if not isinstance(selected, str):
+    raise SystemExit(0)
+value = config.get("model_providers", {}).get(selected, {}).get(key)
+if isinstance(value, str) and value:
+    print(value)
+PY
+}
+
+# The authoritative fail-closed gate, called from deploy_codex before anything
+# is rendered. It runs as a plain command rather than inside a command
+# substitution, so `exit` ends the deploy for real -- an `exit` from a `$(...)`
+# subshell only sets that subshell's status, which would leave the abort
+# depending on the caller's `set -e`. Skipped when both values are supplied
+# explicitly, since then nothing is read from the existing config.
+codex_require_readable_config() {
+    local config="$HOME/.codex/config.toml"
+    [[ -f "$config" ]] || return 0
+    [[ -n "${CODEX_BASE_URL:-}" && -n "${CODEX_PROVIDER_NAME:-}" ]] && return 0
+    if ! codex_existing_provider_value base_url >/dev/null; then
+        codex_unreadable_config_error
+    fi
+}
+
+codex_unreadable_config_error() {
+    echo "fba-deploy: refusing to rewrite the Codex provider table from an unreadable ~/.codex/config.toml." >&2
+    echo "  Set CODEX_BASE_URL and CODEX_PROVIDER_NAME explicitly, or repair the file, then retry." >&2
+    exit 1
+}
+
+# Secondary guard for direct callers that skip the gate above. Here `exit` only
+# leaves the subshell, so the abort still leans on `set -e` in the parent -- kept
+# because a wrong value is worse than a redundant check.
+codex_preserved_provider_value() {
+    local key="$1" value
+    if ! value="$(codex_existing_provider_value "$key")"; then
+        codex_unreadable_config_error
+    fi
+    printf '%s' "$value"
 }
 
 codex_base_url() {
     local value="${CODEX_BASE_URL:-}"
     if [[ -z "$value" ]]; then
-        value="$(codex_existing_provider_value base_url)"
-        # >&2 so the note can never land in the captured command substitution.
-        [[ -n "$value" ]] && fba_log "preserving existing Codex base_url (CODEX_BASE_URL unset)" >&2
+        value="$(codex_preserved_provider_value base_url)"
+        if [[ -n "$value" ]]; then
+            # >&2 so the note can never land in the captured command substitution.
+            fba_log "preserving existing Codex base_url (CODEX_BASE_URL unset)" >&2
+        fi
     fi
     printf '%s\n' "${value:-https://api.openai.com/v1}"
 }
 
 codex_provider_name() {
     local value="${CODEX_PROVIDER_NAME:-}"
-    [[ -n "$value" ]] || value="$(codex_existing_provider_value name)"
+    if [[ -z "$value" ]]; then
+        value="$(codex_preserved_provider_value name)"
+    fi
     printf '%s\n' "${value:-OpenAI}"
 }
 
@@ -464,6 +519,7 @@ deploy_claude() {
 
 deploy_codex() {
     local base_url provider_name
+    codex_require_readable_config
     base_url="$(codex_base_url)"
     provider_name="$(codex_provider_name)"
 
