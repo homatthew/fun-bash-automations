@@ -85,6 +85,11 @@ This package will be passed verbatim to both sub-agents.
 
 Use the runtime-specific launch path below. In both paths, reviewers get the same context package and should not see each other's intermediate findings.
 
+If the user also requests a Cursor-model opinion, run it as a separate dissent
+leg with `$cursor-sub-review` after the native reviewers. Cursor legs run
+sequentially because worktrees do not isolate Cursor's user-level CLI config.
+Verify Cursor findings against the actual diff before consolidation.
+
 ### Claude Runtime Launch Path
 
 When running inside Claude Code, spawn **both agents in a single message** so they run in parallel. Each gets fresh context — no carry-over from the main conversation.

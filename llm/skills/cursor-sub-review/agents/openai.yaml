@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cursor Sub-Review"
+  short_description: "Run reliable read-only Cursor review legs"
+  default_prompt: "Use $cursor-sub-review to run an independent Cursor review of this change."
