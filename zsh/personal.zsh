@@ -810,6 +810,11 @@ ssh-command-gate-list() {
     done < "$lease_file"
 }
 
+# The shared baseline never ships permission-bypassing defaults. Personal
+# variants that pass --dangerously-skip-permissions /
+# --dangerously-bypass-approvals-and-sandbox belong in the private overlay
+# (dotfiles config/zsh/netflix.zsh), which is sourced after this file and can
+# override these. See the Install Boundary in AGENTS.md.
 alias cld='claude'
 alias cldr='claude --resume'
 alias cursor='cursor-agent'
