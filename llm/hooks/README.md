@@ -19,8 +19,41 @@ or future opt-in.
 | `notify-slack.sh` | Stop, Notification | macOS banner + Slack `chat.postMessage`. Threads by (repo, branch). |
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on a push/delivery event. |
 | `beads-prime.sh` | SessionStart, PreCompact | Emits `bd prime` task context when the shared Beads DB exists. This is context plumbing, not a style/personality hook. |
+| `self-review-guard.sh` | Stop | Prompts for an independent-model code review when the pending diff warrants one. See below. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
 | `slack-push-event.sh` | (off by default) | Slack variant of notify-push-event; disabled pending explicit opt-in. |
+
+## self-review-guard.sh
+
+Registered on `Stop` in `claude/settings.json`. It asks the agent to send the
+pending diff to an independent reviewer model before finishing.
+
+It is deliberately weak in two ways, and both are the point — a check that fires
+on every change and cannot be escaped stops being a safety net and becomes
+something to route around:
+
+- **Proportional.** Silent unless the diff earns attention: a sensitive surface
+  (hooks, guards, auth, credentials, crypto, workflows, migrations, policy), or a
+  wide diff (`FBA_REVIEW_MAX_FILES`, default 15; `FBA_REVIEW_MAX_LINES`, default
+  400). Editing branches — `wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`,
+  and any `*yolo/` — are exempt outright. Documentation-only diffs never count as
+  sensitive.
+- **Escapable.** Blocks at most once per distinct diff, and its own message tells
+  the agent that `skipping review: <reason>` is a legitimate answer. Any further
+  edit changes the diff fingerprint and re-arms it.
+
+State lives in `<git-dir>/fba-self-review.log`, capped at 200 lines. The Stop
+path always exits 0, so a bug here cannot wedge a session.
+
+```sh
+self-review-guard.sh --status          # diff fingerprint, state, and trigger
+self-review-guard.sh --mark-reviewed   # record a review you actually ran
+FBA_SELF_REVIEW_GUARD=0                # disable for a session
+```
+
+This hook only ever asks for a code review. The hard controls —
+protected-branch pushes, force-pushes, `--no-verify` — stay with
+`bash-safety-guard.sh` and the git-level pre-push hook, and are not proportional.
 
 `bash-safety-guard.sh` also runs optional private extensions from
 `bash-safety-guard.d/*.sh` next to the projected hook. Keep confidential

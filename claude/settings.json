@@ -47,6 +47,18 @@
         ],
         "matcher": ""
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/self-review-guard.sh",
+            "timeout": 20,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
     ]
   },
   "model": "claude-opus-4-7[1m]",
