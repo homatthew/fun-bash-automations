@@ -125,28 +125,6 @@ asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
 
-### State the boundary, not just the goal
-
-`--intent` is the only scope signal the review, fix, and document agents get. A
-goal-only intent reads as an invitation: the fixer is told to fix the deepest
-practical cause and to worry about the same class of bug elsewhere, so anything
-you leave unstated becomes fair game. Name the edges explicitly:
-
-- **Objective** - what the user set out to accomplish, in their terms.
-- **In scope** - the surfaces, endpoints, backends, or files this change may touch.
-- **Out of scope** - adjacent surfaces you deliberately did *not* touch, and why.
-  Be concrete: "derived keys for leases, scan metadata, and continuation tokens
-  are follow-ups, not part of this fix."
-- **Settled decisions** - choices already made that must not be relitigated,
-  including ones that look wrong without context.
-- **Budget** - roughly how big this should be ("a focused fix in 2-3 files"),
-  so later rounds have something to measure growth against.
-
-Treat this as immutable for the run. Reviewer discoveries do not rewrite the
-objective; they become follow-ups unless the user widens the scope. If the user
-does widen it, restate the whole boundary in the next `--intent` rather than
-letting it drift silently.
-
 ## Validate and decide
 
 Run the pipeline and decide on its findings as they come up:
@@ -203,40 +181,6 @@ Run the pipeline and decide on its findings as they come up:
    # skip this step
    no-mistakes axi respond --action skip
    ```
-   Before you send `--action fix`, classify each finding you are about to
-   authorize against the boundary you stated in `--intent`:
-
-   - **In-intent blocker** - the change is wrong or unsafe for its stated
-     objective. Fix it now.
-   - **Regression introduced by this diff** - this run broke something that
-     worked before. Fix it now.
-   - **Adjacent** - a real problem in code this change merely sits near, or the
-     same class of bug on a surface you declared out of scope. **Do not fix it
-     in this run.** Note it for a follow-up and leave it out of `--findings`.
-   - **Cleanup** - naming, comments, formatting, or docs on files this change
-     did not otherwise touch. Leave it.
-
-   Only the first two belong in `--findings`. The `action` field tells you how
-   the pipeline classified a finding's *risk*; it does not tell you whether
-   fixing it is inside the user's scope. That judgment is yours, and
-   `--action fix` on an adjacent finding is how a narrow fix turns into a
-   sprawling one. When a finding is adjacent but you think it genuinely should
-   be fixed now, that is a scope change - ask the user, do not decide it at the
-   gate.
-
-   Watch cumulative growth, not just the last round. Before each fix round,
-   compare the current diff against the budget you stated:
-
-   ```sh
-   git diff --shortstat $(git merge-base HEAD origin/main)
-   ```
-
-   Round-by-round each step looks reasonable; the damage is cumulative. If the
-   diff has grown past roughly double your stated budget, stop and reconcile
-   with the user before authorizing more fixes. A narrow fix that has quietly
-   become a large one is worth a sentence to the user even when every individual
-   round was defensible.
-
    While a run is active, never fix findings by editing the code yourself -
    the pipeline owns both the findings and the fixes. Your job at a gate is to
    decide and respond; `--action fix` has the pipeline apply the fix and
@@ -310,49 +254,6 @@ format - what was validated and what was found. If the output includes a
 acknowledge those misses and explicitly list each fix so the user can easily
 review them.
 
-## Keep the delivered change proportional
-
-The review gate is not the only place scope leaks. Check these before the run
-pushes.
-
-**Test proportionality.** Automated rounds add a test per RPC or per call site,
-which produces many near-identical cases that all prove the same thing. Prefer
-one test per distinct code path: if several endpoints funnel through the same
-validation or helper, one case covers them, plus a case for each path that
-genuinely bypasses it. When test additions run past roughly twice the
-implementation additions, that is a signal to compress rather than approve.
-
-**Document write-set.** When the document step gates, look at what it actually
-touched, not just whether the prose reads well:
-
-```sh
-git show --stat HEAD
-```
-
-Push back on edits to functional code, global policy files (`AGENTS.md`,
-`.agents/rules/**`, `CLAUDE.md`), or unrelated docs unless policy work was in
-your stated intent - a fix should not quietly rewrite the repo's standing rules.
-Also watch for whitespace-only churn: a trailing-newline or reflow edit to a file
-the change did not otherwise touch adds diff noise and reviewer confusion for no
-benefit. And confirm the step did not *delete* documentation an earlier round
-added; a later consolidation pass can leave a doc deliverable unmet.
-
-**History.** The pipeline commits per gate, so a finished run can carry a long
-tail of `no-mistakes(review):` and `no-mistakes(document):` commits, plus commits
-that only repair earlier rounds. That history documents the pipeline, not the
-change. Before the PR is reviewed, reshape it into a small number of commits
-organized by domain - implementation, tests, docs - and verify you did not alter
-the result:
-
-```sh
-git diff <old-head> HEAD --stat   # must be empty
-```
-
-If rounds have rewritten each other enough that an interactive rebase is
-painful, rebuilding the branch from the base and re-applying the final state as
-clean commits is usually faster and safer. Never drop a pipeline fix while
-reshaping: the tree must come out identical.
-
 ## Escalate `ask-user` findings
 
 A gate whose findings are all `auto-fix` or `no-op` is safe to drive on your
@@ -393,20 +294,6 @@ no-mistakes axi logs --step <name> --full   # full log output of one step
 no-mistakes axi abort         # cancel the current-branch active run
 no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside its worktree)
 ```
-
-An active run advances the branch on its own, so any SHA you quote goes stale
-without warning. When you hand the branch to a reviewer - a person, another
-agent, or yourself in a later session - name the pushed SHA rather than saying
-"the branch", and have the reviewer work from that SHA. When review findings come
-back, re-verify the current head before acting on them:
-
-```sh
-git ls-remote origin <branch>   # authoritative head
-```
-
-If it moved, check the intervening commits before treating any finding as open:
-the run may have already fixed it, and re-fixing a resolved finding is its own
-source of churn.
 
 ## Reading the output
 
