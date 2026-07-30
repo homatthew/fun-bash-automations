@@ -4,6 +4,13 @@
 # never invokes macOS binaries.
 set -euo pipefail
 
+# This suite asserts what the *portable public baseline* projects, so it must not
+# inherit the developer's private overlay. fba-deploy falls back to these when
+# rendering codex/config.toml, and a workspace shell exports them (Netflix Model
+# Gateway), which made "Codex defaults to the portable OpenAI provider" fail on
+# exactly the machine it exists to protect.
+unset CODEX_BASE_URL CODEX_PROVIDER_NAME
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d -t fba-projection-XXXXXX)"
 TMP_HOME="$TMP_ROOT/home"
@@ -283,6 +290,40 @@ elif [[ "$collision_out" == *"Refusing to replace unmanaged projection"* ]]; the
   pass "managed projection rejects an existing directory collision"
 else
   fail "managed projection collision failure was unclear: $collision_out"
+fi
+
+# A byte-identical regular file where a symlink belongs is re-adopted, not
+# refused. Claude Code rewrites ~/.claude/CLAUDE.md as a regular file whenever
+# user memory is edited, which used to break every later deploy even though the
+# content was exactly the projection source.
+adopt_home="$TMP_ROOT/adopt-home"
+mkdir -p "$adopt_home/.claude"
+cp "$ROOT/claude/CLAUDE.md" "$adopt_home/.claude/CLAUDE.md"
+if adopt_out="$(HOME="$adopt_home" FBA_DEPLOY_SKIP_GIT_HOOK=1 FBA_DEPLOY_SKIP_MAC_EXTRAS=1 \
+  "$ROOT/bin/fba-deploy" --claude-only 2>&1)"; then
+  if [[ -L "$adopt_home/.claude/CLAUDE.md" ]] \
+    && [[ "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$adopt_home/.claude/CLAUDE.md")" == "$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$ROOT/claude/CLAUDE.md")" ]]; then
+    pass "identical regular file is re-adopted as a managed symlink"
+  else
+    fail "identical regular file was not relinked: $(ls -l "$adopt_home/.claude/CLAUDE.md")"
+  fi
+else
+  fail "deploy failed against an identical regular file: $adopt_out"
+fi
+
+# ...but a file whose content differs is still refused, so real local edits are
+# never silently discarded.
+differ_home="$TMP_ROOT/differ-home"
+mkdir -p "$differ_home/.claude"
+printf '%s\n' 'locally modified, do not clobber' > "$differ_home/.claude/CLAUDE.md"
+if differ_out="$(HOME="$differ_home" FBA_DEPLOY_SKIP_GIT_HOOK=1 FBA_DEPLOY_SKIP_MAC_EXTRAS=1 \
+  "$ROOT/bin/fba-deploy" --claude-only 2>&1)"; then
+  fail "deploy must refuse a differing regular file"
+elif [[ "$differ_out" == *"Refusing to replace unmanaged projection"* ]] \
+  && [[ "$(cat "$differ_home/.claude/CLAUDE.md")" == 'locally modified, do not clobber' ]]; then
+  pass "differing regular file is refused and left untouched"
+else
+  fail "differing regular file was mishandled: $differ_out"
 fi
 
 missing_skills=()

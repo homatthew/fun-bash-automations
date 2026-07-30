@@ -60,12 +60,41 @@ done
 
 "$ROOT/scripts/check-push-safety.sh"
 
+# Read a key from the existing rendered provider table so a deploy that runs
+# without CODEX_BASE_URL/CODEX_PROVIDER_NAME preserves whatever endpoint the
+# machine is already pointed at. Without this, a bare `fba-deploy` on a host
+# configured for a private gateway silently re-renders the template with the
+# public default and reroutes model traffic. Safe to read here: deploy_codex
+# resolves both values before render_codex_config replaces the file.
+codex_existing_provider_value() {
+    local key="$1" config="$HOME/.codex/config.toml"
+    [[ -f "$config" ]] || return 0
+    awk -v key="$key" '
+        /^\[model_providers\./ { in_provider = 1; next }
+        /^\[/ { in_provider = 0 }
+        in_provider && $1 == key {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            gsub(/^"|"$/, "")
+            print
+            exit
+        }
+    ' "$config"
+}
+
 codex_base_url() {
-    printf '%s\n' "${CODEX_BASE_URL:-https://api.openai.com/v1}"
+    local value="${CODEX_BASE_URL:-}"
+    if [[ -z "$value" ]]; then
+        value="$(codex_existing_provider_value base_url)"
+        # >&2 so the note can never land in the captured command substitution.
+        [[ -n "$value" ]] && fba_log "preserving existing Codex base_url (CODEX_BASE_URL unset)" >&2
+    fi
+    printf '%s\n' "${value:-https://api.openai.com/v1}"
 }
 
 codex_provider_name() {
-    printf '%s\n' "${CODEX_PROVIDER_NAME:-OpenAI}"
+    local value="${CODEX_PROVIDER_NAME:-}"
+    [[ -n "$value" ]] || value="$(codex_existing_provider_value name)"
+    printf '%s\n' "${value:-OpenAI}"
 }
 
 canonical_path() {
@@ -99,6 +128,16 @@ link_path() {
         fi
         echo "Refusing to replace unmanaged projection: $dest_path" >&2
         return 1
+    elif [[ -f "$dest_path" ]] && cmp -s "$dest_path" "$source_target"; then
+        # Re-adopt a byte-identical regular file. Harnesses materialise some
+        # projections in place -- Claude Code rewrites ~/.claude/CLAUDE.md as a
+        # regular file when user memory is edited -- which used to fail every
+        # subsequent deploy with "unmanaged projection" even though the content
+        # was exactly what we would have linked to. Nothing can be lost by
+        # relinking a file we just proved identical, and the alternative is a
+        # deploy that stays broken until someone relinks by hand.
+        fba_log "re-adopting identical projection: $dest_path"
+        rm -f "$dest_path"
     elif [[ -e "$dest_path" ]]; then
         echo "Refusing to replace unmanaged projection: $dest_path" >&2
         return 1
