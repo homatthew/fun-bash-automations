@@ -7,9 +7,17 @@
 # Install oh-my-zsh if not present:
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
 
-# Disable auto-title from oh-my-zsh and Claude Code
+# Disable auto-title from oh-my-zsh, which would otherwise fight the hook below.
 DISABLE_AUTO_TITLE="true"
-export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
+
+# Claude Code's own title updates are deliberately left alone. Herdr reads the
+# braille spinner out of that OSC title to tell working from idle, so suppressing
+# it (CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1, which used to live here) pinned every
+# Claude pane to idle -- Herdr renders that as "done" mid-turn. Ghostty's
+# shell-integration-features = no-title is what actually stops title clobbering;
+# the env var only enforced a preference, and it cost more than it bought.
+# See .context/ghostty-title.md.
+# The hook below still owns the title in plain shell panes.
 
 # Terminal title: shows "dirname (branch)" or just "dirname" if not in git repo
 # Works with Ghostty (requires shell-integration-features = no-title)
