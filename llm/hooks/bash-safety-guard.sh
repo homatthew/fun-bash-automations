@@ -881,6 +881,72 @@ is_yolo_remote_token() {
   return 1
 }
 
+# The delivery branch configured for this repository in direct_push_exceptions,
+# or nothing. Repositories are matched by the basename of the worktree root,
+# which is how agent-push-policy.json names them.
+#
+# This is what makes `git push origin main` possible at all in a direct-delivery
+# repository. The policy file has described these exceptions for a long time, but
+# no guard read them, so the agent layer denied every protected-branch push and
+# all work was forced onto long-lived branches.
+direct_delivery_branch_for_repo() {
+  direct_delivery_field_for_repo delivery_branch
+}
+
+# The delivery remote for this repository, defaulting to origin when the policy
+# entry does not name one. Without this the exception was branch-exact but
+# remote-blind, so `git push upstream HEAD:main` was accepted -- publishing the
+# delivery branch to a remote that was never sanctioned.
+direct_delivery_remote_for_repo() {
+  local remote
+  remote="$(direct_delivery_field_for_repo delivery_remote)"
+  printf '%s\n' "${remote:-origin}"
+}
+
+direct_delivery_field_for_repo() {
+  local field="$1" policy_path root repo_name
+  policy_path=$(agent_push_policy_path)
+  [[ -f "$policy_path" ]] || return 0
+  # git_context, not bare git: the hook payload can name a workdir, and repo
+  # identity must follow it the same way every other check in this file does.
+  root="$(git_context rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [[ -n "$root" ]] || return 0
+  repo_name="${root##*/}"
+  jq -r --arg repo "$repo_name" --arg field "$field" '
+    (.direct_push_exceptions // [])
+    | map(select(.repo == $repo and (.delivery_branch // "") != ""))
+    | .[0][$field] // empty
+  ' "$policy_path" 2>/dev/null
+}
+
+# True only for an exact, non-destructive push of this repository's configured
+# delivery branch to its configured delivery remote. Force, delete, bare,
+# multi-ref and expansion-bearing pushes are all rejected before this is
+# consulted, so this only ever widens the plain single-branch case.
+is_configured_direct_delivery_push() {
+  local target_branch="$1" configured_branch configured_remote actual_remote
+  [[ -n "$target_branch" ]] || return 1
+
+  # Refuse the exception outright for any push that redirects which repository
+  # it acts on. Repo identity here is resolved from the working directory, so a
+  # `git -C <elsewhere> push origin main` run from inside a direct-delivery
+  # repository would otherwise borrow this repository's exception and deliver to
+  # an unrelated one. Direct delivery is a plain push from the repository
+  # itself; declining to parse the redirect is both simpler and stricter than
+  # trying to follow it.
+  if printf '%s' "$GIT_COMMAND" \
+     | grep -Eq '(^|[[:space:]])(-C([[:space:]]|=)|--git-dir|--work-tree|--namespace)'; then
+    return 1
+  fi
+
+  configured_branch="$(direct_delivery_branch_for_repo)"
+  [[ -n "$configured_branch" ]] || return 1
+  [[ "$target_branch" == "$configured_branch" ]] || return 1
+  configured_remote="$(direct_delivery_remote_for_repo)"
+  actual_remote="$(git_push_remote_from_command)"
+  [[ -n "$actual_remote" && "$actual_remote" == "$configured_remote" ]]
+}
+
 scratch_branch_prefixes() {
   local policy_path
   policy_path=$(agent_push_policy_path)
@@ -2846,7 +2912,16 @@ check_push_guard() {
   target_branch=$(git_push_target_branch_from_command)
   case "$target_branch" in
     main|master|develop|trunk)
-      deny "Blocked: pushing directly to ${target_branch} is not allowed. Deliver protected branches through no-mistakes."
+      # A repository listed in direct_push_exceptions delivers on its configured
+      # branch, so an exact push of that branch is the sanctioned delivery path
+      # rather than a violation. Everything destructive is still refused: force
+      # forms are handled by check_git_force, and the __DELETE__/__MULTI__/
+      # __BROAD__/__DYNAMIC__ shapes never reach this arm.
+      if is_configured_direct_delivery_push "$target_branch"; then
+        :
+      else
+        deny "Blocked: pushing directly to ${target_branch} is not allowed. Deliver protected branches through no-mistakes."
+      fi
       ;;
     ""|__MULTI__|__MULTI_PUSH__|__BROAD__)
       deny "Blocked: bare git push is not allowed. Name the target branch explicitly, e.g. git push origin <branch>."

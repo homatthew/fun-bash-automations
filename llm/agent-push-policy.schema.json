@@ -257,6 +257,7 @@
         "properties": {
           "repo": { "type": "string", "minLength": 1 },
           "delivery_branch": { "type": "string", "minLength": 1 },
+          "delivery_remote": { "type": "string", "minLength": 1 },
           "requires_explicit_user_ask": { "type": "boolean", "const": true },
           "disallow_pr_to_main": { "type": "boolean", "const": true }
         }

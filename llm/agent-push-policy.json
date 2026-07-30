@@ -81,6 +81,7 @@
     {
       "repo": "fun-bash-automations",
       "delivery_branch": "main",
+      "delivery_remote": "origin",
       "requires_explicit_user_ask": true,
       "disallow_pr_to_main": true
     }

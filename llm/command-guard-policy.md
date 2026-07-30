@@ -47,11 +47,23 @@ Codex, and future harnesses.
 - Require explicit user approval before any delivery or PR-eligible push.
   Non-delivery scratch branch pushes are governed by the scratch branch class
   below.
-- Block direct pushes to protected base refs. The only exceptions are exact,
-  configured direct-delivery pushes after explicit user approval and the
-  no-mistakes gate. The git-level main pre-push hook enforces this even for
-  external binaries (gnhf, no-mistakes); the agent-layer guard is
-  defense-in-depth.
+- Block direct pushes to protected base refs. The one exception is an exact
+  configured direct-delivery push, after explicit user approval.
+  `direct_push_exceptions` in `llm/agent-push-policy.json` names the repository,
+  its `delivery_branch`, and its `delivery_remote`; the guard reads that entry
+  and permits **only** that combination. It refuses:
+  - any other protected ref, even in a direct-delivery repository;
+  - any other remote for the delivery branch;
+  - force, `--force-with-lease`, leading-plus, and delete forms;
+  - bare, multi-ref, and expansion-bearing pushes;
+  - any push that redirects which repository it acts on (`-C`, `--git-dir`,
+    `--work-tree`, `--namespace`), since repo identity is resolved from the
+    working directory and would otherwise be borrowed by an unrelated repo.
+- **Enforcement note.** The agent-layer guard is the only layer actually
+  enforcing this in a checkout with no installed `pre-push` hook. Earlier wording
+  here claimed a git-level main pre-push hook enforced it "even for external
+  binaries"; that hook is a separate, privately-owned asset and is not
+  necessarily installed. Do not rely on a second layer existing.
 - Deliver feature branches through the `/ship` skill at the validation tier the
   change warrants; see Gate Selection in `llm/AGENTS.md`. Validation ceremony is
   proportional to risk and an agent may decline a review leg with a stated

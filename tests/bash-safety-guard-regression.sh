@@ -416,9 +416,56 @@ printf '%s\n' "${GUARD_GH_PRS:-[]}"
 SH
 chmod +x "$guard_bin/gh"
 export PATH="$guard_bin:$PATH"
-fba_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin main")
-expect_contains "$fba_push_block" "Deliver protected branches through no-mistakes"
-echo "ok 59 - ordinary fun-bash-automations main push is blocked"
+# This repository is listed in direct_push_exceptions with delivery_branch main,
+# so an exact push of main is its sanctioned delivery path, not a violation.
+# These assertions previously required the opposite; the policy file described
+# the exception all along but no guard read it, which forced every change onto a
+# long-lived branch.
+fba_push_allow=$(run_guard_with_workdir "$fba_repo" "git push origin main")
+[[ -z "$fba_push_allow" ]] || fail "expected the configured direct-delivery main push to be allowed, got: $fba_push_allow"
+echo "ok 59 - configured fun-bash-automations main push is allowed"
+
+# The exception is branch-exact: other protected refs stay blocked here.
+fba_master_block=$(run_guard_with_workdir "$fba_repo" "git push origin master")
+expect_contains "$fba_master_block" "pushing directly to master is not allowed"
+fba_develop_block=$(run_guard_with_workdir "$fba_repo" "git push origin develop")
+expect_contains "$fba_develop_block" "pushing directly to develop is not allowed"
+echo "ok 59a2 - the exception covers only the configured delivery branch"
+
+# ...and it never permits a destructive form of that push.
+fba_force_main_block=$(run_guard_with_workdir "$fba_repo" "git push --force origin main")
+[[ -n "$fba_force_main_block" ]] || fail "expected a force push to main to stay blocked"
+fba_lease_main_block=$(run_guard_with_workdir "$fba_repo" "git push --force-with-lease origin main")
+[[ -n "$fba_lease_main_block" ]] || fail "expected a force-with-lease push to main to stay blocked"
+fba_plus_main_block=$(run_guard_with_workdir "$fba_repo" "git push origin +main:main")
+[[ -n "$fba_plus_main_block" ]] || fail "expected a leading-plus refspec to main to stay blocked"
+fba_delete_main_block=$(run_guard_with_workdir "$fba_repo" "git push origin --delete main")
+[[ -n "$fba_delete_main_block" ]] || fail "expected deleting remote main to stay blocked"
+echo "ok 59a3 - destructive pushes to the delivery branch stay blocked"
+
+# An unlisted repository gets no exception, even with the same branch name.
+other_repo="$TEST_TMP/some-service"
+git init -q "$other_repo"
+git -C "$other_repo" checkout -q -b main
+other_main_block=$(run_guard_with_workdir "$other_repo" "git push origin main")
+expect_contains "$other_main_block" "pushing directly to main is not allowed"
+echo "ok 59a4 - unlisted repositories still cannot push to main"
+
+# Repo identity is resolved from the working directory, so a push that redirects
+# which repository it acts on must not borrow this repository's exception.
+fba_dashc_other_block=$(run_guard_with_workdir "$fba_repo" "git -C $other_repo push origin main")
+expect_contains "$fba_dashc_other_block" "pushing directly to main is not allowed"
+fba_gitdir_block=$(run_guard_with_workdir "$fba_repo" "git --git-dir=$other_repo/.git push origin main")
+expect_contains "$fba_gitdir_block" "pushing directly to main is not allowed"
+fba_worktree_block=$(run_guard_with_workdir "$fba_repo" "git --work-tree=$other_repo push origin main")
+expect_contains "$fba_worktree_block" "pushing directly to main is not allowed"
+echo "ok 59a5 - a directory-redirecting push cannot borrow the delivery exception"
+
+# The exception is remote-exact: the delivery branch may only go to its
+# configured remote.
+fba_upstream_main_block=$(run_guard_with_workdir "$fba_repo" "git push upstream main")
+expect_contains "$fba_upstream_main_block" "pushing directly to main is not allowed"
+echo "ok 59a6 - the delivery branch cannot be pushed to an unconfigured remote"
 
 fba_bare_push_block=$(run_guard_with_workdir "$fba_repo" "git push")
 expect_contains "$fba_bare_push_block" "bare git push is not allowed"
@@ -463,9 +510,9 @@ fba_push_redir_pipe_allow=$(run_guard_with_workdir "$fba_repo" "git push origin 
 [[ -z "$fba_push_redir_pipe_allow" ]] || fail "expected feature push with 2>&1 | tail to be allowed, got: $fba_push_redir_pipe_allow"
 echo "ok 60c - git push of a feature branch with 2>&1 | tail is allowed"
 
-fba_main_redir_block=$(NO_MISTAKES_GATE=1 run_guard_with_workdir "$fba_repo" "git push origin main 2>&1")
-expect_contains "$fba_main_redir_block" "Deliver protected branches through no-mistakes"
-echo "ok 60d - redirected FBA main push stays blocked outside the gate"
+fba_main_redir_allow=$(NO_MISTAKES_GATE=1 run_guard_with_workdir "$fba_repo" "git push origin main 2>&1")
+[[ -z "$fba_main_redir_allow" ]] || fail "expected a redirected direct-delivery main push to be allowed, got: $fba_main_redir_allow"
+echo "ok 60d - redirected FBA main push is allowed as configured delivery"
 
 quoted_push_text_allow=$(run_guard_with_workdir "$fba_repo" 'rg -n "git push no-mistakes" README.md')
 [[ -z "$quoted_push_text_allow" ]] || fail "expected quoted git-push search text to be allowed, got: $quoted_push_text_allow"
@@ -478,8 +525,8 @@ fba_multiline_feature=$(run_guard_with_workdir "$fba_repo" $'echo prep\ngit push
 echo "ok 60e - git push on its own line in a multi-line script is allowed"
 
 fba_multiline_main=$(NO_MISTAKES_GATE=1 run_guard_with_workdir "$fba_repo" $'echo prep\ngit push origin main')
-expect_contains "$fba_multiline_main" "Deliver protected branches through no-mistakes"
-echo "ok 60f - multi-line FBA main push stays blocked outside the gate"
+[[ -z "$fba_multiline_main" ]] || fail "expected a multi-line direct-delivery main push to be allowed, got: $fba_multiline_main"
+echo "ok 60f - multi-line FBA main push is allowed as configured delivery"
 
 scratch_push_block=$(run_guard_with_workdir "$fba_repo" "git push origin wip/agent/checkpoint")
 expect_contains "$scratch_push_block" "scratch branch pushes require Remote Scratch Mode"

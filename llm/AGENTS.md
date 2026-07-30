@@ -64,7 +64,11 @@ Mentor Mode optimizes for learning and reviewability over speed.
   If old local history is not suitable for publication, rebuild the intended
   snapshot on the current public `main` and keep private content in `dotfiles`.
 - Do not create, reopen, or mark ready PRs for `fun-bash-automations`; `main`
-  is its direct-push delivery branch.
+  is its direct-push delivery branch. Fix forward on `main` rather than opening a
+  long-lived branch: `git push origin main` is the sanctioned command, and the
+  guard permits exactly that repo/branch/remote combination from
+  `direct_push_exceptions`. For parallel work, give each agent a `treehouse`
+  worktree landing small commits on `main`, rather than a shared branch.
 - Ship feature work through the `/ship` skill, at the ceremony level the change
   warrants (see [Gate Selection](#gate-selection-match-ceremony-to-risk)). For
   breadth across many tasks use `firstmate`; for a long-run single-objective

@@ -16,9 +16,20 @@ canonical instruction entrypoint.
 
 ## Repository Delivery Policy
 
-- This repository delivers directly on `main`; there is no PR gate.
+- This repository delivers directly on `main`; there is no PR gate. **Fix
+  forward on `main`** — do not open long-lived branches here. A long-lived branch
+  accumulates unaudited history, makes parallel sessions collide, and turns
+  delivery into a rewrite exercise.
 - After the user explicitly asks to push or invokes an explicit finish workflow,
-  push directly with an explicit branch target, e.g. `git push origin main`.
+  push directly with an explicit branch target: `git push origin main`. The guard
+  permits exactly that combination for this repository, per
+  `direct_push_exceptions` in `llm/agent-push-policy.json`. Force forms, other
+  remotes, other protected refs, bare pushes, and directory-redirecting pushes
+  (`-C`, `--git-dir`, `--work-tree`) all stay blocked.
+- **Parallel sessions use worktrees, not branches.** If several agents work here
+  at once, give each one a `treehouse` worktree and let each land small commits on
+  `main`. Sharing one checkout is what causes files to change underneath a
+  running session; a shared branch does not fix that and a worktree does.
 - The finish-the-job entrypoint is the `/ship` skill for a single change. It runs
   the repository's own checks plus an independent-model code review, at the tier
   the change warrants — see Gate Selection in `llm/AGENTS.md`. Validation is
