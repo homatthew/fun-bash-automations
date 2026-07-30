@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage No-Mistakes"
+  short_description: "Safely remove or restore a repository gate"
+  default_prompt: "Use $disable-no-mistakes to safely remove or restore this repository's no-mistakes integration."
