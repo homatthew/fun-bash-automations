@@ -461,6 +461,15 @@ fba_worktree_block=$(run_guard_with_workdir "$fba_repo" "git --work-tree=$other_
 expect_contains "$fba_worktree_block" "pushing directly to main is not allowed"
 echo "ok 59a5 - a directory-redirecting push cannot borrow the delivery exception"
 
+# ...but the redirect check is scoped to the push segment. An unrelated `git -C`
+# elsewhere in a compound command must not void the exception, or ordinary
+# main-forward work becomes unpushable.
+fba_unrelated_dashc_allow=$(run_guard_with_workdir "$fba_repo" "git push origin main; git -C $other_repo status")
+[[ -z "$fba_unrelated_dashc_allow" ]] || fail "an unrelated git -C must not void the delivery exception, got: $fba_unrelated_dashc_allow"
+fba_chained_allow=$(run_guard_with_workdir "$fba_repo" "git status && git push origin main && echo done")
+[[ -z "$fba_chained_allow" ]] || fail "a chained delivery push must be allowed, got: $fba_chained_allow"
+echo "ok 59a5b - the redirect check is scoped to the push segment"
+
 # The exception is remote-exact: the delivery branch may only go to its
 # configured remote.
 fba_upstream_main_block=$(run_guard_with_workdir "$fba_repo" "git push upstream main")

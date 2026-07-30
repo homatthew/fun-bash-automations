@@ -934,8 +934,7 @@ is_configured_direct_delivery_push() {
   # an unrelated one. Direct delivery is a plain push from the repository
   # itself; declining to parse the redirect is both simpler and stricter than
   # trying to follow it.
-  if printf '%s' "$GIT_COMMAND" \
-     | grep -Eq '(^|[[:space:]])(-C([[:space:]]|=)|--git-dir|--work-tree|--namespace)'; then
+  if git_push_uses_directory_redirect; then
     return 1
   fi
 
@@ -1347,6 +1346,61 @@ for segment in segments:
 
 for name in targets:
     print(name)
+PY
+}
+
+# Exit 0 when a `git push` segment itself carries a directory-redirecting global
+# option. Scoped to the push segment on purpose: grepping the whole command
+# string meant any unrelated `git -C ... status` elsewhere in a compound command
+# voided the delivery exception, which fails closed but blocks ordinary work.
+git_push_uses_directory_redirect() {
+  python3 - "$GIT_COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+command = sys.argv[1].replace("\n", " ; ")
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(0)  # unparseable: fail closed
+
+segments, current = [], []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+REDIRECT = {"-C", "--git-dir", "--work-tree", "--namespace"}
+
+
+def strip_env_assignments(segment):
+    idx = 0
+    while idx < len(segment) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[idx]):
+        idx += 1
+    return segment[idx:]
+
+
+for segment in segments:
+    segment = strip_env_assignments(segment)
+    if not segment or segment[0] != "git":
+        continue
+    if "push" not in segment:
+        continue
+    # Only the global options before the `push` subcommand can redirect.
+    for token in segment[1:segment.index("push")]:
+        if token in REDIRECT or any(
+            token.startswith(f"{opt}=") for opt in REDIRECT
+        ):
+            sys.exit(0)
+sys.exit(1)
 PY
 }
 
