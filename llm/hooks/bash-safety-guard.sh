@@ -395,6 +395,85 @@ is_fun_bash_automations_repo() {
   [[ "$remote" == *"fun-bash-automations"* ]]
 }
 
+gh_host_override_violation() {
+  local origin
+  origin=$(git_context config --get remote.origin.url 2>/dev/null || true)
+  [[ -n "$origin" ]] || return 1
+  python3 - "$GIT_COMMAND" "$origin" <<'PY'
+import re
+import shlex
+import sys
+from urllib.parse import urlsplit
+
+command = sys.argv[1]
+origin = sys.argv[2]
+
+
+def remote_host(remote):
+    if "://" in remote:
+        return urlsplit(remote).hostname
+    match = re.match(r"^(?:[^@/:]+@)?([^/:]+):", remote)
+    return match.group(1) if match else None
+
+
+host = remote_host(origin)
+if not host:
+    sys.exit(1)
+
+try:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    sys.exit(1)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+assignment = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+for segment in segments:
+    environment = {}
+    idx = 0
+    while idx < len(segment):
+        match = assignment.match(segment[idx])
+        if not match:
+            break
+        environment[match.group(1)] = match.group(2)
+        idx += 1
+    if idx >= len(segment) or segment[idx] != "gh" or "GH_HOST" not in environment:
+        continue
+    args = segment[idx + 1 :]
+    if any(
+        token in {"-R", "--repo", "--hostname"}
+        or token.startswith(("--repo=", "--hostname="))
+        for token in args
+    ):
+        continue
+    if not args or args[0] != "pr":
+        continue
+    override = environment["GH_HOST"].rstrip(".").lower()
+    expected = host.rstrip(".").lower()
+    if override != expected:
+        print(
+            f"Blocked: GH_HOST={environment['GH_HOST']} does not match this "
+            f"repository's origin host {host}. Omit GH_HOST and let gh derive "
+            "the host from origin."
+        )
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 is_git_push_command() {
   python3 - "$GIT_COMMAND" <<'PY'
 import re
@@ -1808,6 +1887,27 @@ def remote_tokens(segment):
         return segment[idx + 1 :]
     return []
 
+def remote_target(segment):
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "--":
+            idx += 1
+            if idx >= len(segment):
+                return ""
+            return segment[idx].rsplit("@", 1)[-1].lower()
+        if token in value_options:
+            idx += 2
+            continue
+        if token.startswith(("-o", "-F")) and len(token) > 2:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return token.rsplit("@", 1)[-1].lower()
+    return ""
+
 def flatten_remote(remote):
     if not remote:
         return []
@@ -1820,29 +1920,116 @@ def flatten_remote(remote):
 def base(token):
     return token.rsplit("/", 1)[-1].lower()
 
-for segment in segments:
-    segment = strip_env_assignments(segment)
-    if not segment or segment[0] != "ssh":
-        continue
+def pid_kill_hosts():
+    """Hosts permitted a single-PID remote kill, from the environment.
 
-    remote = remote_tokens(segment)
-    if not remote:
-        print("interactive ssh without an explicit remote command")
-        sys.exit(0)
+    Empty by default: this shared baseline is public, so the host list is
+    private configuration supplied by the install overlay, not something this
+    repository names. Same pattern as
+    BASH_SAFETY_GUARD_TRUSTED_SSH_SUFFIXES.
 
-    lowered = [base(token) for token in flatten_remote(remote)]
-    for idx, token in enumerate(lowered):
-        if token in danger_commands:
-            print(f"dangerous remote ssh command: {token}")
-            sys.exit(0)
-        if idx + 1 < len(lowered) and (token, lowered[idx + 1]) in remote_wrappers:
-            print(f"remote ssh shell/code wrapper is not allowed: {token} {lowered[idx + 1]}")
-            sys.exit(0)
-        if token == "nodetool" and idx + 1 < len(lowered):
-            verb = lowered[idx + 1]
-            if verb in nodetool_deny or verb.startswith(("disable", "set")):
-                print(f"dangerous remote nodetool command: nodetool {verb}")
-                sys.exit(0)
+    `os` is imported here rather than at the top of this heredoc because this
+    file embeds several byte-identical python preambles; keeping the import
+    local to the one function that needs it avoids touching the others.
+    """
+    import os
+
+    raw = os.environ.get("BASH_SAFETY_GUARD_PID_KILL_HOSTS", "")
+    return {h.strip().lower() for h in raw.split(":") if h.strip()}
+
+
+def has_hostname_override(segment):
+    """True when -o HostName=... may redirect ssh away from the positional
+    destination, which makes remote_target() an untrustworthy basis for any
+    host-scoped exemption. `ssh -o HostName=evil allowed.host 'kill 123'`
+    otherwise reads as the allowed host while connecting to `evil`.
+    """
+    idx = 1
+    while idx < len(segment):
+        token = segment[idx]
+        if token == "-o" and idx + 1 < len(segment):
+            value = segment[idx + 1]
+            idx += 2
+        elif token.startswith("-o") and len(token) > 2:
+            value = token[2:]
+            idx += 1
+        else:
+            idx += 1
+            continue
+        if re.match(r"\s*hostname\s*=", value, re.IGNORECASE):
+            return True
+    return False
+
+
+# Deliberately not str.isdigit(): that accepts non-ASCII digits, so a PID of
+# '²' passed the check and then made int() raise, and Arabic-Indic or full-width
+# digits were forwarded to a remote `kill` as if they were ASCII.
+ASCII_PID = re.compile(r"[0-9]{1,7}\Z")
+
+
+def is_allowed_work_pid_kill(segment, remote):
+    """Allow only `kill <pid>` for one ASCII PID > 1, on a configured host."""
+    hosts = pid_kill_hosts()
+    if not hosts:
+        return False
+    if has_hostname_override(segment):
+        return False
+    if remote_target(segment) not in hosts:
+        return False
+    flattened = flatten_remote(remote)
+    if len(flattened) != 2 or base(flattened[0]) != "kill":
+        return False
+    pid = flattened[1]
+    if not ASCII_PID.match(pid):
+        return False
+    return int(pid) > 1
+
+
+def scan_segments():
+    """Return a violation string, or None when every segment looks safe."""
+    for segment in segments:
+        segment = strip_env_assignments(segment)
+        if not segment or segment[0] != "ssh":
+            continue
+
+        remote = remote_tokens(segment)
+        if not remote:
+            return "interactive ssh without an explicit remote command"
+
+        if is_allowed_work_pid_kill(segment, remote):
+            continue
+
+        lowered = [base(token) for token in flatten_remote(remote)]
+        for idx, token in enumerate(lowered):
+            if token in danger_commands:
+                return f"dangerous remote ssh command: {token}"
+            if idx + 1 < len(lowered) and (token, lowered[idx + 1]) in remote_wrappers:
+                return (
+                    "remote ssh shell/code wrapper is not allowed: "
+                    f"{token} {lowered[idx + 1]}"
+                )
+            if token == "nodetool" and idx + 1 < len(lowered):
+                verb = lowered[idx + 1]
+                if verb in nodetool_deny or verb.startswith(("disable", "set")):
+                    return f"dangerous remote nodetool command: nodetool {verb}"
+
+    return None
+
+
+# Fail CLOSED on anything unexpected. The caller reads only stdout, discarding
+# stderr and the exit status, so an uncaught exception here printed nothing and
+# was indistinguishable from "no violation" -- which skipped every remaining
+# segment. `ssh allowed.host 'kill <bad>' && ssh other 'sudo id'` really did
+# allow the sudo.
+try:
+    violation = scan_segments()
+except Exception as exc:  # noqa: BLE001 - deliberately broad; must not crash
+    print(f"ssh safety scan failed, refusing the command: {type(exc).__name__}")
+    sys.exit(0)
+
+if violation:
+    print(violation)
+    sys.exit(0)
 
 sys.exit(1)
 PY
@@ -3079,6 +3266,12 @@ check_gh_destructive() {
     deny "Blocked: gh issue close requires human judgment."
 }
 
+check_gh_host_override() {
+  local violation
+  violation=$(gh_host_override_violation 2>/dev/null || true)
+  [[ -z "$violation" ]] || deny "$violation"
+}
+
 # --- 10ba. fun-bash-automations PR Safety ---
 check_fba_pr_safety() {
   has_fba_pr_open_command || return
@@ -3293,6 +3486,7 @@ check_fs_destruction
 check_elevated_privileges
 check_remote_exec
 check_package_publish
+check_gh_host_override
 check_gh_destructive
 check_fba_pr_safety
 check_scratch_pr_safety

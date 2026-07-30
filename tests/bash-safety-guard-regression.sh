@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..137"
+echo "1..141"
 
 read_allow=$(run_guard "gh api /gists/example-id")
 [[ -z "$read_allow" ]] || fail "expected gist read to be allowed, got: $read_allow"
@@ -215,6 +215,69 @@ ssh_remote_cqlsh_block=$(run_guard "ssh db-node.example 'cqlsh -e \"select now()
 expect_contains "$ssh_remote_cqlsh_block" "dangerous remote ssh command: cqlsh"
 echo "ok 40 - remote ssh cqlsh is blocked"
 
+# Single-PID remote kill. The permitted host list comes from
+# BASH_SAFETY_GUARD_PID_KILL_HOSTS, which is empty in this baseline, so the test
+# supplies its own example hosts rather than encoding private hostnames.
+printf 'dev1.example %s\n' "$future_expiry" >>"$SSH_LEASE_FILE"
+printf 'dev9.example %s\n' "$future_expiry" >>"$SSH_LEASE_FILE"
+
+ssh_pid_kill_unconfigured_block=$(run_guard "ssh dev1.example 'kill 1497'")
+expect_contains "$ssh_pid_kill_unconfigured_block" "dangerous remote ssh command: kill"
+echo "ok 40a - with no configured hosts, every remote PID kill stays blocked"
+
+export BASH_SAFETY_GUARD_PID_KILL_HOSTS="dev1.example:dev2.example"
+
+ssh_pid_kill_allow=$(run_guard "ssh dev1.example 'kill 1497'")
+[[ -z "$ssh_pid_kill_allow" ]] || fail "expected one numeric PID kill on a configured host to be allowed, got: $ssh_pid_kill_allow"
+echo "ok 40b - one numeric PID kill is allowed on a configured host"
+
+ssh_unlisted_pid_kill_block=$(run_guard "ssh dev9.example 'kill 1497'")
+expect_contains "$ssh_unlisted_pid_kill_block" "dangerous remote ssh command: kill"
+ssh_multi_pid_kill_block=$(run_guard "ssh dev1.example 'kill 1497 1498'")
+expect_contains "$ssh_multi_pid_kill_block" "dangerous remote ssh command: kill"
+ssh_init_kill_block=$(run_guard "ssh dev1.example 'kill 1'")
+expect_contains "$ssh_init_kill_block" "dangerous remote ssh command: kill"
+ssh_signal_kill_block=$(run_guard "ssh dev1.example 'kill -9 1497'")
+expect_contains "$ssh_signal_kill_block" "dangerous remote ssh command: kill"
+ssh_compound_kill_block=$(run_guard "ssh dev1.example 'kill 1497 && echo done'")
+expect_contains "$ssh_compound_kill_block" "dangerous remote ssh command: kill"
+ssh_pkill_block=$(run_guard "ssh dev1.example 'pkill java'")
+expect_contains "$ssh_pkill_block" "dangerous remote ssh command: pkill"
+echo "ok 40c - remote PID kill exception stays host-, process-, and command-scoped"
+
+# str.isdigit() accepts non-ASCII digits. '²' passed it and then made int()
+# raise, crashing the scan; because the caller reads only stdout, the crash was
+# indistinguishable from "no violation" and skipped every remaining segment.
+ssh_superscript_pid_block=$(run_guard "ssh dev1.example 'kill ²'")
+[[ -n "$ssh_superscript_pid_block" ]] || fail "a non-ASCII PID must not be allowed"
+ssh_arabic_pid_block=$(run_guard "ssh dev1.example 'kill ٣'")
+[[ -n "$ssh_arabic_pid_block" ]] || fail "an Arabic-Indic digit PID must not be allowed"
+ssh_fullwidth_pid_block=$(run_guard "ssh dev1.example 'kill １２３'")
+[[ -n "$ssh_fullwidth_pid_block" ]] || fail "a full-width digit PID must not be allowed"
+echo "ok 40d - only ASCII digits count as a PID"
+
+# The load-bearing one: a crash on an early segment must not allow a later one.
+ssh_crash_then_sudo_block=$(run_guard "ssh dev1.example 'kill ²' && ssh dev9.example 'sudo id'")
+[[ -n "$ssh_crash_then_sudo_block" ]] || fail "a failed scan must fail closed, not allow a later sudo segment"
+echo "ok 40e - the ssh scan fails closed instead of skipping later segments"
+
+# remote_target() reads the positional destination, so an -o HostName override
+# would otherwise present an allowlisted host while connecting elsewhere.
+ssh_hostname_override_block=$(run_guard "ssh -o HostName=evil.example dev1.example 'kill 1497'")
+[[ -n "$ssh_hostname_override_block" ]] || fail "an -o HostName override must void the PID-kill exemption"
+ssh_hostname_joined_block=$(run_guard "ssh -oHostName=evil.example dev1.example 'kill 1497'")
+[[ -n "$ssh_hostname_joined_block" ]] || fail "a joined -oHostName override must void the PID-kill exemption"
+ssh_hostname_case_block=$(run_guard "ssh -o hostname=evil.example dev1.example 'kill 1497'")
+[[ -n "$ssh_hostname_case_block" ]] || fail "-o hostname is case-insensitive and must void the exemption"
+echo "ok 40f - a HostName override voids the host-scoped exemption"
+
+# The exemption must still work for the plain case after all of the above.
+ssh_still_allowed=$(run_guard "ssh dev1.example 'kill 1497'")
+[[ -z "$ssh_still_allowed" ]] || fail "the plain single-PID kill must still be allowed, got: $ssh_still_allowed"
+echo "ok 40g - the intended single-PID kill is still allowed"
+
+unset BASH_SAFETY_GUARD_PID_KILL_HOSTS
+
 ssh_remote_nodetool_repair_block=$(run_guard "ssh db-node.example '/opt/cassandra/bin/nodetool repair example_keyspace'")
 expect_contains "$ssh_remote_nodetool_repair_block" "dangerous remote nodetool command: nodetool repair"
 echo "ok 41 - remote ssh nodetool repair is blocked"
@@ -304,6 +367,26 @@ echo "ok 55 - fun-bash-automations gh pr view stays allowed"
 other_pr_create_allow=$(run_guard "gh -R example/other-repo pr create --base main --head feature")
 [[ -z "$other_pr_create_allow" ]] || fail "expected non-FBA gh pr create to be allowed by this guard, got: $other_pr_create_allow"
 echo "ok 56 - non-FBA gh pr create is not blocked by FBA-specific rule"
+
+gh_host_repo="$TEST_TMP/gh-host-repo"
+git init -q "$gh_host_repo"
+git -C "$gh_host_repo" remote add origin https://git.example.test/example/repo.git
+wrong_gh_host_block=$(run_guard_in "$gh_host_repo" "GH_HOST=github.example.test gh pr create --base main --head feature")
+expect_contains "$wrong_gh_host_block" "GH_HOST=github.example.test does not match this repository's origin host git.example.test"
+expect_contains "$wrong_gh_host_block" "Omit GH_HOST and let gh derive the host from origin"
+echo "ok 56a - mismatched GH_HOST is blocked with the repository-host hint"
+
+plain_gh_host_allow=$(run_guard_in "$gh_host_repo" "gh pr create --base main --head feature")
+[[ -z "$plain_gh_host_allow" ]] || fail "expected gh to derive the repository host, got: $plain_gh_host_allow"
+echo "ok 56b - plain gh command relies on the repository remote"
+
+matching_gh_host_allow=$(run_guard_in "$gh_host_repo" "GH_HOST=git.example.test gh pr create --base main --head feature")
+[[ -z "$matching_gh_host_allow" ]] || fail "expected matching GH_HOST to be allowed, got: $matching_gh_host_allow"
+echo "ok 56c - matching GH_HOST remains allowed"
+
+cross_host_gist_allow=$(run_guard_in "$gh_host_repo" "GH_HOST=github.enterprise.test gh api /gists --method POST --input $ordered_payload")
+[[ -z "$cross_host_gist_allow" ]] || fail "expected cross-host gist creation to be allowed, got: $cross_host_gist_allow"
+echo "ok 56d - cross-host gh api gist creation remains allowed"
 
 dotfiles_repo="$TEST_TMP/dotfiles"
 git init -q "$dotfiles_repo"

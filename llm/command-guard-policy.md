@@ -167,6 +167,13 @@ grant ungated PR, force-with-lease, or deletion privileges.
 - Block obvious dangerous remote SSH commands such as `sudo`, `su`,
   `systemctl`, `service`, process kills, broad file mutation commands,
   `cqlsh`, and shell/code wrappers such as `bash -c` or `python -c`.
+- Allow the narrow command `kill <numeric-pid>` for a single PID greater than 1,
+  and only on hosts listed in `BASH_SAFETY_GUARD_PID_KILL_HOSTS` (colon
+  separated). That variable is **empty in this shared baseline**, so no host is
+  permitted until the private install overlay supplies one; the hostnames are
+  private configuration and are not named here. The normal SSH host lease is
+  still required. Keep signals, multiple PIDs, compound remote commands,
+  `pkill`, `killall`, and every unlisted host blocked.
 - Block mutating `nodetool` verbs over SSH, including `repair`,
   `compact`, `cleanup`, `scrub`, `drain`, topology changes, `disable*`, and
   `set*`.
@@ -188,6 +195,10 @@ grant ungated PR, force-with-lease, or deletion privileges.
 ### GitHub destructive actions
 
 - Block agent-initiated merge/close/delete actions that require human judgment
+- When `gh pr` relies on the current repository, block an explicitly prefixed
+  `GH_HOST` if it differs from the repository's `origin` host. Omit the
+  override and let `gh` derive the host from the repository remote. Host-scoped
+  commands such as cross-host `gh api` and `gh gist` remain allowed.
 
 ### fun-bash-automations PR safety
 
