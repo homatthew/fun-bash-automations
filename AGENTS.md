@@ -18,12 +18,15 @@ canonical instruction entrypoint.
 
 - This repository delivers directly on `main`; there is no PR gate.
 - After the user explicitly asks to push or invokes an explicit finish workflow,
-  the no-mistakes gate performs the direct delivery push with an explicit branch
-  target, e.g. `git push origin main`.
-- The finish-the-job entrypoint is the `/ship` skill for a single change; it runs
-  the `no-mistakes` gate (automated code review, tests, lint, docs) and then
-  pushes to the configured target. For breadth across many tasks use `firstmate`;
-  for a long-run single-objective loop use `gnhf`.
+  push directly with an explicit branch target, e.g. `git push origin main`.
+- The finish-the-job entrypoint is the `/ship` skill for a single change. It runs
+  the repository's own checks plus an independent-model code review, at the tier
+  the change warrants — see Gate Selection in `llm/AGENTS.md`. Validation is
+  proportional to risk; the `no-mistakes` gate is an opt-in tier-3 tool, not a
+  precondition for pushing. For breadth across many tasks use `firstmate`; for a
+  long-run single-objective loop use `gnhf`.
+- Keep PRs and delivery commits reviewable: target under ~400 changed lines and
+  ~15 files, one reviewable claim each, refactors separate from behaviour changes.
 - That delivery push rule does not apply to configured non-delivery scratch
   branches when Remote Scratch Mode is active; see `llm/AGENTS.md` and
   `llm/agent-push-policy.json`. Promoting scratch work to a delivery branch goes

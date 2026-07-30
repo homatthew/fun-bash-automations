@@ -37,10 +37,12 @@ clones/locates projects under `projects/`, and spawns crewmates
 ## How it fits the stack
 
 - **Substrate**: crewmates work in disposable **treehouse** worktrees.
-- **Gate**: ship tasks follow each project's delivery mode — for our repos that is
-  the **no-mistakes** gate. Scout/investigation tasks produce local reports and
-  push nothing.
-- **Gate isolation**: each crewmate worktree gets its own `NM_HOME` (derived by
+- **Gate**: ship tasks validate at the tier the change warrants (see Gate
+  Selection in `llm/AGENTS.md`) — normally repo checks plus one independent-model
+  review leg, escalating for risky or wide diffs. Scout/investigation tasks
+  produce local reports and push nothing.
+- **Gate isolation**: only relevant when a crewmate runs the opt-in no-mistakes
+  gate. Each crewmate worktree then gets its own `NM_HOME` (derived by
   `nm-home`) so parallel no-mistakes runs use separate state, sockets, and
   daemons instead of serializing or contaminating each other. `nm-home` also
   activates the worktree-local `no-mistakes` git remote, because Git remotes are

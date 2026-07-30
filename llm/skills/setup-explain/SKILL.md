@@ -83,8 +83,31 @@ plan-to-lavish <plan.md>  render a plan to a lavish review surface
 The git-level main pre-push hook + `bash-safety-guard.sh` block unconfigured
 pushes to `main`/`master`/`develop`/`trunk`, bare/ambiguous pushes, and plain
 `git push --force`. Exact configured direct-delivery pushes still require an
-explicit user request and the no-mistakes gate. Details:
-`llm/command-guard-policy.md`.
+explicit user request. Details: `llm/command-guard-policy.md`.
+
+These are the **hard** controls and they are not negotiable. Review ceremony is
+separate and *is* negotiable — see below.
+
+## Validation is proportional (this is the part people get wrong)
+
+Ceremony scales with risk, not habit:
+
+- **Tier 0 — nothing.** `wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`, and
+  any `*yolo/` branch. Just make it run. Review the end state once, later.
+- **Tier 1 — default.** Ordinary feature branch: repo tests/lint + **one**
+  independent-model review leg (Codex `gpt-5.6-sol`). Seconds to a minute.
+- **Tier 2.** Three legs (+ Cursor `claude-opus-5-thinking-high` and
+  `kimi-k3-high`) when the diff touches guards/auth/data-loss or is wide
+  (>400 lines / >15 files).
+- **Tier 3 — `no-mistakes`.** The full pipeline, **opt-in only**. Ask for it by
+  name when you want a change babysat end to end. It is not a precondition for
+  pushing.
+
+`self-review-guard.sh` (Stop hook) prompts for a review when a diff hits the
+tier-2 triggers. It asks **once** per diff and cannot block twice.
+"skipping review: `<reason>`" is a sanctioned answer — the workflow is designed
+so you are never trapped. Keep PRs under ~400 lines / ~15 files instead of
+leaning on ceremony.
 
 ## Go deeper
 

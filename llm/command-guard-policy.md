@@ -52,18 +52,19 @@ Codex, and future harnesses.
   no-mistakes gate. The git-level main pre-push hook enforces this even for
   external binaries (gnhf, no-mistakes); the agent-layer guard is
   defense-in-depth.
-- Deliver feature branches through the **no-mistakes** gate: it runs automated
-  review/tests/lint/docs, then pushes to the configured target and opens or
-  updates the PR. Drive it with the `/ship` skill or the `no-mistakes` skill;
-  for breadth, firstmate ships each crew task through the same no-mistakes
-  policy with separate per-worktree `NM_HOME` state.
-- Do not hand-roll `git push` + `gh pr create` for delivery work — let the gate
-  own the push so the pipeline runs.
+- Deliver feature branches through the `/ship` skill at the validation tier the
+  change warrants; see Gate Selection in `llm/AGENTS.md`. Validation ceremony is
+  proportional to risk and an agent may decline a review leg with a stated
+  one-line reason. The `no-mistakes` gate is an opt-in tier-3 tool, not a
+  precondition for pushing.
+- While a no-mistakes run owns a branch, let it own the push: do not hand-roll
+  `git push` + `gh pr create` alongside an active run.
 
-### Gate and guard bypass prohibition
+### Guard bypass prohibition
 
-The no-mistakes gate and the safety guard are load-bearing. Agents MUST NOT
-suggest, run, or document any of the following to get a blocked push through:
+Review ceremony is negotiable. The **safety guard is not** — that distinction is
+the point of this section. Agents MUST NOT suggest, run, or document any of the
+following to get a blocked push through:
 
 - `--no-verify` on `git commit` / `git push` (bypasses hooks)
 - Piping `yes`, `echo y`, or any non-interactive confirmation into a gate or

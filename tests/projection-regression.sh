@@ -202,8 +202,8 @@ for harness in claude codex; do
     and (.yolo_branches.prefixes | index("yolo/") != null)
     and (.yolo_branches.protected_base_refs | index("main") != null)
     and (.yolo_branches.protected_base_refs | index("master") != null)
-    and (.no_mistakes_branches.prefixes | index("feature/") != null)
-    and (.no_mistakes_branches.prefixes | index("mho/") == null)
+    and (.delivery_feature_branches.prefixes | index("feature/") != null)
+    and (.delivery_feature_branches.prefixes | index("mho/") == null)
   ' "$policy" >/dev/null; then
     pass "$harness agent push policy disables the yolo branch class"
   else

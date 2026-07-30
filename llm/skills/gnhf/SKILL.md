@@ -34,8 +34,10 @@ gnhf --stop-when "all tests pass" "..."       # end when the agent reports this 
 
 ## How it fits
 
-- gnhf creates and pushes its own `gnhf/<...>` working branch and ships through
-  the **no-mistakes** gate (see `agent-push-policy.json` → `gnhf_branches`).
+- gnhf creates and pushes its own `gnhf/<...>` working branch (see
+  `agent-push-policy.json` → `gnhf_branches`). `gnhf/` is a tier-0 editing
+  branch: don't review each iteration. Review the **end state** once, before
+  promoting the work to a delivery branch.
 - For parallel long-runs, combine with treehouse (`--worktree`) so multiple loops
   don't collide.
 - **Always pass `--max-iterations` or `--max-tokens`** for unattended runs to cap

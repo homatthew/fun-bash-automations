@@ -1,19 +1,43 @@
 {
   "$schema": "./agent-push-policy.schema.json",
   "version": 2,
-  "model": "Feature branches ship through the no-mistakes gate (review/test/document/lint) to a PR or a configured direct-delivery target. The git-level main pre-push hook and bash-safety-guard.sh block unconfigured protected-branch and bare/ambiguous pushes. push-gate (durable leases, semantic-scope approval, Dolt stack trunks) was retired; do not reintroduce its fields.",
-  "no_mistakes_branches": {
-    "purpose": "Default delivery path: a feature branch validated by the no-mistakes gate before it reaches the configured push target and opens/updates a PR. Drive it via the /ship skill or the no-mistakes skill.",
+  "model": "Feature branches ship through /ship at a validation tier proportional to risk: tier 0 none (editing branches), tier 1 repo checks plus one independent-model review (default), tier 2 three review legs (risky or wide diffs), tier 3 the opt-in no-mistakes gate. Review ceremony is negotiable and an agent may decline a leg with a stated reason; the git-level main pre-push hook and bash-safety-guard.sh are NOT negotiable and block unconfigured protected-branch and bare/ambiguous pushes. push-gate (durable leases, semantic-scope approval, Dolt stack trunks) was retired; do not reintroduce its fields.",
+  "review_tiers": {
+    "purpose": "Match validation ceremony to risk. A check that fires on every change regardless of stakes gets routed around, so escalate on risk rather than habit.",
+    "tier_0_none": {
+      "when": "Editing branches and throwaway spikes; review is a delivery concern, not an editing concern.",
+      "branch_prefixes": ["wip/", "scratch/", "gnhf/", "tmp/", "experiment/"],
+      "branch_patterns": ["*yolo/"],
+      "note": "Yolo branches review the end state once - before promotion, before handoff, or on request - never continuously."
+    },
+    "tier_1_self_review": {
+      "when": "Default for an ordinary feature/fix branch headed for a PR.",
+      "legs": ["codex:gpt-5.6-sol"]
+    },
+    "tier_2_multi_model": {
+      "when": "Diff touches security guards, hooks, auth, credentials, crypto, or push/delivery policy; can lose data or is hard to reverse; is wide (>400 changed lines or >15 files); or changes behaviour the user cannot easily re-verify.",
+      "legs": ["codex:gpt-5.6-sol", "cursor:claude-opus-5-thinking-high", "cursor:kimi-k3-high"],
+      "note": "Cursor legs run sequentially; ~/.cursor/cli-config.json is user-level state that concurrent runs race on."
+    },
+    "tier_3_no_mistakes": {
+      "when": "Only on an explicit user ask, or where a repository's own policy requires it. Requires no-mistakes init.",
+      "note": "Not a precondition for pushing. Good for a large or unfamiliar change you want babysat end to end; wrong as a default because its cost does not scale down."
+    },
+    "declining": "Stating 'skipping review: <reason>' in one line is a sanctioned outcome. Skipping silently, or claiming a review that did not run, is not.",
+    "sizing": "Target under ~400 changed lines and ~15 files per PR, one reviewable claim each, refactors separate from behaviour changes. Split rather than escalate where possible."
+  },
+  "delivery_feature_branches": {
+    "purpose": "Default delivery path: a feature branch validated at the warranted review tier, then pushed to the configured target, opening/updating a PR. Drive it via the /ship skill.",
     "prefixes": ["feature/", "fix/"],
-    "gate": "no-mistakes",
+    "gate": "proportional-review",
     "pr_eligible": true,
     "requires_explicit_user_ask": true,
     "protected_base_refs": ["main", "master", "develop", "trunk"]
   },
   "gnhf_branches": {
-    "purpose": "gnhf long-run loops create and push their own working branch and ship through the same no-mistakes gate. Bounded runs use --max-iterations / --max-tokens.",
+    "purpose": "gnhf long-run loops create and push their own working branch. Review the end state before promoting to a delivery branch. Bounded runs use --max-iterations / --max-tokens.",
     "prefixes": ["gnhf/"],
-    "gate": "no-mistakes",
+    "gate": "proportional-review",
     "pr_eligible": true,
     "protected_base_refs": ["main", "master", "develop", "trunk"]
   },
@@ -50,8 +74,8 @@
   },
   "delivery_branches": {
     "pr_eligible": true,
-    "gate": "no-mistakes",
-    "notes": "Any branch with an open PR, intended PR, or PR-base relationship is delivery scope and ships through the no-mistakes gate unless a repo-specific direct-push exception applies."
+    "gate": "proportional-review",
+    "notes": "Any branch with an open PR, intended PR, or PR-base relationship is delivery scope and is reviewed at its warranted tier unless a repo-specific direct-push exception applies."
   },
   "direct_push_exceptions": [
     {

@@ -65,17 +65,13 @@ Mentor Mode optimizes for learning and reviewability over speed.
   snapshot on the current public `main` and keep private content in `dotfiles`.
 - Do not create, reopen, or mark ready PRs for `fun-bash-automations`; `main`
   is its direct-push delivery branch.
-- Ship feature work through the **no-mistakes** gate: it runs automated
-  review/tests/lint/docs, then pushes to the configured target and opens or
-  updates the PR. The finish-the-job entrypoint is the `/ship` skill for a
-  single change; for breadth across many tasks use `firstmate`, and for a
-  long-run single-objective loop use `gnhf`. All ship through the same
-  no-mistakes policy.
+- Ship feature work through the `/ship` skill, at the ceremony level the change
+  warrants (see [Gate Selection](#gate-selection-match-ceremony-to-risk)). For
+  breadth across many tasks use `firstmate`; for a long-run single-objective
+  loop use `gnhf`.
 - `fun-bash-automations` is a direct-push delivery repo on `main`: after the user
-  explicitly asks to push or invokes a
-  finish workflow, the gate pushes directly with an explicit branch target such
-  as `git push origin main`. Do not hand-roll
-  `git push` + `gh pr create` for delivery work — let the gate own the push.
+  explicitly asks to push or invokes a finish workflow, push directly with an
+  explicit branch target such as `git push origin main`.
 - Do not push delivery or PR-eligible branches unless the user explicitly asks.
   `/ship` (and firstmate ship tasks) count as that explicit ask for their
   delivery actions.
@@ -89,16 +85,93 @@ Mentor Mode optimizes for learning and reviewability over speed.
   may define additional branch classes, but they are not part of this shared
   baseline and cannot weaken protected-branch delivery rules.
 
-## Delivery Gate Policy
+## Gate Selection: Match Ceremony To Risk
 
-The **no-mistakes** gate is the one sanctioned automated delivery path. It
-validates a feature branch (automated code review, tests, lint, docs) before it
-reaches the configured push target, then pushes and opens or updates the PR
-when applicable. Repo-specific direct-delivery exceptions push without a PR.
-Drive it with the `/ship` skill or the `no-mistakes` skill (`no-mistakes`, or
-`no-mistakes axi run` for agent-driven TOON output). The git-level main pre-push
-hook and `bash-safety-guard.sh` block unconfigured protected-branch and
-bare/ambiguous pushes underneath it; these guardrails are never weakened.
+Validation is proportional. A check that runs on every change regardless of
+stakes stops being a safety net and becomes something to route around, so pick
+the cheapest tier that actually covers the risk. **Escalate on risk, not on
+habit.**
+
+| Tier | When | What runs |
+| --- | --- | --- |
+| **0 — none** | Editing branches (`wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`, `*yolo/`), local-only work, throwaway spikes | Make it run. Nothing else. |
+| **1 — self-review** *(default for delivery)* | Ordinary feature/fix branch headed for a PR | Repo's own tests + lint, then **one** independent-model review leg |
+| **2 — multi-model review** | High-risk surface or wide diff (below), or on request | Three review legs: Codex `gpt-5.6-sol`, Cursor `claude-opus-5-thinking-high`, Cursor `kimi-k3-high` |
+| **3 — no-mistakes gate** | **Only** when the user explicitly asks for it, or a repo's own policy requires it | Full pipeline: intent, rebase, review, test, document, lint, push, PR, CI monitoring |
+
+Tier 3 is opt-in. It is a good tool for a large or unfamiliar change you want
+babysat end to end; it is the wrong default because its cost does not scale down.
+Do not route ordinary work through it, and do not treat it as a precondition for
+pushing. A repo needs `no-mistakes init` before it can be used at all.
+
+**Escalate to tier 2** when the diff:
+
+- touches security guards, hooks, auth, credentials, secrets, crypto, or
+  push/delivery policy;
+- can lose or corrupt data, or is hard to reverse;
+- is wide — roughly >400 changed lines or >15 files;
+- changes behaviour the user cannot easily re-verify themselves.
+
+**Declining review is a legitimate answer.** If review does not fit — throwaway
+work, the user asked you to stop, it is already reviewed, or it plainly is not
+worth it — say so in one line (`skipping review: <reason>`) and move on. State it
+plainly; do not fake a review, and do not silently skip one either.
+
+The `self-review-guard.sh` Stop hook prompts for review when a diff hits the
+tier-2 triggers. It asks **once** per diff and never blocks twice, so it can
+prompt but cannot trap. Record a completed review with
+`self-review-guard.sh --mark-reviewed` — because you did the review, never to
+silence the prompt.
+
+### Yolo branches
+
+`*yolo/` branches (including `mho-yolo/`) exist to move fast. Do not review
+continuously on them. Review the **end state** once — before promoting the work
+to a delivery branch, before handing it off, or whenever the user asks. Between
+those points, just keep the code running.
+
+## Scope And PR Sizing
+
+Keep changes reviewable. Size is the cheapest risk control available, and it is
+worth more than any amount of gate ceremony.
+
+- Aim for **under ~400 changed lines and ~15 files** per PR. Past that, split it.
+- One PR should support **one reviewable claim**. If the description needs
+  "and also", it is two PRs.
+- Land refactors separately from behaviour changes. Mixing them hides the
+  behaviour change inside the noise.
+- Sequence large work as a stack of small branches rather than one wide diff.
+- If a change cannot be split, say so explicitly and escalate to tier 2 — a wide
+  diff is exactly the case where a second model earns its cost.
+
+## Hard Safety Controls
+
+These are not proportional and are never weakened, whatever tier is in play:
+
+- The git-level main pre-push hook and `bash-safety-guard.sh` block unconfigured
+  protected-branch pushes and bare/ambiguous pushes.
+- No `--no-verify`, no force-pushes on shared branches, no piping `yes` /
+  `echo y` into a prompt, no `core.hooksPath` or config injection.
+- No manual edits to guard state, and nothing that fakes a green run.
+- Before adding history to a public `main`, audit it for confidential material.
+
+The distinction matters: **review ceremony is negotiable; these are not.**
+
+## Using no-mistakes (Tier 3)
+
+Only on an explicit user ask. Once a run is under way, drive it properly — a
+half-driven pipeline is worse than none. Details live in the `no-mistakes` skill.
+
+- The gate owns the push for that run. Do not hand-roll `git push` +
+  `gh pr create` alongside an active run, and do not edit files to fix findings
+  yourself while it holds the branch.
+- If a step fails, fix it and `no-mistakes rerun`. Do not `--skip` a step that
+  actually failed. `--skip` is for a step that does not apply.
+- When the gate needs an interactive approval and no terminal is available, stop
+  and ask the user.
+- To stop using it in a repo, use the `disable-no-mistakes` skill — it recovers
+  gate-held commits first. Ejecting can destroy pipeline commits that exist
+  nowhere else.
 
 For parallel agents on the same repository, treehouse worktrees are necessary
 but not sufficient: each concurrent no-mistakes run must also have its own
@@ -114,14 +187,7 @@ crewmate's inherited `NM_HOME`. Also keep branch names unique per concurrent
 task: separate homes isolate local gate state, but the remote branch and PR
 namespace are still shared by the git host.
 
-Never bypass the gate or the guard. Do not suggest, run, or document
-`--no-verify`, piping `yes` / `echo y` into a prompt, `no-mistakes --skip <step>`
-to skip a step that actually failed, manual edits to guard/gate state, or any
-pattern that fakes a green run.
-
-If a gate step fails, fix it and `no-mistakes rerun` — do not skip it. When the
-gate needs an interactive approval and no terminal is available, stop and ask
-the user. Details live in `llm/command-guard-policy.md`.
+Guard details live in `llm/command-guard-policy.md`.
 
 ## Planning And Verification
 

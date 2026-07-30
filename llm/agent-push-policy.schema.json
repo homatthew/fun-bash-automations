@@ -11,7 +11,70 @@
       "minimum": 1
     },
     "model": { "type": "string" },
-    "no_mistakes_branches": {
+    "review_tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "purpose": { "type": "string" },
+        "tier_0_none": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "when": { "type": "string" },
+            "branch_prefixes": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "branch_patterns": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "note": { "type": "string" }
+          }
+        },
+        "tier_1_self_review": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "when": { "type": "string" },
+            "legs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "note": { "type": "string" }
+          }
+        },
+        "tier_2_multi_model": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "when": { "type": "string" },
+            "legs": {
+              "type": "array",
+              "minItems": 2,
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "note": { "type": "string" }
+          }
+        },
+        "tier_3_no_mistakes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "when": { "type": "string" },
+            "note": { "type": "string" }
+          }
+        },
+        "declining": { "type": "string" },
+        "sizing": { "type": "string" }
+      }
+    },
+    "delivery_feature_branches": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -22,7 +85,7 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
-        "gate": { "type": "string", "const": "no-mistakes" },
+        "gate": { "type": "string", "const": "proportional-review" },
         "pr_eligible": { "type": "boolean", "const": true },
         "requires_explicit_user_ask": { "type": "boolean" },
         "protected_base_refs": {
@@ -43,7 +106,7 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
-        "gate": { "type": "string", "const": "no-mistakes" },
+        "gate": { "type": "string", "const": "proportional-review" },
         "pr_eligible": { "type": "boolean", "const": true },
         "protected_base_refs": {
           "type": "array",
@@ -175,7 +238,7 @@
       "required": ["pr_eligible"],
       "additionalProperties": false,
       "properties": {
-        "gate": { "type": "string", "const": "no-mistakes" },
+        "gate": { "type": "string", "const": "proportional-review" },
         "pr_eligible": { "type": "boolean", "const": true },
         "notes": { "type": "string" }
       }

@@ -1,15 +1,55 @@
 ---
 name: no-mistakes
-description: Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR when applicable, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
+description: Validate code changes through the full no-mistakes pipeline - intent, rebase, review, test, document, lint, push, PR, and CI. This is the opt-in heavyweight gate; use it when the user explicitly asks for no-mistakes, invokes /no-mistakes, or a repository's own policy requires it. For ordinary delivery use the /ship skill instead.
 user-invocable: true
 ---
 
 # no-mistakes
 
 `no-mistakes` is a local gate that validates your code changes through a pipeline
-(intent, rebase, review, test, document, lint, push, PR when applicable, CI)
-before they reach the configured push target. You drive it through the `no-mistakes axi` command family, which prints
+(intent, rebase, review, test, document, lint, push, PR, CI) before they reach
+the configured push target. You drive it through the `no-mistakes axi` command family, which prints
 machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
+
+## This is tier 3: opt-in, not the default
+
+Do **not** route ordinary work here, and do not treat this gate as a
+precondition for pushing. Validation ceremony is proportional to risk (see Gate
+Selection in `llm/AGENTS.md`); the default delivery path is the `/ship` skill,
+which runs the repo's own checks plus an independent-model review leg in seconds
+to a minute. This pipeline's steps can each take **several minutes**, and that
+cost does not scale down to a small change.
+
+Reach for it when:
+
+- the user explicitly asks for no-mistakes or invokes `/no-mistakes`;
+- a repository's own policy requires it;
+- the change is large or unfamiliar and the user wants it babysat end to end.
+
+The repository must already have `no-mistakes init`. Once a run is under way,
+drive it properly to a terminal outcome — a half-driven pipeline that holds a
+branch is worse than no pipeline at all. To stop using it in a repository, use
+the `disable-no-mistakes` skill: ejecting can destroy pipeline commits that
+exist nowhere else.
+
+
+## Active validation-step boundary
+
+A no-mistakes validation-step agent is already inside an active outer run. It
+must inspect, fix, and return only its assigned phase. It must never initialize,
+start, reattach, rerun, respond to, synchronize, abort, eject, or directly push
+a no-mistakes pipeline. Delivery requirements in user intent remain
+acceptance context, but the outer executor alone performs the other validation,
+push, PR, and CI phases.
+
+`NO_MISTAKES_GATE` is fast diagnostic evidence, not authorization by
+itself. The runtime combines managed Git identity with authenticated process
+ancestry. If a pipeline-control command returns
+`error.code: nested_gate_context`, stop immediately and
+return control to the outer executor. Safe inspection remains available through
+`no-mistakes axi status`, `no-mistakes axi logs`, help, and
+`no-mistakes doctor`.
+
 
 When the user invokes `/no-mistakes`, report the outcome at the end. If the user
 asks for something specific, translate that request into the matching `axi run`
