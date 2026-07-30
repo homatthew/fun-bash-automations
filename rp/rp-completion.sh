@@ -11,28 +11,27 @@ _rp_completion_archive_dir() {
 
 # Zsh completion
 if [[ -n "$ZSH_VERSION" ]]; then
+    # Delegates to the shared fork-free helper in zsh/personal.zsh. The previous
+    # implementation ran `git rev-parse` + `git branch` + `git status` per
+    # directory, which measured 3.1s for `rp <TAB>` and 4.5-5.4s for the
+    # archive subcommands against ~70 clones. Set FBA_COMPLETION_SHOW_DIRTY=1
+    # to get dirty counts back at that cost.
     _rp_describe_dirs() {
         emulate -L zsh
-        local root="$1" tag="$2" label="$3" dir name branch dirty desc
+        local root="$1" tag="$2" label="$3"
+
+        if (( $+functions[_fba_describe_checkouts] )); then
+            _fba_describe_checkouts "$root" "$tag" "$label"
+            return
+        fi
+
+        # Standalone fallback: names only, still no per-repo forks.
+        local dir
         local -a entries
-
         [[ -d "$root" ]] || return 1
-        while IFS= read -r dir; do
-            name="${dir##*/}"
-            desc="$label"
-            if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-                branch="$(git -C "$dir" branch --show-current 2>/dev/null)"
-                [[ -n "$branch" ]] || branch="detached"
-                dirty="$(git -C "$dir" status --short 2>/dev/null | wc -l | tr -d ' ')"
-                if [[ "$dirty" == "0" ]]; then
-                    desc="$branch, clean"
-                else
-                    desc="$branch, $dirty changes"
-                fi
-            fi
-            entries+=("$name:$desc")
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
-
+        for dir in "$root"/*(/N); do
+            entries+=("${dir:t}:$label")
+        done
         (( ${#entries[@]} )) || return 1
         _describe -t "$tag" "$label" entries
     }
@@ -74,10 +73,15 @@ if [[ -n "$ZSH_VERSION" ]]; then
 
 # Bash completion
 elif [[ -n "$BASH_VERSION" ]]; then
+    # Plain glob, no `find`/`basename` fork per directory.
     _rp_completion_dir_names() {
-        local root="$1"
+        local root="$1" dir
         [[ -d "$root" ]] || return 0
-        find "$root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null
+        for dir in "$root"/*/; do
+            dir="${dir%/}"
+            [[ -d "$dir" ]] || continue
+            printf '%s\n' "${dir##*/}"
+        done
     }
 
     _rp_completions() {

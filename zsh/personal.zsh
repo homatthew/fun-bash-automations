@@ -395,6 +395,126 @@ if [[ -n "$ZSH_VERSION" ]]; then
             add-zsh-hook precmd _fba_register_pending_compdefs
         fi
     }
+
+    # --------------------------------------------------------------------------
+    # Completion performance helpers
+    # --------------------------------------------------------------------------
+    # Completion functions run on every Tab press, so they must not fork per
+    # repository. `git status` across ~70 clones under $REPOS_DIR measured 3.1s
+    # per Tab (4.5-5.4s for the archive subcommands); branch names read straight
+    # out of .git/HEAD cost no forks at all. Anything more expensive than that
+    # belongs behind FBA_COMPLETION_SHOW_DIRTY, not in the default path.
+    # $EPOCHSECONDS, for TTL arithmetic without forking `date`.
+    zmodload zsh/datetime 2>/dev/null
+    typeset -gA _fba_comp_cache_val _fba_comp_cache_at
+
+    # These helpers answer through $REPLY rather than stdout on purpose: a
+    # $(...) capture forks a subshell, and forking once per repository is most
+    # of the cost we are removing here.
+
+    # Cache TTL in seconds; FBA_COMPLETION_CACHE_TTL=0 disables caching.
+    _fba_comp_cache_get() {
+        emulate -L zsh
+        local key="$1" ttl="${FBA_COMPLETION_CACHE_TTL:-15}"
+        REPLY=
+        [[ "$ttl" == <-> ]] && (( ttl > 0 )) || return 1
+        [[ -n "${_fba_comp_cache_at[$key]}" ]] || return 1
+        (( EPOCHSECONDS - _fba_comp_cache_at[$key] < ttl )) || return 1
+        REPLY="${_fba_comp_cache_val[$key]}"
+    }
+
+    _fba_comp_cache_set() {
+        emulate -L zsh
+        _fba_comp_cache_val[$1]="$2"
+        _fba_comp_cache_at[$1]=$EPOCHSECONDS
+    }
+
+    # Resolve a checkout's branch into $REPLY without forking. Handles both a
+    # normal .git directory and the .git *file* worktrees and submodules use.
+    _fba_git_branch_fast() {
+        emulate -L zsh
+        local dir="$1" gitdir="$1/.git" head line
+        REPLY=
+        [[ -e "$gitdir" ]] || return 1
+        if [[ -f "$gitdir" ]]; then
+            read -r line < "$gitdir" 2>/dev/null || return 1
+            [[ "$line" == gitdir:* ]] || return 1
+            gitdir="${${line#gitdir:}## }"
+            [[ "$gitdir" == /* ]] || gitdir="$dir/$gitdir"
+        fi
+        [[ -r "$gitdir/HEAD" ]] || return 1
+        read -r head < "$gitdir/HEAD" 2>/dev/null || return 1
+        case "$head" in
+            # "ref: refs/heads/<branch>" - note the space after the colon.
+            ref:*) REPLY="${${${head#ref:}## }#refs/heads/}" ;;
+            *)     REPLY=detached ;;
+        esac
+        [[ -n "$REPLY" ]]
+    }
+
+    # Count working-tree changes into $REPLY. Opt-in only: this is the slow
+    # path, and it is why `rp <TAB>` used to take seconds.
+    _fba_git_dirty_count() {
+        emulate -L zsh
+        local dir="$1" out
+        local -a lines
+        REPLY=
+        out="$(git -C "$dir" status --porcelain 2>/dev/null)" || return 1
+        lines=("${(@f)out}")
+        REPLY="${#${(@)lines:#}}"
+    }
+
+    # Normalize the dirty-count opt-in to exactly 0 or 1 into $REPLY. The cache
+    # key and the behaviour must be derived from the *same* boolean: keying on
+    # the raw value while testing it with -n made FBA_COMPLETION_SHOW_DIRTY=0
+    # behave as enabled but share the disabled cache entry.
+    _fba_comp_show_dirty() {
+        emulate -L zsh
+        [[ "${FBA_COMPLETION_SHOW_DIRTY:-0}" == 1 ]] && REPLY=1 || REPLY=0
+        return 0
+    }
+
+    # Describe the immediate subdirectories of $1 as completion matches, tagged
+    # $2 and labelled $3, each described by its git branch. Dot-directories are
+    # intentionally excluded: they are never repository clones you want to jump
+    # into, and this matches the pre-existing `proj` completion behaviour.
+    _fba_describe_checkouts() {
+        emulate -L zsh
+        local root="$1" tag="$2" label="$3" show_dirty
+        local -a entries
+
+        [[ -d "$root" ]] || return 1
+        _fba_comp_show_dirty
+        show_dirty=$REPLY
+
+        local key="$tag|$root|$show_dirty"
+        if _fba_comp_cache_get "$key"; then
+            entries=("${(@f)REPLY}")
+        else
+            local dir name desc
+            for dir in "$root"/*(/N); do
+                name="${dir:t}"
+                if _fba_git_branch_fast "$dir"; then
+                    desc="$REPLY"
+                    if (( show_dirty )) && _fba_git_dirty_count "$dir"; then
+                        if [[ "$REPLY" == 0 ]]; then
+                            desc="$desc, clean"
+                        else
+                            desc="$desc, $REPLY changes"
+                        fi
+                    fi
+                else
+                    desc="$label"
+                fi
+                entries+=("$name:$desc")
+            done
+            (( ${#entries[@]} )) || return 1
+            _fba_comp_cache_set "$key" "${(pj:\n:)entries}"
+        fi
+
+        (( ${#entries[@]} )) || return 1
+        _describe -t "$tag" "$label" entries
+    }
 fi
 
 # rp - repository navigation (source function, then load completion)
@@ -935,31 +1055,48 @@ proj() {
 }
 
 if [[ -n "$ZSH_VERSION" ]]; then
+    # Describes each project by its repo count. Counting dirty worktrees here
+    # meant a `git status` per repo per project, which is the same per-Tab cost
+    # that made `rp <TAB>` take seconds; FBA_COMPLETION_SHOW_DIRTY=1 opts back in.
     _proj_describe_projects() {
         emulate -L zsh
-        local root="$(_proj_root)" name dir child repo_count dirty_count dirty desc
+        local root="$(_proj_root)" name dir child repo_count dirty_count desc
+        local show_dirty
         local -a projects
 
         [[ -d "$root" ]] || return 1
-        for dir in "$root"/*(/N); do
-            name="${dir:t}"
-            repo_count=0
-            dirty_count=0
-            for child in "$dir"/*(/N); do
-                (( repo_count++ ))
-                git -C "$child" rev-parse --git-dir >/dev/null 2>&1 || continue
-                dirty="$(git -C "$child" status --short 2>/dev/null)"
-                [[ -n "$dirty" ]] && (( dirty_count++ ))
-            done
+        _fba_comp_show_dirty
+        show_dirty=$REPLY
 
-            desc="$repo_count repos"
-            if (( dirty_count )); then
-                desc+=", $dirty_count dirty"
-            else
-                desc+=", clean"
-            fi
-            projects+=("$name:$desc")
-        done
+        local key="projects|$root|$show_dirty"
+        if _fba_comp_cache_get "$key"; then
+            projects=("${(@f)REPLY}")
+        else
+            for dir in "$root"/*(/N); do
+                name="${dir:t}"
+                repo_count=0
+                dirty_count=0
+                for child in "$dir"/*(/N); do
+                    (( repo_count++ ))
+                    (( show_dirty )) || continue
+                    _fba_git_branch_fast "$child" || continue
+                    _fba_git_dirty_count "$child" || continue
+                    [[ "$REPLY" == 0 ]] || (( dirty_count++ ))
+                done
+
+                desc="$repo_count repos"
+                if (( show_dirty )); then
+                    if (( dirty_count )); then
+                        desc+=", $dirty_count dirty"
+                    else
+                        desc+=", clean"
+                    fi
+                fi
+                projects+=("$name:$desc")
+            done
+            (( ${#projects[@]} )) || return 1
+            _fba_comp_cache_set "$key" "${(pj:\n:)projects}"
+        fi
 
         (( ${#projects[@]} )) || return 1
         _describe -t projects 'projects' projects
@@ -967,28 +1104,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
 
     _proj_describe_source_repos() {
         emulate -L zsh
-        local repos_root="$(_proj_repos_root)" dir repo branch dirty desc
-        local -a repos
-
-        [[ -d "$repos_root" ]] || return 1
-        for dir in "$repos_root"/*(/N); do
-            repo="${dir:t}"
-            desc="repo clone"
-            if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-                branch="$(git -C "$dir" branch --show-current 2>/dev/null)"
-                [[ -n "$branch" ]] || branch="detached"
-                dirty="$(git -C "$dir" status --short 2>/dev/null | wc -l | tr -d ' ')"
-                if [[ "$dirty" == "0" ]]; then
-                    desc="$branch, clean"
-                else
-                    desc="$branch, $dirty changes"
-                fi
-            fi
-            repos+=("$repo:$desc")
-        done
-
-        (( ${#repos[@]} )) || return 1
-        _describe -t repositories 'repo clones' repos
+        _fba_describe_checkouts "$(_proj_repos_root)" repositories 'repo clones'
     }
 
     _proj_completion() {
