@@ -13,7 +13,14 @@ export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
 
 # Terminal title: shows "dirname (branch)" or just "dirname" if not in git repo
 # Works with Ghostty (requires shell-integration-features = no-title)
+#
+# Interactive-only. Sourcing this file from a script
+# (`out=$(zsh -fc '... source personal.zsh; some_command')`) would otherwise
+# prepend a raw escape sequence to the captured output. Writing to /dev/tty
+# instead is tempting but worse: it errors outright when there is no controlling
+# terminal, which is exactly the non-interactive case being guarded here.
 function set_terminal_title() {
+    [[ -o interactive ]] || return 0
     local dir="${PWD##*/}"
     local branch=$(git branch --show-current 2>/dev/null)
     if [[ -n "$branch" ]]; then
@@ -259,8 +266,13 @@ PROMPT='%F{green}%*%f %F{blue}%~%f %F{red}${vcs_info_msg_0_}%f$ '
 # ==============================================================================
 # Shell Startup
 # ==============================================================================
-printf '\33c\e[3J'  # Clear screen and scrollback
-echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
+# Interactive-only. A non-interactive source (scripts, tests, anything doing
+# `out=$(zsh -c '... source personal.zsh ...')`) must not have its stdout
+# polluted, and must certainly not have its screen and scrollback wiped.
+if [[ -o interactive ]]; then
+    printf '\33c\e[3J'  # Clear screen and scrollback
+    echo $fg[yellow]'Loaded mho ~/.zshrc'$reset_color
+fi
 
 # ==============================================================================
 # Environment Variables
