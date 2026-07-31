@@ -217,6 +217,12 @@ Guard details live in `llm/command-guard-policy.md`.
   the user explicitly asks, the local codebase already requires that pattern, or
   the change reduces real complexity, risk, or duplication.
 - Re-run affected verification after simplifying.
+- Before committing or pushing, use `$reduce-churn` to audit the complete change
+  against its actual merge target. Use the merge-base/three-dot diff for PR
+  scope, separate required behavior and contract tests from unrelated cleanup,
+  and remove accidental churn before delivery. Do not use a two-dot diff as the
+  PR-scope comparison, and do not push while the final diff classification is
+  unresolved.
 - Final status must state what changed, what ran, and what remains blocked or
   unverified.
 

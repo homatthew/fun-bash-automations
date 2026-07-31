@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reduce Churn"
+  short_description: "Audit diffs and remove unrelated changes"
+  default_prompt: "Use $reduce-churn to audit this change against its actual merge target, minimize unrelated churn, and report what is safe to deliver."
