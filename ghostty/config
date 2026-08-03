@@ -9,3 +9,13 @@ shell-integration-features = no-title
 
 # Agent hooks emit Ghostty-native OSC 9 desktop notifications.
 desktop-notifications = true
+
+# Live theme switching: browse `ghostty +list-themes`, press `w` on one, reload
+# with cmd+shift+comma. Keeps the theme choice in a local file, so experimenting
+# never dirties this repo. `?` stays quiet until that file exists.
+#
+# Absolute, not the `?auto/theme.ghostty` the picker suggests: a relative
+# config-file resolves against its own file's directory, and this config is a
+# symlink into the repo, so `auto/` would be sought here rather than in
+# ~/.config/ghostty where `w` writes.
+config-file = ?~/.config/ghostty/auto/theme.ghostty
