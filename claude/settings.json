@@ -35,6 +35,15 @@
           }
         ],
         "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/cursor-mode-guard.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "SessionStart": [
@@ -50,18 +59,12 @@
     ],
     "Stop": [
       {
-        "hooks": [
-          {
-            "command": "~/.claude/hooks/self-review-guard.sh",
-            "timeout": 20,
-            "type": "command"
-          }
-        ],
+        "hooks": [],
         "matcher": ""
       }
     ]
   },
-  "model": "claude-opus-4-7[1m]",
+  "model": "opus[1m]",
   "permissions": {
     "allow": []
   },

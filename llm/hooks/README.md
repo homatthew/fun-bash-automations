@@ -20,6 +20,7 @@ or future opt-in.
 | `notify-push-event.sh` | UserPromptSubmit | Quiet acknowledgement on a push/delivery event. |
 | `beads-prime.sh` | SessionStart, PreCompact | Emits `bd prime` task context when the shared Beads DB exists. This is context plumbing, not a style/personality hook. |
 | `self-review-guard.sh` | Stop | Prompts for an independent-model code review when the pending diff warrants one. See below. |
+| `cursor-mode-guard.sh` | PreToolUse (Bash) | Denies a Cursor agent launch that omits `--force`, because it would stall on an approval prompt nobody is watching. Names the spawner in the denial. Read-only Cursor calls pass through. Separate from `bash-safety-guard.sh` on purpose: ergonomics gate, not a hard safety control. |
 | `pre-bash.sh`, `pre-bash-log.sh`, `pre-write.sh` | PreTool | Safety rails + logging. |
 | `slack-push-event.sh` | (off by default) | Slack variant of notify-push-event; disabled pending explicit opt-in. |
 
@@ -28,7 +29,7 @@ or future opt-in.
 Registered on `Stop` in `claude/settings.json`. It asks the agent to send the
 pending diff to an independent reviewer model before finishing.
 
-It is deliberately weak in two ways, and both are the point — a check that fires
+It is deliberately weak in three ways, and all three are the point — a check that fires
 on every change and cannot be escaped stops being a safety net and becomes
 something to route around:
 

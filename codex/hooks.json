@@ -22,6 +22,12 @@
             "command": "~/.codex/hooks/bash-safety-guard.sh",
             "statusMessage": "Checking Bash command",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/cursor-mode-guard.sh",
+            "statusMessage": "Checking Cursor launch mode",
+            "timeout": 10
           }
         ]
       }
