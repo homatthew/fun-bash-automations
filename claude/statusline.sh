@@ -19,7 +19,7 @@ DIM='\033[1;90m'
 eval "$(echo "$input" | jq -r '
   @sh "MODEL_NAME=\(.model.display_name // "Claude")",
   @sh "USED_PCT=\(.context_window.used_percentage // 0)",
-  @sh "CTX_SIZE=\(.context_window.context_window_size // 200000)",
+  @sh "CTX_SIZE=\(.context_window.context_window_size // 0)",
   @sh "INPUT_TOK=\(.context_window.current_usage.input_tokens // 0)",
   @sh "OUTPUT_TOK=\(.context_window.current_usage.output_tokens // 0)",
   @sh "CACHE_TOK=\(.context_window.current_usage.cache_read_input_tokens // 0)",
@@ -41,8 +41,17 @@ fi
 
 # ━━━ Model ━━━
 MODEL="${PURPLE}${MODEL_NAME}${RST}"
+# Always badge the context window, never just the good case. A missing badge is
+# ambiguous - it used to mean "not 1M" OR "the payload had no context_window and
+# the default 200000 kicked in" - and a session quietly running the small variant
+# looks identical to one you meant to start that way. So: 1M dim, anything else
+# red and spelled out, unknown as "?".
 if [ "$CTX_SIZE" -ge 1000000 ] 2>/dev/null; then
   MODEL+=" ${DIM}1M${RST}"
+elif [ "$CTX_SIZE" -gt 0 ] 2>/dev/null; then
+  MODEL+=" ${RED}$((CTX_SIZE / 1000))k${RST}"
+else
+  MODEL+=" ${DIM}?${RST}"
 fi
 
 # ━━━ Git ━━━
