@@ -162,6 +162,33 @@ These are not proportional and are never weakened, whatever tier is in play:
 
 The distinction matters: **review ceremony is negotiable; these are not.**
 
+### Launch sub-agents past the user's aliases
+
+The user's interactive shell aliases are theirs and stay as they are:
+
+```
+claude='claude --dangerously-skip-permissions'
+codex='codex --dangerously-bypass-approvals-and-sandbox'
+```
+
+Those are the right ergonomics for a human at a terminal. They are the wrong
+thing to inherit for an agent-launched subprocess, and the bypass flag lands
+*before* the subcommand, so it beats a `-s read-only` you add afterwards. A
+review leg launched as `codex exec -s read-only ...` from a shell that sources
+the user's profile reported `sandbox: danger-full-access` and loaded every MCP
+server — observed, not hypothetical.
+
+**Working around the alias is the agent's job, not the user's.** When spawning
+any agent CLI as a subprocess:
+
+- Invoke the resolved binary, never the bare name: `"$(whence -p codex)" exec`,
+  `command codex`, or an absolute path such as `/opt/homebrew/bin/codex`.
+- State the permissions you want explicitly (`-s read-only`), and disable MCP for
+  legs that only read a diff (`-c 'mcp_servers={}'`).
+- **Read the run header back** — `sandbox:` and `approval:` are echoed at start.
+  If it does not say what you asked for, kill the run and relaunch; do not accept
+  a leg whose posture you could not confirm.
+
 ## Using no-mistakes (Tier 3)
 
 Only on an explicit user ask. Once a run is under way, drive it properly — a

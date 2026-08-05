@@ -86,6 +86,21 @@ verify, not as truth.
 | `claude-opus-5-thinking-high` | `cursor-sub-review` skill |
 | `kimi-k3-high` | `cursor-sub-review` skill |
 
+**Launch past the user's aliases.** `codex` and `claude` are aliased in the
+user's shell to `--dangerously-bypass-approvals-and-sandbox` and
+`--dangerously-skip-permissions`. Those flags land before the subcommand and beat
+the `-s read-only` you add after it, so a review leg started as `codex exec -s
+read-only` ran with `sandbox: danger-full-access` and every MCP server loaded.
+Use the resolved binary and confirm the posture it prints:
+
+```bash
+"$(whence -p codex)" exec -s read-only -c 'mcp_servers={}' "$prompt"
+#   header must say: approval: never / sandbox: read-only
+```
+
+If the header disagrees with what you asked for, kill it and relaunch. A leg
+whose permissions you could not confirm is not a read-only review.
+
 Sequencing: the Codex leg is a native subprocess and may run alongside one
 Cursor leg. The two Cursor legs **must run sequentially** — Cursor's
 `~/.cursor/cli-config.json` is user-level state and concurrent runs race;
