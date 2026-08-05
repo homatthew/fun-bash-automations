@@ -41,6 +41,21 @@ something to route around:
 - **Escapable.** Blocks at most once per distinct diff, and its own message tells
   the agent that `skipping review: <reason>` is a legitimate answer. Any further
   edit changes the diff fingerprint and re-arms it.
+- **Attributable.** Silent when the session wrote none of the diff. A `Stop`
+  fires on every turn, including read-only ones — answering a question, reading
+  code, producing a plan — and telling those to go review work that was already
+  in the tree is noise; it is worst in a delegated planning window whose repo
+  carries unrelated uncommitted work. The check reads the transcript named in the
+  `Stop` payload: a write tool (`Edit`, `Write`, `NotebookEdit`, …), delegation to
+  a subagent (`Agent`, `Task`, `Workflow` — whose own transcript the parent cannot
+  see), or a writing shell command (`git commit/apply/rebase/…` including the
+  `git -C dir …` and `git -c k=v …` forms, `sed -i`, `patch`, `tee`) all count as
+  writing. Two deliberate limits: it is scoped to the session rather than the
+  turn, so once a session has written something its later turns count as authors
+  too; and a write through a shell form or MCP tool not listed above is a known
+  blind spot. Anything unknown — no `transcript_path`, an unreadable transcript, a
+  `grep` that failed rather than found nothing, no `jq` — falls back to prompting;
+  only "no match" counts as proof.
 
 State lives in `<git-dir>/fba-self-review.log`, capped at 200 lines. The Stop
 path always exits 0, so a bug here cannot wedge a session.

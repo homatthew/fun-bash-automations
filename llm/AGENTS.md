@@ -122,8 +122,9 @@ worth it — say so in one line (`skipping review: <reason>`) and move on. State
 plainly; do not fake a review, and do not silently skip one either.
 
 The `self-review-guard.sh` Stop hook prompts for review when a diff hits the
-tier-2 triggers. It asks **once** per diff and never blocks twice, so it can
-prompt but cannot trap. Record a completed review with
+tier-2 triggers **and this session wrote some of it** — a read-only or plan-only
+turn is never asked to review work that was already in the tree. It asks **once**
+per diff and never blocks twice, so it can prompt but cannot trap. Record a completed review with
 `self-review-guard.sh --mark-reviewed` — because you did the review, never to
 silence the prompt.
 

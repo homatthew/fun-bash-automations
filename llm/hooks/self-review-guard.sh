@@ -3,8 +3,8 @@
 #
 # Design constraint, learned the hard way from the no-mistakes gate: a check that
 # fires on *every* change and cannot be escaped stops being a safety net and
-# becomes something you route around. So this one is deliberately weak in two
-# ways, and both are features:
+# becomes something you route around. So this one is deliberately weak in three
+# ways, and all three are features:
 #
 #   1. Proportional - it stays silent unless the diff earns attention (sensitive
 #      surface, or wide enough that eyeballing it is unreliable). Editing
@@ -13,13 +13,19 @@
 #   2. Escapable - it blocks at most once per distinct diff, and its own message
 #      tells the agent that "skipping review: <reason>" is a legitimate answer.
 #      It can prompt; it can never trap.
+#   3. Attributable - it only asks about work this session actually did. A Stop
+#      fires on every turn, including the read-only ones: answering a question,
+#      reading code, writing a plan. Asking those to review a diff that was
+#      already sitting in the tree is pure noise, and it lands worst in a
+#      delegated planning window whose repo carries someone else's work.
 #
 # The hard safety controls are elsewhere and are NOT like this: protected-branch
 # pushes, force-pushes, and --no-verify stay blocked by bash-safety-guard.sh and
 # the git-level pre-push hook. This hook only ever asks for a code review.
 #
 # Contract:
-#   stdin  : Claude Code Stop-hook JSON payload
+#   stdin  : Claude Code Stop-hook JSON payload (cwd, stop_hook_active,
+#            transcript_path)
 #   stdout : {"decision":"block","reason":"..."} to refuse the stop, else nothing
 #   exit   : 0 for every outcome including a normal block. The single exception
 #            is the jq-less fallback, which blocks via exit 2 (the documented
@@ -216,6 +222,70 @@ untracked_line_count() {
     esac
 }
 
+# ---- attribution -------------------------------------------------------------
+# Whether this session wrote any of the diff, read off the session transcript
+# named in the Stop payload. Repo state alone cannot answer this: a plan-only
+# turn in a repo that already carries uncommitted work looks exactly like a turn
+# that just wrote 750 lines.
+
+# Tool calls that can put changes in the tree. Agent/Task/Workflow are in here
+# because a subagent's own tool calls land in a *separate* transcript file, so
+# from the parent transcript delegation is opaque and has to count as writing.
+# The ` *` after the colon is not decoration: if the transcript ever stops being
+# compact JSON, this check has to keep matching rather than silently decide that
+# nothing was ever written.
+WRITE_TOOL_RE='"name": *"(Edit|MultiEdit|Write|NotebookEdit|Update|ApplyPatch|Agent|Task|Workflow)"'
+
+# Shell that writes without going through a write tool, matched only against
+# transcript lines that call Bash. Deliberately a short list of the forms an
+# agent actually reaches for: a redirect into the repo, an MCP tool that writes,
+# or an in-place editor not named here is a known blind spot. One prompt too few
+# is the cheaper failure - /ship still runs a review leg on purpose.
+#
+# The git option group allows one non-dash token after a dash option, so the
+# separated-value forms an agent really does emit - `git -C dir commit`,
+# `git -c k=v commit`, `git --git-dir d commit` - reach their verb. Requiring
+# every pre-verb token to start with a dash let all three through unseen.
+#
+# The verb also has to end a whole token. `[^a-z]` was not enough, because that
+# option group can give its value back: `git -c commit.verbose=true log` matched
+# the `commit` inside the config key and `git -C commit-dir status` the one in
+# the directory name - two read-only commands read as writes. Excluding the
+# characters a token can continue with (letters, digits, . _ = / -) stops both
+# while `git commit -qm x` and a bare `git stash"` still match.
+BASH_WRITE_RE='git( +-{1,2}[a-zA-Z][^ ]*( +[^- ][^ ]*)?)* +(add|am|apply|checkout|cherry-pick|clean|commit|merge|mv|rebase|reset|restore|revert|rm|stash|switch)([^a-z0-9._=/-]|$)|sed +-[a-zA-Z]*i|perl +-[a-zA-Z]*i|patch +[-<]|tee +|dd +of='
+
+# Can we *prove* this session wrote nothing? 0 means proved, so stay silent.
+# Every unknown - no transcript path, a transcript we cannot read, a grep that
+# failed rather than found nothing - answers no and leaves the decision to the
+# proportionality rules, which is exactly the behaviour that predates this
+# check. Only grep's "no match" is evidence.
+session_wrote_nothing() {
+    local transcript="${1:-}" rc
+    local -a st
+    [ -n "$transcript" ] || return 1
+    [ -f "$transcript" ] || return 1
+    [ -r "$transcript" ] || return 1
+
+    grep -Eq "$WRITE_TOOL_RE" "$transcript" 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 1 ] || return 1
+
+    # Two greps, so the answer comes out of PIPESTATUS, not the pipeline status.
+    # `grep -q` exits at its first match and the left grep then dies of SIGPIPE
+    # (141); under `pipefail` that 141 *becomes* the pipeline status, so a plain
+    # `... && return 1` reads a positively detected write as "wrote nothing" and
+    # goes silent. Reproduced on a 7.5MB transcript whose first Bash call was
+    # `git commit`. The right-hand status is the verdict; the left-hand one only
+    # has to rule out a grep that failed rather than one that found nothing.
+    grep -E '"name": *"Bash"' "$transcript" 2>/dev/null | grep -Eq "$BASH_WRITE_RE"
+    st=("${PIPESTATUS[@]}")
+    [ "${st[1]:-1}" -eq 1 ] || return 1
+    [ "${st[0]:-0}" -le 1 ] || return 1
+
+    return 0
+}
+
 state_of() {
     local hash="$1" path
     path="$(log_path)" || return 1
@@ -342,7 +412,11 @@ case "${1:-}" in
         exit 0
         ;;
     -h|--help)
-        sed -n '2,29p' "$0"
+        # The whole header block, however long it grows, and nothing past it. A
+        # fixed line range silently truncated the help every time the header was
+        # edited; a sed range ending at /^[^#]/ skipped the blank line and
+        # printed the first line of code instead.
+        awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"
         exit 0
         ;;
 esac
@@ -356,6 +430,8 @@ if [ ! -t 0 ]; then
     payload="$(cat 2>/dev/null || true)"
 fi
 
+transcript=''
+
 # Never block a stop that is itself the result of this hook blocking.
 if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
     if [ "$(printf '%s' "$payload" | jq -r '.stop_hook_active // false' 2>/dev/null)" = "true" ]; then
@@ -363,12 +439,19 @@ if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
     fi
     cwd="$(printf '%s' "$payload" | jq -r '.cwd // ""' 2>/dev/null)"
     [ -n "$cwd" ] && [ -d "$cwd" ] && cd "$cwd" 2>/dev/null
+    transcript="$(printf '%s' "$payload" | jq -r '.transcript_path // ""' 2>/dev/null)"
 fi
 
 # Anchor at the repository root so the fingerprint does not depend on which
 # subdirectory this session happened to be sitting in.
 cd_repo_root || exit 0
 has_changes || exit 0
+
+# Attributable: a turn that wrote nothing is not asked to review what it found.
+# This deliberately sits *before* claim_notify, so staying quiet here does not
+# spend the one prompt this diff gets - the session that does write to it still
+# gets asked.
+session_wrote_nothing "$transcript" && exit 0
 
 # Proportional: most diffs never reach the block below.
 trigger="$(review_trigger)" || exit 0

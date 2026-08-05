@@ -291,4 +291,149 @@ elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -le 10 ] || { echo "guard took ${elapsed}s with a large untracked file; read is not bounded" >&2; exit 1; }
 reset_clean
 
+# --- attribution: a turn that wrote nothing is never asked --------------------
+# The complaint this exists for: a delegated plan-only window, in a repo that
+# already carried someone else's uncommitted work, was told to go get a review.
+
+payload_t() {
+    printf '{"hook_event_name":"Stop","cwd":"%s","stop_hook_active":false,"transcript_path":"%s"}' \
+        "$REPO" "$1"
+}
+
+run_guard_t() {
+    local out rc
+    set +e
+    out="$(payload_t "$1" | "$GUARD" 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "$out"
+    if [ "$rc" -ne 0 ]; then
+        echo "guard exited $rc (must always exit 0 on the Stop path)" >&2
+        exit 1
+    fi
+}
+
+tool_line() {
+    printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"%s","input":{"command":"%s"}}]}}\n' \
+        "$1" "${2:-}"
+}
+
+t_read="$TMP/t-readonly.jsonl"
+t_write="$TMP/t-write.jsonl"
+t_agent="$TMP/t-agent.jsonl"
+t_shell="$TMP/t-shell.jsonl"
+{ tool_line Read; tool_line Grep; tool_line Bash 'git diff --stat && git log --oneline -5'; } > "$t_read"
+{ tool_line Read; tool_line Edit; } > "$t_write"
+{ tool_line Read; tool_line Agent; } > "$t_agent"
+{ tool_line Read; tool_line Bash 'git commit -qm wip'; } > "$t_shell"
+
+reset_clean
+mkdir -p hooks
+printf 'echo attribution\n' > hooks/attribution-guard.sh   # sensitive: would block
+
+out="$(run_guard_t "$t_read")"
+[ -z "$out" ] || { echo "a read-only turn must not be asked to review a diff it did not write, got: $out" >&2; exit 1; }
+
+# ...and staying quiet must not spend the single prompt this diff gets.
+out="$(run_guard_t "$t_write")"
+grep -q '"decision":"block"' <<<"$out" || { echo "a write tool must still arm the guard on the same diff, got: $out" >&2; exit 1; }
+
+# Delegation is opaque from the parent transcript, so it counts as writing.
+printf 'echo more\n' >> hooks/attribution-guard.sh
+out="$(run_guard_t "$t_agent")"
+grep -q '"decision":"block"' <<<"$out" || { echo "delegating to a subagent must count as writing, got: $out" >&2; exit 1; }
+
+# So does writing through the shell instead of a write tool.
+printf 'echo yet more\n' >> hooks/attribution-guard.sh
+out="$(run_guard_t "$t_shell")"
+grep -q '"decision":"block"' <<<"$out" || { echo "a writing shell command must count as writing, got: $out" >&2; exit 1; }
+
+# Unknown answers keep the old behaviour: absent transcript, unreadable file, and
+# a payload with no transcript_path at all must all still prompt.
+printf 'echo still more\n' >> hooks/attribution-guard.sh
+out="$(run_guard_t "$TMP/no-such-transcript.jsonl")"
+grep -q '"decision":"block"' <<<"$out" || { echo "a missing transcript must fall back to prompting, got: $out" >&2; exit 1; }
+
+printf 'echo and more\n' >> hooks/attribution-guard.sh
+out="$(run_guard)"
+grep -q '"decision":"block"' <<<"$out" || { echo "a payload without transcript_path must fall back to prompting, got: $out" >&2; exit 1; }
+
+# chmod 000 only makes a file unreadable for a non-root euid; root ignores the
+# mode, the transcript really is readable, and the guard is right to read it.
+if [ "$(id -u)" -ne 0 ]; then
+    printf 'echo last\n' >> hooks/attribution-guard.sh
+    unreadable="$TMP/t-unreadable.jsonl"
+    tool_line Read > "$unreadable"
+    chmod 000 "$unreadable"
+    out="$(run_guard_t "$unreadable")"
+    chmod 644 "$unreadable"
+    grep -q '"decision":"block"' <<<"$out" || { echo "an unreadable transcript must fall back to prompting, got: $out" >&2; exit 1; }
+fi
+reset_clean
+
+# --- regressions found by the independent review leg on the attribution gate --
+
+# A write detected in a *large* transcript must still block. `grep -q` exits at
+# its first match, the left grep of the pipeline dies of SIGPIPE (141), and under
+# `pipefail` that 141 became the pipeline status - so a detected `git commit`
+# read as "wrote nothing" and the guard went silent. Needs a transcript big
+# enough that the left grep is still writing when the right one exits.
+t_big="$TMP/t-big.jsonl"
+{
+    tool_line Bash 'git commit -qm early'
+    i=1
+    while [ "$i" -le 40000 ]; do
+        tool_line Bash "git status --short $i"
+        i=$((i + 1))
+    done
+} > "$t_big"
+[ "$(wc -c < "$t_big" | tr -d ' ')" -gt 1000000 ] || { echo "the SIGPIPE fixture must be large enough to fill a pipe buffer" >&2; exit 1; }
+
+reset_clean
+mkdir -p hooks
+printf 'echo sigpipe\n' > hooks/sigpipe-guard.sh
+out="$(run_guard_t "$t_big")"
+grep -q '"decision":"block"' <<<"$out" || { echo "a write early in a large transcript must still be seen, got: $out" >&2; exit 1; }
+
+# Git's separated-value global options must not smuggle a write past the check:
+# requiring every pre-verb token to start with a dash hid `git -C dir commit`,
+# `git -c k=v commit` and `git --git-dir d commit` completely.
+rearm=0
+for cmd in 'git -C /repo commit -qm wip' 'git -c user.email=x commit -m y' 'git --git-dir /d --work-tree /w commit -m z' 'patch < fix.diff'; do
+    rearm=$((rearm + 1))
+    printf 'echo rearm-%s\n' "$rearm" >> hooks/sigpipe-guard.sh   # a fresh diff per case
+    t_case="$TMP/t-case.jsonl"
+    { tool_line Read; tool_line Bash "$cmd"; } > "$t_case"
+    out="$(run_guard_t "$t_case")"
+    grep -q '"decision":"block"' <<<"$out" || { echo "[$cmd] must count as writing, got: $out" >&2; exit 1; }
+done
+
+# ...while read-only git plumbing must stay silent, or the gate buys nothing.
+reset_clean
+mkdir -p hooks
+printf 'echo readonly\n' > hooks/readonly-guard.sh
+t_ro="$TMP/t-readonly-git.jsonl"
+{
+    tool_line Bash 'git status --short && echo done'
+    tool_line Bash 'git diff --stat -- src/add_thing.py'
+    tool_line Bash 'git log --oneline -5'
+    tool_line Bash 'grep -rn "commit" src/'
+    # A write verb can appear inside a config key or a directory name. Both of
+    # these are read-only and used to be classified as writes.
+    tool_line Bash 'git -c commit.verbose=true log --oneline'
+    tool_line Bash 'git -C commit-dir status --short'
+    tool_line Bash 'git -c rebase.autoStash=true diff --stat'
+} > "$t_ro"
+out="$(run_guard_t "$t_ro")"
+[ -z "$out" ] || { echo "read-only git plumbing must not count as writing, got: $out" >&2; exit 1; }
+reset_clean
+
+# --help must print the whole header and stop there.
+help_out="$("$GUARD" --help)"
+for phrase in Proportional Escapable Attributable --mark-reviewed FBA_REVIEW_MAX_LINES; do
+    grep -q -e "$phrase" <<<"$help_out" || { echo "--help must mention $phrase" >&2; exit 1; }
+done
+grep -q 'set -uo pipefail' <<<"$help_out" && { echo "--help must stop at the header, not print code" >&2; exit 1; }
+printf '%s\n' "$help_out" | grep -qv '^#' && { echo "--help must print comment lines only" >&2; exit 1; }
+
 echo "self-review-guard-regression: ok"
