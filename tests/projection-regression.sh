@@ -225,14 +225,45 @@ else
 fi
 
 explicit_skills="$TMP_ROOT/explicit-skills"
-mkdir -p "$explicit_skills/selected-skill"
+mkdir -p "$explicit_skills/selected-skill" "$TMP_HOME/.cursor"
 printf '%s\n' 'selected' > "$explicit_skills/selected-skill/SKILL.md"
 run_deploy --shared-only --external-skills-dir "$explicit_skills" >/dev/null
-if [[ -L "$TMP_HOME/.claude/skills/selected-skill" && -L "$TMP_HOME/.codex/skills/selected-skill" ]]; then
-  pass "explicit external skills directory is projected"
+if [[ -L "$TMP_HOME/.claude/skills/selected-skill" \
+  && -L "$TMP_HOME/.codex/skills/selected-skill" \
+  && -L "$TMP_HOME/.cursor/skills/selected-skill" ]]; then
+  pass "shared-only projects explicit external skills to all runtimes"
 else
-  fail "explicit external skills directory is projected"
+  fail "shared-only projects explicit external skills to all runtimes"
 fi
+
+# An explicitly selected private overlay must converge across all three
+# runtimes. The sibling allowlist is authoritative, including removals.
+layered_skills="$TMP_ROOT/layered-skills"
+mkdir -p "$layered_skills/active-skill" "$layered_skills/retired-skill"
+printf '%s\n' 'active' > "$layered_skills/active-skill/SKILL.md"
+printf '%s\n' 'retired' > "$layered_skills/retired-skill/SKILL.md"
+printf '%s\n' active-skill retired-skill > "$layered_skills.allowlist"
+run_deploy --external-skills-dir "$layered_skills" >/dev/null
+for runtime in claude codex cursor; do
+  if [[ -L "$TMP_HOME/.$runtime/skills/active-skill" \
+    && -L "$TMP_HOME/.$runtime/skills/retired-skill" ]]; then
+    pass "$runtime receives allowlisted external skills"
+  else
+    fail "$runtime receives allowlisted external skills"
+  fi
+done
+
+printf '%s\n' active-skill > "$layered_skills.allowlist"
+run_deploy --external-skills-dir "$layered_skills" >/dev/null
+for runtime in claude codex cursor; do
+  if [[ -L "$TMP_HOME/.$runtime/skills/active-skill" \
+    && ! -e "$TMP_HOME/.$runtime/skills/retired-skill" \
+    && ! -L "$TMP_HOME/.$runtime/skills/retired-skill" ]]; then
+    pass "$runtime prunes de-allowlisted external skills"
+  else
+    fail "$runtime prunes de-allowlisted external skills"
+  fi
+done
 
 relative_skills="$TMP_ROOT/relative-skills"
 mkdir -p "$relative_skills/relative-skill"
@@ -281,15 +312,19 @@ else
 fi
 
 collision_home="$TMP_ROOT/collision-home"
-mkdir -p "$collision_home/.claude/skills/architect"
-printf '%s\n' 'unmanaged' > "$collision_home/.claude/skills/architect/SKILL.md"
+mkdir -p "$collision_home/.claude/skills/technical-writing"
+printf '%s\n' 'unmanaged' > "$collision_home/.claude/skills/technical-writing/SKILL.md"
 if collision_out="$(HOME="$collision_home" FBA_DEPLOY_SKIP_GIT_HOOK=1 FBA_DEPLOY_SKIP_MAC_EXTRAS=1 \
   "$ROOT/bin/fba-deploy" --claude-only 2>&1)"; then
-  fail "managed projection rejects an existing directory collision"
-elif [[ "$collision_out" == *"Refusing to replace unmanaged projection"* ]]; then
-  pass "managed projection rejects an existing directory collision"
+  if [[ "$collision_out" == *"Refusing to replace unmanaged projection"* \
+    && "$collision_out" == *"skipped skill 'technical-writing'"* \
+    && "$(cat "$collision_home/.claude/skills/technical-writing/SKILL.md")" == unmanaged ]]; then
+    pass "managed projection preserves and reports an existing skill collision"
+  else
+    fail "managed projection collision was not preserved clearly: $collision_out"
+  fi
 else
-  fail "managed projection collision failure was unclear: $collision_out"
+  fail "one unmanaged skill collision aborted unrelated projections: $collision_out"
 fi
 
 # A byte-identical regular file where a symlink belongs is re-adopted, not
@@ -352,13 +387,22 @@ fi
 missing_skills=()
 for skill_dir in "$ROOT"/llm/skills/*/; do
   name="$(basename "$skill_dir")"
+  grep -Ev '^[[:space:]]*(#|$)' "$ROOT/llm/skills.allowlist" | grep -Fxq "$name" || continue
   [[ -e "$TMP_HOME/.claude/skills/$name" ]] || missing_skills+=("claude:$name")
   [[ -e "$TMP_HOME/.codex/skills/$name" ]] || missing_skills+=("codex:$name")
+  [[ -e "$TMP_HOME/.cursor/skills/$name" ]] || missing_skills+=("cursor:$name")
 done
 if [[ ${#missing_skills[@]} -eq 0 ]]; then
-  pass "all llm/skills/* projected to both runtimes"
+  pass "allowlisted shared skills projected to all runtimes"
 else
   fail "skills missing: ${missing_skills[*]}"
+fi
+if [[ ! -e "$TMP_HOME/.claude/skills/ship" \
+  && ! -e "$TMP_HOME/.codex/skills/ship" \
+  && ! -e "$TMP_HOME/.cursor/skills/ship" ]]; then
+  pass "non-allowlisted shared skills are not projected"
+else
+  fail "non-allowlisted shared skills are not projected"
 fi
 if [[ ! -e "$TMP_HOME/.claude/skills/commit-push-pr" && ! -L "$TMP_HOME/.claude/skills/commit-push-pr" ]]; then
   pass "retired repo-managed skill directory pruned"

@@ -8,7 +8,8 @@ harnesses.
 - `AGENTS.md` shared instruction policy
 - `agent-push-policy.json` schema-backed branch classes for delivery vs
   opt-in non-delivery scratch pushes
-- `skills/*/SKILL.md` shared skills
+- `skills/*/SKILL.md` retained skill sources
+- `skills.allowlist` custom skills projected into runtimes
 - `hooks/*.sh` shared hooks (projected to both harnesses)
 - `manifest.json` machine-readable mapping for projection scripts
 - `integrations.md` Claude plugin vs Codex MCP parity map
@@ -21,7 +22,8 @@ harnesses.
 ## Canonical Editing Rules
 
 1. Edit shared guidance in `llm/AGENTS.md`.
-2. Edit shared skills only under `llm/skills/`.
+2. Edit shared skills only under `llm/skills/`; add one to
+   `llm/skills.allowlist` only after its recurring job is demonstrated.
 3. Keep harness-specific deltas in adapter files (`claude/CLAUDE.md`, Claude
    runtime hooks/settings).
 4. Never treat `~/.claude` or `~/.codex` as source of truth.
@@ -46,7 +48,7 @@ LLM skills, use `config/llm/skills-internal/`; for private shell config, use
   - `~/.claude/CLAUDE.md` -> `claude/CLAUDE.md`
   - `~/.claude/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.claude/agent-push-policy*.json` -> `llm/agent-push-policy*.json`
-  - `~/.claude/skills/*` -> `llm/skills/*`
+  - `~/.claude/skills/*` -> skills named in `llm/skills.allowlist`
   - `~/.claude/hooks/*.sh` -> `llm/hooks/*.sh` + `claude/hooks/*.sh`
 - Codex:
   - `~/.codex/auth.json` -> preserved as user-local authentication state
@@ -56,14 +58,17 @@ LLM skills, use `config/llm/skills-internal/`; for private shell config, use
   - `~/.codex/hooks/*.sh` -> `llm/hooks/*.sh`
   - `~/.codex/AGENTS.md` -> `llm/AGENTS.md`
   - `~/.codex/agent-push-policy*.json` -> `llm/agent-push-policy*.json`
-  - `~/.codex/skills/*` -> `llm/skills/*` (preserve `.codex/skills/.system`)
+  - `~/.codex/skills/*` -> skills named in `llm/skills.allowlist` (preserve
+    `.codex/skills/.system`)
 
 Adding a new shared hook: drop a `.sh` into `llm/hooks/`, run `fba-deploy`,
 then wire it into each harness's config (`claude/settings.json`,
 `codex/hooks.json`).
 - External skills are projected only from directories explicitly passed with
-  `fba-deploy --external-skills-dir <dir>`; machine-specific checkouts are never
-  discovered implicitly.
+  `fba-deploy --external-skills-dir <dir>`; they reach Claude, Codex, and Cursor.
+  If `<dir>.allowlist` exists, it controls both projection and pruning so the
+  three runtimes converge after every deploy. Machine-specific checkouts are
+  never discovered implicitly.
   Private overlays own any related environments, credentials, and install
   paths.
 

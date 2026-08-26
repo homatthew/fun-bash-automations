@@ -16,16 +16,20 @@ fba_log() {
 
 usage() {
     cat <<'EOF'
-Usage: fba-deploy [--claude-only | --codex-only | --shared-only] [--external-skills-dir <dir>]
+Usage: fba-deploy [--claude-only | --codex-only | --cursor-only | --bin-only | --shared-only] [--external-skills-dir <dir>]
 
 Project repo-owned LLM config from fun-bash-automations into local runtimes.
 
 Modes:
   --claude-only  Update ~/.claude plus shared AGENTS/skills
   --codex-only   Update ~/.codex plus shared AGENTS/skills
-  --shared-only  Update only shared AGENTS/skills in both runtimes
+  --cursor-only  Update ~/.cursor/skills (Cursor review legs)
+  --bin-only     Link bin/ executables into ~/.local/bin (PATH)
+  --shared-only  Update shared AGENTS/skills plus Cursor skills
   --external-skills-dir <dir>
                   Add skills from an explicitly selected external directory
+                  to every selected runtime. If <dir>.allowlist exists, only
+                  names listed there are projected.
 EOF
 }
 
@@ -36,6 +40,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --codex-only)
             MODE="codex"
+            ;;
+        --bin-only)
+            MODE="bin"
+            ;;
+        --cursor-only)
+            MODE="cursor"
             ;;
         --shared-only)
             MODE="shared"
@@ -56,6 +66,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
     shift
+done
+
+for external_skills_dir in "${EXTERNAL_SKILLS_DIRS[@]}"; do
+    [[ -n "$external_skills_dir" ]] || continue
+    [[ -d "$external_skills_dir" ]] || {
+        echo "External skills directory does not exist: $external_skills_dir" >&2
+        exit 1
+    }
 done
 
 "$ROOT/scripts/check-push-safety.sh"
@@ -322,6 +340,75 @@ prune_retired_repo_managed_skills() {
     done < <(retired_repo_managed_skill_names)
 }
 
+shared_skill_is_enabled() {
+    local name="$1"
+    local allowlist="$ROOT/llm/skills.allowlist"
+    [[ -f "$allowlist" ]] || return 0
+    grep -Ev '^[[:space:]]*(#|$)' "$allowlist" | grep -Fxq "$name"
+}
+
+external_skill_is_enabled() {
+    local external_skills_dir="$1"
+    local name="$2"
+    local allowlist="${external_skills_dir%/}.allowlist"
+    [[ -f "$allowlist" ]] || return 0
+    grep -Ev '^[[:space:]]*(#|$)' "$allowlist" | grep -Fxq "$name"
+}
+
+# External directories are explicit overlays. Remove only links owned by the
+# selected overlays before rebuilding them, so a deleted or de-allowlisted
+# skill cannot linger in one runtime after the next deploy.
+prune_selected_external_skills() {
+    local home_dir="$1"
+    local external_skills_dir external_root dest_path target
+    for external_skills_dir in "${EXTERNAL_SKILLS_DIRS[@]}"; do
+        [[ -n "$external_skills_dir" ]] || continue
+        external_root="$(canonical_path "$external_skills_dir")"
+        for dest_path in "$home_dir"/skills/*; do
+            [[ -L "$dest_path" ]] || continue
+            target="$(canonical_path "$dest_path")"
+            case "$target" in
+                "$external_root"/*)
+                    rm -f "$dest_path"
+                    fba_log "pruned selected external skill: $dest_path"
+                    ;;
+            esac
+        done
+    done
+}
+
+project_external_skills() {
+    local home_dir="$1"
+    local external_skills_dir skill_dir name
+    for external_skills_dir in "${EXTERNAL_SKILLS_DIRS[@]}"; do
+        [[ -n "$external_skills_dir" ]] || continue
+        for skill_dir in "$external_skills_dir"/*/; do
+            [[ -d "$skill_dir" ]] || continue
+            name="$(basename "$skill_dir")"
+            external_skill_is_enabled "$external_skills_dir" "$name" || continue
+            link_path "$skill_dir" "$home_dir/skills/$name"
+        done
+    done
+}
+
+prune_disabled_repo_managed_skills() {
+    local home_dir="$1"
+    local dest_path name target
+    for dest_path in "$home_dir"/skills/*; do
+        [[ -L "$dest_path" ]] || continue
+        target="$(readlink "$dest_path" || true)"
+        case "$target" in
+            "$ROOT/llm/skills/"*|"$ROOT/llm/skills"/*)
+                name="$(basename "$dest_path")"
+                if ! shared_skill_is_enabled "$name"; then
+                    rm -f "$dest_path"
+                    fba_log "pruned disabled repo-managed skill: $dest_path"
+                fi
+                ;;
+        esac
+    done
+}
+
 project_shared_hooks() {
     local target_hooks_dir="$1"
     mkdir -p "$target_hooks_dir"
@@ -483,7 +570,9 @@ PY
 project_shared() {
     local home_dir="$1"
     mkdir -p "$home_dir/skills"
+    prune_selected_external_skills "$home_dir"
     prune_retired_repo_managed_skills "$home_dir"
+    prune_disabled_repo_managed_skills "$home_dir"
 
     if [[ -f "$ROOT/llm/AGENTS.md" ]]; then
         link_path "$ROOT/llm/AGENTS.md" "$home_dir/AGENTS.md"
@@ -494,27 +583,31 @@ project_shared() {
         fi
     done
 
+    # One unmanaged destination must not abort the whole deploy.
+    #
+    # `~/.claude/skills/herdr` is a symlink herdr installs itself
+    # (-> ../../.agents/skills/herdr). Once this repo also carried an `herdr`
+    # skill, link_path correctly refused to clobber it — and under `set -e` that
+    # single refusal killed the entire run, so every later projection silently
+    # never happened and `fba-deploy` exited 1. The refusal is the safety property
+    # worth keeping; taking 40 other projections down with it is collateral.
+    #
+    # So: skip and report. A deploy that half-ran while claiming success is the
+    # failure mode being avoided in both directions.
+    local skipped=0
     for skill_dir in "$ROOT"/llm/skills/*/; do
         [[ -d "$skill_dir" ]] || continue
         local name
         name="$(basename "$skill_dir")"
-        link_path "$skill_dir" "$home_dir/skills/$name"
-    done
-
-    local external_skills_dir
-    for external_skills_dir in "${EXTERNAL_SKILLS_DIRS[@]}"; do
-        [[ -n "$external_skills_dir" ]] || continue
-        [[ -d "$external_skills_dir" ]] || {
-            echo "External skills directory does not exist: $external_skills_dir" >&2
-            return 1
+        shared_skill_is_enabled "$name" || continue
+        link_path "$skill_dir" "$home_dir/skills/$name" || {
+            echo "fba-deploy: skipped skill '$name' in $home_dir (destination owned by something else)" >&2
+            skipped=$((skipped + 1))
         }
-        for skill_dir in "$external_skills_dir"/*/; do
-            [[ -d "$skill_dir" ]] || continue
-            local name
-            name="$(basename "$skill_dir")"
-            link_path "$skill_dir" "$home_dir/skills/$name"
-        done
     done
+    [[ $skipped -eq 0 ]] || echo "fba-deploy: $skipped skill(s) skipped in $home_dir" >&2
+
+    project_external_skills "$home_dir"
 }
 
 deploy_claude() {
@@ -581,10 +674,69 @@ deploy_codex() {
     project_shared_hooks "$HOME/.codex/hooks"
 }
 
+# Cursor is a first-class review runtime, so it needs the shared skills too.
+#
+# Two of `ctxreview`'s four legs run on Cursor. Without this they review with
+# only what is inlined in the prompt, while the Claude and Codex legs also have
+# `context-pack`, `code-review` and the rest available — so "every leg gets the
+# identical pack" was quietly false.
+#
+# Narrower than project_shared on purpose: skills only. `~/.cursor/skills` also
+# holds skills installed by other tooling, and the retired-skill prune plus
+# AGENTS.md/push-policy projection are Claude/Codex concerns. Cursor's own
+# built-ins live in `~/.cursor/skills-cursor`, a separate directory, so there is
+# no collision.
+deploy_cursor() {
+    [[ -d "$HOME/.cursor" ]] || {
+        fba_log "skipping cursor: ~/.cursor does not exist"
+        return 0
+    }
+    mkdir -p "$HOME/.cursor/skills"
+    prune_selected_external_skills "$HOME/.cursor"
+    prune_disabled_repo_managed_skills "$HOME/.cursor"
+    local skill_dir name
+    for skill_dir in "$ROOT"/llm/skills/*/; do
+        [[ -d "$skill_dir" ]] || continue
+        name="$(basename "$skill_dir")"
+        shared_skill_is_enabled "$name" || continue
+        link_path "$skill_dir" "$HOME/.cursor/skills/$name"
+    done
+    project_external_skills "$HOME/.cursor"
+}
+
+# Put this repository's own executables on PATH.
+#
+# README's install table already claimed `bin/` -> `~/.local/bin`, but nothing
+# projected it: PATH came only from the PRIVATE dotfiles repo. So a clean install
+# of this repo alone gave you the skills and none of the tools -- `ctxpack`,
+# `ctxreview`, `wt-audit`, `kun-status` were all unreachable, and the documented
+# behaviour was simply false.
+#
+# PATH for the repo's own portable tools is not machine-specific or confidential,
+# so it belongs here rather than in the private overlay. Library files, caches and
+# helper modules are skipped: only things meant to be run by name.
+deploy_bin() {
+    mkdir -p "$HOME/.local/bin"
+    local f name
+    for f in "$ROOT"/bin/*; do
+        [[ -f "$f" && -x "$f" ]] || continue
+        name="$(basename "$f")"
+        case "$name" in
+            *.py|*-lib.sh|__pycache__) continue ;;   # imported, not invoked
+        esac
+        # link_path refuses to overwrite an unmanaged file, so a same-named tool
+        # installed by something else fails loudly instead of being clobbered.
+        link_path "$f" "$HOME/.local/bin/$name" || \
+            echo "fba-deploy: skipped $name (destination not ours)" >&2
+    done
+}
+
 case "$MODE" in
     all)
         deploy_claude
         deploy_codex
+        deploy_cursor
+        deploy_bin
         ;;
     claude)
         deploy_claude
@@ -592,10 +744,17 @@ case "$MODE" in
     codex)
         deploy_codex
         ;;
+    bin)
+        deploy_bin
+        ;;
+    cursor)
+        deploy_cursor
+        ;;
     shared)
         mkdir -p "$HOME/.claude" "$HOME/.codex"
         project_shared "$HOME/.claude"
         project_shared "$HOME/.codex"
+        deploy_cursor
         ;;
 esac
 

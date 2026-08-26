@@ -1,0 +1,10 @@
+# Shared custom skills projected into agent runtimes.
+#
+# Stock-first baseline: a skill must have a recurring, distinct job that the
+# base model and repository instructions do not already cover.
+code-review
+context-pack
+cursor-change-explainer
+cursor-sub-review
+technical-writing
+writing-for-agents
