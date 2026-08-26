@@ -165,9 +165,11 @@ The mechanism is portable and lives here. The corpora are not:
 | `code-bible/rules/`, `lenses/`, `personas/`, `weighting.md`, `adjudications.jsonl` | `$SECOND_BRAIN_DIR/review` (private) | internal class names, PR numbers, colleagues' words, service topology |
 
 This follows the Open-Source Boundary rule in the repo's `AGENTS.md`. The
-default resolves to `~/repos/dump/second-brain/review`; override with
-`CTXPACK_BIBLE_DIR`. `ctxpack doctor` reports which corpora resolved, and every
-section degrades to a one-line "(not configured)" rather than failing.
+public tool does not discover a corpus. Opt in with `CTXPACK_BRAIN_DIR` and
+`CTXPACK_BIBLE_DIR`, or set `SECOND_BRAIN_DIR` to supply both roots. `ctxpack
+doctor` reports which corpora resolved, and every optional section degrades to a
+one-line disabled message rather than failing. Scratch directories are mode
+`0700`; generated pack and harvested-corpus files are mode `0600`.
 
 ## Usage
 

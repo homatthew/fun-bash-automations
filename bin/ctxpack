@@ -11,14 +11,15 @@
 #
 # See: llm/context-packs/README.md
 set -euo pipefail
+umask 077
 
 VERSION="0.1.0"
 SELF="${0##*/}"
 
 # ---------------------------------------------------------------- config ----
 
-BIBLE_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:-$HOME/repos/dump/second-brain}/review}"
-BRAIN_DIR="${SECOND_BRAIN_DIR:-$HOME/repos/dump/second-brain}"
+BRAIN_DIR="${CTXPACK_BRAIN_DIR:-${SECOND_BRAIN_DIR:-}}"
+BIBLE_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:+$SECOND_BRAIN_DIR/review}}"
 REPOS_DIR="${CTXPACK_REPOS_DIR:-$HOME/repos}"
 
 # Tunables. Every cap is explicit so a truncated pack is never silent.
@@ -33,6 +34,7 @@ PRECEDENT_MIN="${CTXPACK_PRECEDENT_MIN:-3}"          # absolute floor
 # tidier but bash installs it globally without `functrace`, so it fires on
 # every other function's return and trips `set -u` on the stale variable.
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ctxpack.XXXXXX")
+chmod 700 "$WORK"
 trap 'rm -rf "$WORK"' EXIT
 
 die() { printf '%s: %s\n' "$SELF" "$*" >&2; exit 2; }
@@ -76,8 +78,9 @@ OPTIONS
   --host HOST    GitHub host for harvest (default: the repo's origin host).
 
 ENVIRONMENT
-  SECOND_BRAIN_DIR      Root of the second brain. Default ~/repos/dump/second-brain
-  CTXPACK_BIBLE_DIR     Review corpus root.  Default \$SECOND_BRAIN_DIR/review
+  SECOND_BRAIN_DIR      Explicitly opt into a private second brain and review corpus
+  CTXPACK_BRAIN_DIR     Explicit private topic corpus (overrides SECOND_BRAIN_DIR)
+  CTXPACK_BIBLE_DIR     Explicit private review corpus (overrides SECOND_BRAIN_DIR)
   CTXPACK_MAX_SIBLINGS  Sibling files scanned per directory (default 40)
   CTXPACK_PRECEDENT_QUORUM  Percent of siblings that makes a token a convention (60)
 
@@ -372,6 +375,10 @@ section_brain() {
   shift 0
   local files=("$@")
   printf '## Second-brain topics\n\n'
+  if [ -z "$BRAIN_DIR" ]; then
+    printf '(private topic corpus disabled; set `CTXPACK_BRAIN_DIR` to opt in)\n\n'
+    return 0
+  fi
   if [ ! -d "$BRAIN_DIR/topics" ]; then
     printf '(no second brain at `%s`)\n\n' "$BRAIN_DIR"; return 0
   fi
@@ -400,6 +407,10 @@ section_bible() {
   shift 0
   local files=("$@")
   printf '## Code bible — prior adjudications\n\n'
+  if [ -z "$BIBLE_DIR" ]; then
+    printf '(private review corpus disabled; set `CTXPACK_BIBLE_DIR` to opt in)\n\n'
+    return 0
+  fi
   local rules="$BIBLE_DIR/code-bible/rules"
   if [ ! -d "$rules" ]; then
     printf '(no code bible at `%s`)\n\n' "$rules"; return 0
@@ -437,6 +448,10 @@ section_bible() {
 section_lens() {
   local files=("$@")
   printf '## Review lenses\n\n'
+  if [ -z "$BIBLE_DIR" ]; then
+    printf '(private review corpus disabled; set `CTXPACK_BIBLE_DIR` to opt in)\n\n'
+    return 0
+  fi
   local dir="$BIBLE_DIR/lenses"
   if [ ! -d "$dir" ]; then printf '(none at `%s`)\n\n' "$dir"; return 0; fi
   local shown=0 l
@@ -467,6 +482,10 @@ section_lens() {
 
 section_persona() {
   printf '## Reviewer personas\n\n'
+  if [ -z "$BIBLE_DIR" ]; then
+    printf '(private review corpus disabled; set `CTXPACK_BIBLE_DIR` to opt in)\n\n'
+    return 0
+  fi
   local p="$BIBLE_DIR/personas"
   if [ ! -d "$p" ]; then printf '(none at `%s`)\n\n' "$p"; return 0; fi
   local f
@@ -526,7 +545,14 @@ cmd_build() {
     run_section persona      section_persona
   }
 
-  if [ -n "$out" ]; then render > "$out"; note "wrote $out ($(wc -l < "$out" | tr -d ' ') lines)"
+  if [ -n "$out" ]; then
+    local out_dir out_tmp
+    out_dir="$(dirname "$out")"
+    out_tmp="$(mktemp "$out_dir/.ctxpack.XXXXXX")"
+    render > "$out_tmp"
+    chmod 600 "$out_tmp"
+    mv "$out_tmp" "$out"
+    note "wrote $out ($(wc -l < "$out" | tr -d ' ') lines)"
   else render; fi
 }
 
@@ -540,6 +566,7 @@ cmd_precedent() {
 }
 
 cmd_bible() {
+  [ -n "$BIBLE_DIR" ] || die "private review corpus disabled; set CTXPACK_BIBLE_DIR"
   local match=0 base_arg=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -569,6 +596,7 @@ cmd_bible() {
 # finding paired with what a human actually did about it — the only honest
 # source for "which of these findings are worth making".
 cmd_harvest() {
+  [ -n "$BIBLE_DIR" ] || die "private review corpus disabled; set CTXPACK_BIBLE_DIR"
   local repo="${1:?usage: $SELF harvest REPO [--host HOST] [--prs N]}"; shift
   local host="" prs=60 prs_list=""
   while [ $# -gt 0 ]; do
@@ -600,6 +628,9 @@ cmd_harvest() {
 
   local out="$BIBLE_DIR/adjudications.jsonl"
   mkdir -p "$(dirname "$out")"
+  chmod 700 "$(dirname "$out")"
+  touch "$out"
+  chmod 600 "$out"
   note "harvesting $owner_repo from $host (last $prs PRs) -> $out"
 
   # The API caps per_page at 100 regardless of what you ask for, and
@@ -927,6 +958,7 @@ cmd_mine() {
 # produced one of the strongest rules in the bible) and length (the best comments
 # here are one-liners).
 cmd_read() {
+  [ -n "$BIBLE_DIR" ] || die "private review corpus disabled; set CTXPACK_BIBLE_DIR"
   local min=2 who="human"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -962,16 +994,24 @@ cmd_read() {
 
 cmd_doctor() {
   printf '%-22s %s\n' "ctxpack" "$VERSION"
-  printf '%-22s %s %s\n' "second brain" "$BRAIN_DIR" \
-    "$([ -d "$BRAIN_DIR/topics" ] && echo "(ok, $(find "$BRAIN_DIR/topics" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') topics)" || echo '(MISSING)')"
-  printf '%-22s %s %s\n' "code bible" "$BIBLE_DIR/code-bible/rules" \
-    "$([ -d "$BIBLE_DIR/code-bible/rules" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/code-bible/rules"/*.md 2>/dev/null | wc -l | tr -d ' ') rules)" || echo '(MISSING)')"
-  printf '%-22s %s %s\n' "adjudications" "$BIBLE_DIR/adjudications.jsonl" \
-    "$([ -f "$BIBLE_DIR/adjudications.jsonl" ] && echo "(ok, $(wc -l < "$BIBLE_DIR/adjudications.jsonl" | tr -d ' ') threads)" || echo '(empty)')"
-  printf '%-22s %s %s\n' "lenses" "$BIBLE_DIR/lenses" \
-    "$([ -d "$BIBLE_DIR/lenses" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/lenses"/*.md 2>/dev/null | wc -l | tr -d ' ') lenses)" || echo '(MISSING)')"
-  printf '%-22s %s\n' "personas" \
-    "$([ -d "$BIBLE_DIR/personas" ] && ls -1 "$BIBLE_DIR/personas"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  if [ -z "$BRAIN_DIR" ]; then
+    printf '%-22s %s\n' "second brain" "(disabled; set CTXPACK_BRAIN_DIR)"
+  else
+    printf '%-22s %s %s\n' "second brain" "$BRAIN_DIR" \
+      "$([ -d "$BRAIN_DIR/topics" ] && echo "(ok, $(find "$BRAIN_DIR/topics" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') topics)" || echo '(MISSING)')"
+  fi
+  if [ -z "$BIBLE_DIR" ]; then
+    printf '%-22s %s\n' "review corpus" "(disabled; set CTXPACK_BIBLE_DIR)"
+  else
+    printf '%-22s %s %s\n' "code bible" "$BIBLE_DIR/code-bible/rules" \
+      "$([ -d "$BIBLE_DIR/code-bible/rules" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/code-bible/rules"/*.md 2>/dev/null | wc -l | tr -d ' ') rules)" || echo '(MISSING)')"
+    printf '%-22s %s %s\n' "adjudications" "$BIBLE_DIR/adjudications.jsonl" \
+      "$([ -f "$BIBLE_DIR/adjudications.jsonl" ] && echo "(ok, $(wc -l < "$BIBLE_DIR/adjudications.jsonl" | tr -d ' ') threads)" || echo '(empty)')"
+    printf '%-22s %s %s\n' "lenses" "$BIBLE_DIR/lenses" \
+      "$([ -d "$BIBLE_DIR/lenses" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/lenses"/*.md 2>/dev/null | wc -l | tr -d ' ') lenses)" || echo '(MISSING)')"
+    printf '%-22s %s\n' "personas" \
+      "$([ -d "$BIBLE_DIR/personas" ] && ls -1 "$BIBLE_DIR/personas"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  fi
   local t
   for t in git jq gh; do
     printf '%-22s %s\n' "$t" "$(have "$t" && command -v "$t" || echo 'MISSING')"

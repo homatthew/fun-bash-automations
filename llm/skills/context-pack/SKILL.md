@@ -117,11 +117,11 @@ Do not write one for a finding that was simply correct and boring.
 
 ## Boundary
 
-The tool and docs are public (`fun-bash-automations`). The corpora are private
-(`$SECOND_BRAIN_DIR/review`, default `~/repos/dump/second-brain/review`) because
-they carry internal class names, PR numbers, and colleagues' words. Never move
-rule or persona content into `fun-bash-automations`; see its `AGENTS.md`
-Open-Source Boundary.
+The tool and docs are public (`fun-bash-automations`). Corpora are private and
+disabled until `CTXPACK_BRAIN_DIR`, `CTXPACK_BIBLE_DIR`, or
+`SECOND_BRAIN_DIR` explicitly opts in. They can carry non-public class names, PR
+numbers, and colleagues' words. Never move rule or persona content into
+`fun-bash-automations`; see its `AGENTS.md` Open-Source Boundary.
 
 ## Limits worth stating out loud
 

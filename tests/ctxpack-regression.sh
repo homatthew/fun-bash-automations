@@ -26,6 +26,13 @@ printf 'remote\n' > "$TMP/example.txt"
 git -C "$TMP" commit -qam remote
 remote_commit="$(git -C "$TMP" rev-parse HEAD)"
 
+doctor_output="$(env -u SECOND_BRAIN_DIR -u CTXPACK_BRAIN_DIR -u CTXPACK_BIBLE_DIR \
+  HOME="$TMP/unconfigured-home" "$ROOT/bin/ctxpack" doctor)"
+[[ "$doctor_output" == *"(disabled; set CTXPACK_BRAIN_DIR)"* ]] \
+  || fail "private topic corpus was not explicit opt-in"
+[[ "$doctor_output" == *"(disabled; set CTXPACK_BIBLE_DIR)"* ]] \
+  || fail "private review corpus was not explicit opt-in"
+
 # Reproduce a pooled Treehouse: detached work is based on the current remote
 # history, while the ordinary local main branch is much older. origin/HEAD is
 # deliberately a direct ref because that is the shape that exposed the bug.
@@ -42,6 +49,15 @@ output="$(
 
 [[ "$output" == *'Diff base `HEAD`, 1 changed files.'* ]] \
   || fail "detached worktree used stale local main instead of the current remote history"
+
+umask 022
+(
+  cd "$TMP"
+  "$ROOT/bin/ctxpack" build --sections claim --out "$TMP/pack.md"
+)
+mode="$(stat -f '%Lp' "$TMP/pack.md" 2>/dev/null || stat -c '%a' "$TMP/pack.md")"
+[[ "$mode" == 600 ]] || fail "context pack artifact mode was $mode, want 600"
+rm "$TMP/pack.md"
 
 # Dirty-worktree scope must match the snapshot tests and reviewers can read,
 # including non-ignored untracked files. A large untracked implementation alone
