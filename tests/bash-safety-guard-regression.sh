@@ -8,6 +8,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 export SSH_LEASE_FILE="$TEST_TMP/ssh-leases"
 export SSH_COMMAND_LEASE_FILE="$TEST_TMP/ssh-command-leases"
 export BASH_SAFETY_GUARD_EXTENSION_DIRS="$TEST_TMP/bash-safety-guard.d"
+export PG_AGENT_PUSH_POLICY_OVERLAY="$TEST_TMP/no-private-overlay.json"
 
 fail() {
   echo "FAIL: $*" >&2
