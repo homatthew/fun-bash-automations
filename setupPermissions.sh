@@ -60,7 +60,6 @@ LOCKED_SYMLINKS=()
 
 # Set executable permissions
 paths=(
-	"rebase-all-branches/rebaseAllBranches.sh"
 	"rp/rp-completion.sh"
 	"rp/rp.sh"
 )

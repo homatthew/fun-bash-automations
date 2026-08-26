@@ -41,7 +41,7 @@ done
 if rg -n '~/repos/fun-bash-automations' "$ROOT/setupPermissions.sh" >/dev/null; then
   fail "setupPermissions retains fixed-checkout symlink targets"
 fi
-for path in 'rebase-all-branches/rebaseAllBranches.sh' 'rp/rp-completion.sh' 'rp/rp.sh'; do
+for path in 'rp/rp-completion.sh' 'rp/rp.sh'; do
   grep -Fq 'chmod +x "$ROOT_DIR/$path"' "$ROOT/setupPermissions.sh" ||
     fail "setupPermissions still chmods relative paths"
 done
