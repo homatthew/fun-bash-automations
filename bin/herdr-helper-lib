@@ -9,8 +9,7 @@ herdr_helper_bin() {
   local candidate
   for candidate in \
     /opt/homebrew/bin/herdr \
-    /usr/local/bin/herdr \
-    /home/linuxbrew/.linuxbrew/bin/herdr; do
+    /usr/local/bin/herdr; do
     [ ! -x "$candidate" ] || { printf '%s\n' "$candidate"; return 0; }
   done
   return 1
@@ -21,8 +20,7 @@ herdr_helper_jq() {
   local candidate
   for candidate in \
     /opt/homebrew/bin/jq \
-    /usr/local/bin/jq \
-    /home/linuxbrew/.linuxbrew/bin/jq; do
+    /usr/local/bin/jq; do
     [ ! -x "$candidate" ] || { printf '%s\n' "$candidate"; return 0; }
   done
   return 1
