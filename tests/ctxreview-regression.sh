@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTXREVIEW_IMPL="$ROOT/lib/ctxreview/main.sh"
+CTXREVIEW_RUNTIME="$ROOT/lib/ctxreview/runtime-adapters.sh"
 TMP="$(mktemp -d -t fba-ctxreview-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export CTXREVIEW_REAP_DIR="$TMP/reaped"
@@ -340,9 +341,9 @@ grep -Fq 'diff --git a/new_module.py b/new_module.py' "$TMP/run/diff.patch" \
 grep -Fq '+required = true' "$TMP/run/diff.patch" \
   || fail "untracked file contents were absent from the review patch"
 
-! grep -Fq -- "-c 'mcp_servers={}'" "$CTXREVIEW_IMPL" \
+! grep -Fq -- "-c 'mcp_servers={}'" "$CTXREVIEW_RUNTIME" \
   || fail "Codex review legs still use the ineffective empty-table MCP override"
-grep -Fq -- 'mcp_servers.$id.enabled=false' "$CTXREVIEW_IMPL" \
+grep -Fq -- 'mcp_servers.$id.enabled=false' "$CTXREVIEW_RUNTIME" \
   || fail "Codex review legs do not disable each effective MCP server"
 grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$CTXREVIEW_IMPL" \
   || fail "Cursor review legs do not use an isolated config"

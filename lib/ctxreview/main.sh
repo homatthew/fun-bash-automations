@@ -68,53 +68,8 @@ MAINTAIN_LOCK=""
 CODEX_NO_MCP_ARGS=()
 CODEX_NO_MCP_READY=0
 
-# Route every pane/agent operation through the run's named Herdr 0.8 session.
-# `command` bypasses this function so global session management remains possible.
-herdr_bin() { type -P herdr 2>/dev/null || return 1; }
-herdr() {
-  local bin
-  bin="$(herdr_bin)" || return 127
-  if [ -n "${HERDR_SESSION_NAME:-}" ]; then
-    "$bin" --session "$HERDR_SESSION_NAME" "$@"
-  else
-    "$bin" "$@"
-  fi
-}
-herdr_global() {
-  local bin
-  bin="$(herdr_bin)" || return 127
-  "$bin" "$@"
-}
+. "$FBA/lib/ctxreview/herdr.sh"
 
-named_session_running() {  # named_session_running <name>
-  local name="$1"
-  herdr_global session list --json 2>/dev/null | jq -e --arg name "$name" \
-    '.sessions[]? | select(.name==$name and .running==true)' >/dev/null 2>&1
-}
-
-named_session_exists() {  # named_session_exists <name>
-  local name="$1"
-  herdr_global session list --json 2>/dev/null | jq -e --arg name "$name" \
-    '.sessions[]? | select(.name==$name)' >/dev/null 2>&1
-}
-
-start_named_session() {  # start_named_session <name>
-  local name="$1" bin log attempt status
-  HERDR_SESSION_NAME="$name"
-  if named_session_running "$name"; then return 0; fi
-  bin="$(herdr_bin)" || return 1
-  mkdir -p "$SESSION_STATE_DIR/herdr-logs"
-  log="$SESSION_STATE_DIR/herdr-logs/$name.log"
-  nohup "$bin" --session "$name" server </dev/null >>"$log" 2>&1 &
-  disown 2>/dev/null || true
-  for attempt in $(seq 1 100); do
-    status="$(herdr status server 2>/dev/null || true)"
-    case "$status" in *"status: running"*) return 0 ;; esac
-    sleep 0.1
-  done
-  say "named Herdr session $name did not start; see $log"
-  return 1
-}
 cleanup_work() {
   rm -rf "$WORK_C"
   if [ -n "$MAINTAIN_LOCK" ]; then
@@ -272,80 +227,7 @@ persist_session_record() {  # persist_session_record <local-record>
   cp "$record" "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$target"
 }
 
-# An empty `mcp_servers={}` command-line override does not replace the user's
-# configured table; Codex merges it and still starts every existing server. Ask
-# Codex for the effective server names and disable each one explicitly. Server
-# ids are TOML bare keys in Codex's own configuration contract, so refuse an
-# unexpected id rather than accidentally starting it in a review pane.
-prepare_codex_no_mcp_args() {
-  [ "$CODEX_NO_MCP_READY" -eq 0 ] || return 0
-  local codex_bin raw effective id
-  codex_bin="$(type -P codex 2>/dev/null || command -v codex 2>/dev/null || true)"
-  [ -n "$codex_bin" ] || die "codex not found"
-  raw="$("$codex_bin" mcp list --json 2>/dev/null)" \
-    || die "could not enumerate Codex MCP servers for review isolation"
-  printf '%s' "$raw" | jq -e \
-    'type=="array" and all(.[]; (.name | type)=="string")' >/dev/null 2>&1 \
-    || die "Codex MCP inventory had an unexpected schema"
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    case "$id" in
-      *[!A-Za-z0-9_-]*) die "cannot safely disable Codex MCP server id: $id" ;;
-    esac
-    CODEX_NO_MCP_ARGS+=( -c "mcp_servers.$id.enabled=false" )
-  done < <(printf '%s' "$raw" | jq -r '.[]?.name // empty')
-  # Apps/connectors are another MCP-backed tool surface. Review legs only need
-  # the repository and shell, so disable their default tool exposure too.
-  CODEX_NO_MCP_ARGS+=( -c 'apps._default.enabled=false' )
-  effective="$("$codex_bin" "${CODEX_NO_MCP_ARGS[@]}" mcp list --json 2>/dev/null)" \
-    || die "could not verify Codex MCP isolation"
-  printf '%s' "$effective" | jq -e \
-    'type=="array" and all(.[]; .enabled==false)' >/dev/null 2>&1 \
-    || die "Codex MCP isolation did not disable every effective server"
-  CODEX_NO_MCP_READY=1
-}
-
-prepare_cursor_config() {  # prepare_cursor_config <dir> <workspace>
-  local config_dir="$1" workspace="${2:-$PWD}" tmp cursor_bin listing line id after
-  cursor_bin="$(type -P cursor-agent 2>/dev/null || command -v cursor-agent 2>/dev/null || true)"
-  [ -n "$cursor_bin" ] || return 1
-  mkdir -p "$config_dir" 2>/dev/null || return 1
-  tmp="$(mktemp "$config_dir/mcp.json.tmp.XXXXXX" 2>/dev/null)" || return 1
-  if ! printf '{"mcpServers":{}}\n' > "$tmp" || ! mv "$tmp" "$config_dir/mcp.json"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  [ "$(cat "$config_dir/mcp.json" 2>/dev/null)" = '{"mcpServers":{}}' ] || return 1
-
-  # CURSOR_CONFIG_DIR redirects CLI approvals, but Cursor still discovers MCP
-  # definitions from both <workspace>/.cursor/mcp.json and ~/.cursor/mcp.json.
-  # Enumerate that effective inventory and disable every id in the isolated CLI
-  # state, then verify the only remaining state is `disabled`.
-  listing="$(cd "$workspace" && CURSOR_CONFIG_DIR="$config_dir" "$cursor_bin" mcp list 2>/dev/null)" \
-    || return 1
-  case "$listing" in
-    "No MCP servers configured"*) return 0 ;;
-  esac
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      *": disabled") continue ;;
-      *:*) id="${line%%:*}" ;;
-      *) return 1 ;;
-    esac
-    [ -n "$id" ] || return 1
-    (cd "$workspace" && CURSOR_CONFIG_DIR="$config_dir" \
-      "$cursor_bin" mcp disable "$id" >/dev/null 2>&1) || return 1
-  done <<< "$listing"
-  after="$(cd "$workspace" && CURSOR_CONFIG_DIR="$config_dir" "$cursor_bin" mcp list 2>/dev/null)" \
-    || return 1
-  case "$after" in
-    "No MCP servers configured"*) return 0 ;;
-  esac
-  while IFS= read -r line; do
-    [ -z "$line" ] || case "$line" in *": disabled") ;; *) return 1 ;; esac
-  done <<< "$after"
-}
+. "$FBA/lib/ctxreview/runtime-adapters.sh"
 
 init_session_record() {  # needs dir/ws/label/repo_root/owner_session/current_run_id
   local run_id record
