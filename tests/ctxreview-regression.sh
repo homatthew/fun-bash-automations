@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CTXREVIEW_IMPL="$ROOT/lib/ctxreview/main.sh"
 TMP="$(mktemp -d -t fba-ctxreview-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export CTXREVIEW_REAP_DIR="$TMP/reaped"
@@ -314,12 +315,12 @@ grep -Eq '^workspace create .*--no-focus$' "$TMP/calls" \
   || fail "ctxreview did not explicitly preserve focus while creating its workspace"
 ! grep -Fq 'tab create' "$TMP/calls" \
   || fail "ctxreview created a redundant tab inside its dedicated workspace"
-if grep -E 'herdr (workspace create|tab create|pane split)' "$ROOT/bin/ctxreview" \
+if grep -E 'herdr (workspace create|tab create|pane split)' "$CTXREVIEW_IMPL" \
      | grep -Ev '^[[:space:]]*#' \
      | grep -Fv -- '--no-focus' >/dev/null; then
   fail "a ctxreview background creation path can still steal focus"
 fi
-! grep -E 'herdr workspace focus' "$ROOT/bin/ctxreview" \
+! grep -E 'herdr workspace focus' "$CTXREVIEW_IMPL" \
   | grep -Ev '^[[:space:]]*#' >/dev/null \
   || fail "ctxreview explicitly focuses a workspace"
 [[ "$(grep -Fc 'agent start ctxreview-opus-w1p1' "$TMP/calls")" -eq 2 ]] \
@@ -339,11 +340,11 @@ grep -Fq 'diff --git a/new_module.py b/new_module.py' "$TMP/run/diff.patch" \
 grep -Fq '+required = true' "$TMP/run/diff.patch" \
   || fail "untracked file contents were absent from the review patch"
 
-! grep -Fq -- "-c 'mcp_servers={}'" "$ROOT/bin/ctxreview" \
+! grep -Fq -- "-c 'mcp_servers={}'" "$CTXREVIEW_IMPL" \
   || fail "Codex review legs still use the ineffective empty-table MCP override"
-grep -Fq -- 'mcp_servers.$id.enabled=false' "$ROOT/bin/ctxreview" \
+grep -Fq -- 'mcp_servers.$id.enabled=false' "$CTXREVIEW_IMPL" \
   || fail "Codex review legs do not disable each effective MCP server"
-grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$ROOT/bin/ctxreview" \
+grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$CTXREVIEW_IMPL" \
   || fail "Cursor review legs do not use an isolated config"
 ! grep -Fq -- '--approve-mcps' "$ROOT/llm/skills/cursor-sub-review/scripts/spawn-cursor-pane.sh" \
   || fail "Cursor review legs still auto-approve every MCP server"

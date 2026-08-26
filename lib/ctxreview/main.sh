@@ -16,7 +16,7 @@
 # See: llm/skills/code-review/SKILL.md, llm/skills/cursor-sub-review/SKILL.md
 set -uo pipefail
 
-SELF="${0##*/}"
+SELF="${CTXREVIEW_SELF:-${0##*/}}"
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
