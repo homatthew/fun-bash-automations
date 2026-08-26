@@ -9,3 +9,4 @@ tests/notify-slack-regression\.sh:slack-bot-token	^[[:space:]]*token-service\) p
 setupPermissions\.sh:absolute-home-path	^[[:space:]]*(elif \[ -d |BREW_PREFIX=)/home/[l]inuxbrew/\.linuxbrew( \]; then)?$
 zsh/personal\.zsh:absolute-home-path	^[^/]*/home/[l]inuxbrew/\.linuxbrew(/[^[:space:]]*)?[[:space:]\\]*$
 llm/hooks/beads-prime\.sh:absolute-home-path	^[^/]*/home/[l]inuxbrew/\.linuxbrew(/[^[:space:]]*)?[[:space:]\\]*$
+bin/herdr-helper-lib:absolute-home-path	^[[:space:]]*/home/[l]inuxbrew/\.linuxbrew/bin/(herdr|jq); do$
