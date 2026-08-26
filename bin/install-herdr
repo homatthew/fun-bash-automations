@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Adopt the repo-owned Herdr profile and optional integrations explicitly.
+set -euo pipefail
+umask 077
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+HELPER_DIR="$ROOT/bin"
+CONFIG_TEMPLATE="$ROOT/herdr/config.toml.in"
+PLUGINS_FILE="$ROOT/herdr/plugins.toml"
+CONFIG_FILE="${HERDR_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml}"
+SKILL_FILE="${HERDR_SKILL_FILE:-$HOME/.agents/skills/herdr/SKILL.md}"
+
+mode=install
+adopt=false
+plugins=false
+integrations=""
+local_plugin=""
+
+usage() {
+  cat <<EOF
+usage: ${0##*/} --adopt [--plugins] [--integrations LIST]
+       ${0##*/} --check [--plugins] [--integrations LIST]
+
+  --adopt       Explicitly install the generated config and upstream skill.
+  --check       Read-only validation; combine with optional scopes to check them.
+  --plugins     Install/check immutable public refs from herdr/plugins.toml.
+  --integrations LIST
+                Install/check comma-separated Herdr integration names.
+  --local-confirmation-plugin DIR
+                Explicitly link/check an optional local confirmation plugin.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --adopt) adopt=true ;;
+    --check) mode=check ;;
+    --plugins) plugins=true ;;
+    --integrations)
+      [ "$#" -gt 1 ] || { usage >&2; exit 2; }
+      integrations="$2"; shift ;;
+    --local-confirmation-plugin)
+      [ "$#" -gt 1 ] || { usage >&2; exit 2; }
+      local_plugin="$2"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'install-herdr: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ "$mode" = install ] && [ "$adopt" != true ]; then
+  printf 'install-herdr: installation requires explicit --adopt\n' >&2
+  exit 2
+fi
+
+for command in herdr git jq; do
+  command -v "$command" >/dev/null 2>&1 \
+    || { printf 'install-herdr: missing dependency: %s\n' "$command" >&2; exit 1; }
+done
+[ -r "$CONFIG_TEMPLATE" ] && [ -r "$PLUGINS_FILE" ] \
+  || { printf 'install-herdr: repository templates are missing\n' >&2; exit 1; }
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/install-herdr.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+rendered="$work/config.toml"
+while IFS= read -r line || [ -n "$line" ]; do
+  printf '%s\n' "${line//@HELPER_DIR@/$HELPER_DIR}"
+done < "$CONFIG_TEMPLATE" > "$rendered"
+herdr --skill > "$work/SKILL.md"
+
+if [ "$mode" = check ]; then
+  status=0
+  cmp -s "$rendered" "$CONFIG_FILE" \
+    || { printf 'config: drifted or missing: %s\n' "$CONFIG_FILE"; status=1; }
+  cmp -s "$work/SKILL.md" "$SKILL_FILE" \
+    || { printf 'skill: drifted or missing: %s\n' "$SKILL_FILE"; status=1; }
+else
+  for pair in "$rendered:$CONFIG_FILE" "$work/SKILL.md:$SKILL_FILE"; do
+    source_file="${pair%%:*}"
+    target_file="${pair#*:}"
+    mkdir -p "$(dirname "$target_file")"
+    chmod 700 "$(dirname "$target_file")"
+    if [ -e "$target_file" ] && ! cmp -s "$source_file" "$target_file"; then
+      cp -p "$target_file" "$target_file.backup.$(date +%Y%m%d%H%M%S)"
+    fi
+    tmp="$target_file.tmp.$$"
+    cp "$source_file" "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$target_file"
+    printf 'installed: %s\n' "$target_file"
+  done
+fi
+
+plugin_rows() {
+  awk '
+    /^source = / { source=$0; sub(/^[^"]*"/, "", source); sub(/".*/, "", source) }
+    /^ref = / {
+      ref=$0; sub(/^[^"]*"/, "", ref); sub(/".*/, "", ref)
+      print source "\t" ref
+    }' "$PLUGINS_FILE"
+}
+
+if [ "$plugins" = true ]; then
+  listing="$(herdr plugin list 2>/dev/null || true)"
+  while IFS=$'\t' read -r source ref; do
+    [ -n "$source" ] && [ -n "$ref" ] || continue
+    if [ "$mode" = check ]; then
+      printf '%s' "$listing" | rg -Fq "github:$source@$ref" \
+        || { printf 'plugin: missing or drifted: %s@%s\n' "$source" "$ref"; status=1; }
+    else
+      herdr plugin install "$source" --ref "$ref" --yes
+    fi
+  done < <(plugin_rows)
+fi
+
+if [ -n "$local_plugin" ]; then
+  [ -d "$local_plugin" ] \
+    || { printf 'install-herdr: local plugin directory is missing: %s\n' "$local_plugin" >&2; exit 1; }
+  if [ "$mode" = check ]; then
+    herdr plugin list | rg -Fq "local:$local_plugin" \
+      || { printf 'plugin: local link missing: %s\n' "$local_plugin"; status=1; }
+  else
+    herdr plugin link "$local_plugin" --enabled
+  fi
+fi
+
+if [ -n "$integrations" ]; then
+  case "$integrations" in ,*|*,|*,,*) printf 'install-herdr: invalid integration list\n' >&2; exit 2 ;; esac
+  integration_status="$(herdr integration status 2>/dev/null || true)"
+  IFS=',' read -r -a names <<< "$integrations"
+  for name in "${names[@]}"; do
+    case "$name" in *[!a-z0-9-]*) printf 'install-herdr: invalid integration: %s\n' "$name" >&2; exit 2 ;; esac
+    if [ "$mode" = check ]; then
+      printf '%s\n' "$integration_status" | rg -q "^${name}: current " \
+        || { printf 'integration: missing or outdated: %s\n' "$name"; status=1; }
+    else
+      herdr integration install "$name"
+    fi
+  done
+fi
+
+if [ "$mode" = check ]; then
+  [ "${status:-0}" -eq 0 ] || exit 1
+  printf 'Herdr installation is current.\n'
+fi

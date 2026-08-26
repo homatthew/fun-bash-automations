@@ -5,5 +5,6 @@ brew "gh"
 brew "git"
 brew "herdr"
 brew "jq"
+brew "ripgrep"
 
 cask "ghostty"
