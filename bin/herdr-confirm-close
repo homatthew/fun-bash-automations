@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Popup confirmation shared by pane and tab close bindings.
+set -uo pipefail
+
+HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HELPER_DIR/herdr-helper-lib"
+herdr="$(herdr_helper_bin)" || exit 0
+jq="$(herdr_helper_jq)" || exit 0
+kind="${1:-}"
+case "$kind" in pane|tab) ;; *) exit 2 ;; esac
+
+if [ "$kind" = pane ]; then
+  target="${HERDR_ACTIVE_PANE_ID:-}"
+  inventory=$("$herdr" pane list 2>/dev/null) || exit 0
+  [ -n "$target" ] || target=$(printf '%s' "$inventory" | "$jq" -r \
+    '.result.panes[] | select(.focused) | .pane_id' | awk 'NR==1')
+  item=$(printf '%s' "$inventory" | "$jq" -c --arg id "$target" \
+    '.result.panes[] | select(.pane_id == $id)')
+  title=$(printf '%s' "$item" | "$jq" -r \
+    '.terminal_title_stripped // .terminal_title // "this pane"')
+  detail="The pane can be reopened with prefix+u."
+else
+  target="${HERDR_ACTIVE_TAB_ID:-}"
+  inventory=$("$herdr" tab list 2>/dev/null) || exit 0
+  [ -n "$target" ] || target=$(printf '%s' "$inventory" | "$jq" -r \
+    '.result.tabs[] | select(.focused) | .tab_id' | awk 'NR==1')
+  item=$(printf '%s' "$inventory" | "$jq" -c --arg id "$target" \
+    '.result.tabs[] | select(.tab_id == $id)')
+  title=$(printf '%s' "$item" | "$jq" -r '.label // "this tab"')
+  panes=$("$herdr" pane list 2>/dev/null || printf '{"result":{"panes":[]}}')
+  count=$(printf '%s' "$panes" | "$jq" -r --arg id "$target" \
+    '[.result.panes[] | select(.tab_id == $id)] | length')
+  detail="$count pane(s) will close. Individual panes can be reopened."
+fi
+[ -n "$target" ] || exit 0
+
+selected=cancel
+draw() {
+  printf '\033[2J\033[H\n  Close %s?\n\n  %s\n  %s\n\n' "$kind" "$title" "$detail"
+  if [ "$selected" = close ]; then
+    printf '  \033[2m[ Cancel ]\033[0m   \033[1;41;97m[ Close ]\033[0m\n'
+  else
+    printf '  \033[1;47;30m[ Cancel ]\033[0m   \033[2m[ Close ]\033[0m\n'
+  fi
+  printf '\n  ←/→ select · enter confirm · esc cancel\n'
+}
+
+while :; do
+  draw
+  IFS= read -rsn1 key || exit 0
+  case "$key" in
+    ""|$'\r'|$'\n') break ;;
+    y|Y) selected=close; break ;;
+    n|N|$'\e') exit 0 ;;
+    h|H|$'\x02') selected=cancel ;;
+    l|L|$'\x06') selected=close ;;
+    ' ') [ "$selected" = close ] && selected=cancel || selected=close ;;
+  esac
+done
+[ "$selected" = close ] || exit 0
+
+if [ "$kind" = pane ]; then
+  "$HELPER_DIR/herdr-pane-snapshot" "$target" 2>/dev/null || true
+  exec "$herdr" pane close "$target"
+fi
+
+panes=$("$herdr" pane list 2>/dev/null || printf '{"result":{"panes":[]}}')
+while IFS= read -r pane_id; do
+  [ -n "$pane_id" ] || continue
+  "$HELPER_DIR/herdr-pane-snapshot" "$pane_id" 2>/dev/null || true
+done < <(printf '%s' "$panes" | "$jq" -r --arg id "$target" \
+  '.result.panes[] | select(.tab_id == $id) | .pane_id')
+exec "$herdr" tab close "$target"

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Recreate the most recently snapshotted pane and resume its recorded agent.
+set -uo pipefail
+umask 077
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/herdr-helper-lib"
+herdr="$(herdr_helper_bin)" || exit 0
+jq="$(herdr_helper_jq)" || exit 0
+stack="${HERDR_CLOSED_PANES_FILE:-$HOME/.local/state/herdr/closed-panes.jsonl}"
+say() { printf '\033[2m%s\033[0m\n' "$*"; }
+
+if [ ! -s "$stack" ]; then
+  printf '\n  No closed panes to reopen.\n\n'
+  sleep 1
+  exit 0
+fi
+
+entry=$(tail -n 1 "$stack")
+tmp="$stack.tmp.$$"
+sed '$d' "$stack" > "$tmp" 2>/dev/null || : > "$tmp"
+chmod 600 "$tmp" 2>/dev/null || true
+mv -f "$tmp" "$stack"
+
+tab=$(printf '%s' "$entry" | "$jq" -r '.tab_id')
+cwd=$(printf '%s' "$entry" | "$jq" -r '.cwd // empty')
+label=$(printf '%s' "$entry" | "$jq" -r '.label // empty')
+agent=$(printf '%s' "$entry" | "$jq" -r '.agent // empty')
+skind=$(printf '%s' "$entry" | "$jq" -r '.session_kind // empty')
+sval=$(printf '%s' "$entry" | "$jq" -r '.session_value // empty')
+direction=$(printf '%s' "$entry" | "$jq" -r '.parent.direction // "right"')
+ratio=$(printf '%s' "$entry" | "$jq" -r '.parent.ratio // 0.5')
+side=$(printf '%s' "$entry" | "$jq" -r '.parent.side // "second"')
+anchor=$(printf '%s' "$entry" | "$jq" -r '.parent.anchor // empty')
+exact=$(printf '%s' "$entry" | "$jq" -r '.parent.exact // false')
+
+case "$direction" in
+  horizontal) direction=right ;;
+  vertical) direction=down ;;
+esac
+percent=$("$jq" -nr --argjson ratio "$ratio" \
+  '($ratio * 100) | round | if . < 10 then 10 elif . > 90 then 90 else . end')
+if [ "$side" = first ]; then
+  case "$direction" in right) direction=left ;; down) direction=up ;; esac
+  percent=$((100 - percent))
+fi
+
+create=(pane create --tab "$tab" --direction "$direction" --percent "$percent" --focus)
+[ -z "$cwd" ] || create+=(--cwd "$cwd")
+[ "$exact" != true ] || [ -z "$anchor" ] || create+=(--pane "$anchor")
+result=$("$herdr" "${create[@]}" 2>/dev/null) || {
+  printf '%s\n' "$entry" >> "$stack"
+  chmod 600 "$stack" 2>/dev/null || true
+  printf '\n  Could not recreate the pane; snapshot retained.\n\n'
+  sleep 1
+  exit 0
+}
+new=$(printf '%s' "$result" | "$jq" -r '.result.pane_id // .pane_id // empty')
+[ -n "$new" ] || exit 0
+[ -z "$label" ] || "$herdr" pane label "$new" "$label" >/dev/null 2>&1 || true
+
+printf '\n'
+say "reopened: ${label:-pane}"
+say "cwd:      ${cwd:-inherited}"
+
+if [ -n "$agent" ] && [ -n "$sval" ] && [ "$skind" = id ]; then
+  case "$agent" in
+    claude)
+      args=(--dangerously-skip-permissions
+        --model "${HERDR_CLAUDE_MODEL:-opus[1m]}" --resume "$sval") ;;
+    codex)
+      args=(--dangerously-bypass-approvals-and-sandbox resume "$sval") ;;
+    cursor|grok) args=(--force --resume "$sval") ;;
+    kimi) args=(--yolo --session "$sval") ;;
+    agy) args=(--conversation "$sval") ;;
+    *) args=() ;;
+  esac
+  if [ "${#args[@]}" -gt 0 ]; then
+    say "resume:   $agent ${args[*]}"
+    "$herdr" agent start "$agent" --kind "$agent" --pane "$new" -- \
+      "${args[@]}" >/dev/null 2>&1 || say "          agent start failed"
+  else
+    say "resume:   $agent has no known resume flag; starting it bare"
+    "$herdr" agent start "$agent" --kind "$agent" --pane "$new" \
+      >/dev/null 2>&1 || true
+  fi
+elif [ -n "$agent" ]; then
+  say "resume:   no session id was recorded for $agent"
+fi
+
+printf '\n'
+say "$(wc -l < "$stack" 2>/dev/null | tr -d ' ') more in the undo stack"
+sleep 1
