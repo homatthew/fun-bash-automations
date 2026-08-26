@@ -3,6 +3,9 @@
 REVIEW_CORPUS_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:+$SECOND_BRAIN_DIR/review}}"
 ADJ_FILE="${REVIEW_CORPUS_DIR:+$REVIEW_CORPUS_DIR/adjudications.jsonl}"
 
+# Adjudication is deliberately emit-then-commit rather than an interactive
+# questionnaire. Reviewers fill the worksheet while reading the diff, often
+# across multiple sittings, then explicitly commit the completed verdicts.
 cmd_adjudicate() {
   local dir="${1:-}" commit=0
   shift || true
@@ -30,6 +33,9 @@ cmd_adjudicate() {
       printf '# VERDICT\tLEG\tSEVERITY\tLOCATION\tFINDING\tREASON\n'
       cmd_consolidate "$dir" 2>/dev/null \
         | awk '/^- \*\*/ {
+            # Split on the final title marker, not on every ** token. Findings
+            # can contain literal or nested emphasis; broad field splitting
+            # shifts later columns and creates an untrustworthy worksheet.
             line=$0
             sub(/^- \*\*/, "", line)
             marker=index(line, "** _(")

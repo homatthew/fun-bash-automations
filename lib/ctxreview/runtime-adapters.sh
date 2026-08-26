@@ -38,6 +38,9 @@ prepare_cursor_config() {
   fi
   [ "$(cat "$config_dir/mcp.json" 2>/dev/null)" = '{"mcpServers":{}}' ] || return 1
 
+  # CURSOR_CONFIG_DIR redirects approvals, but Cursor also discovers workspace
+  # and home MCP definitions. Enumerate that effective inventory and disable
+  # every visible server before launching an isolated review leg.
   listing="$(cd "$workspace" && CURSOR_CONFIG_DIR="$config_dir" "$cursor_bin" mcp list 2>/dev/null)" \
     || return 1
   case "$listing" in

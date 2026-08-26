@@ -17,7 +17,7 @@ record_run_dir() {
   esac
 }
 
-acquire_file_lock() {
+acquire_file_lock() {  # acquire_file_lock <path>
   local lock="$1" attempt pid="${BASHPID:-$$}"
   secure_dir "$(dirname "$lock")"
   for attempt in $(seq 1 100); do
