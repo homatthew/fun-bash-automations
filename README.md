@@ -96,6 +96,23 @@ Do not use this repository as the final MacBook install if the private
 `setupPermissions.sh` remains a legacy local bootstrap script. Prefer the
 `dotfiles` install guide for current machine setup.
 
+### Herdr and Ghostty
+
+The root `Brewfile` declares the portable FBA, Herdr, and Ghostty dependencies.
+Herdr adoption is deliberately separate from package installation:
+
+```bash
+brew bundle
+bin/install-herdr --adopt
+bin/install-herdr --check
+```
+
+The installer renders the local helper path and generates the current upstream
+Herdr skill. Plugins, agent integrations, and any local confirmation plugin are
+explicit options. Binding status, dependencies, resume behavior, and theme
+behavior are documented in `docs/herdr.md`. macOS preference values are an
+inventory only in `docs/macos-defaults.md`; no setup command writes defaults.
+
 ### Portable Git Preferences
 
 The `git/` directory preserves reusable personal Git behavior without copying
