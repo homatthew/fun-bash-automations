@@ -813,6 +813,28 @@ agent_push_policy_path() {
   printf '%s\n' "${PG_AGENT_PUSH_POLICY:-$SCRIPT_DIR/../agent-push-policy.json}"
 }
 
+agent_push_policy_overlay_path() {
+  printf '%s\n' "${PG_AGENT_PUSH_POLICY_OVERLAY:-$HOME/.config/fba/agent-push-policy-overlay.json}"
+}
+
+agent_push_policy_overlay_is_valid() {
+  local overlay_path
+  overlay_path=$(agent_push_policy_overlay_path)
+  [[ -f "$overlay_path" ]] || return 1
+  jq -e '
+    type == "object"
+    and (.version | type == "number")
+    and (.direct_push_exceptions | type == "array")
+    and all(.direct_push_exceptions[];
+      type == "object"
+      and (.repo | type == "string" and length > 0)
+      and (.delivery_branch | type == "string" and length > 0)
+      and (.delivery_remote | type == "string" and length > 0)
+      and .requires_explicit_user_ask == true
+    )
+  ' "$overlay_path" >/dev/null 2>&1
+}
+
 agent_push_policy_is_valid() {
   local policy_path
   policy_path=$(agent_push_policy_path)
@@ -904,7 +926,7 @@ direct_delivery_remote_for_repo() {
 }
 
 direct_delivery_field_for_repo() {
-  local field="$1" policy_path root repo_name
+  local field="$1" policy_path overlay_path root repo_name entry
   policy_path=$(agent_push_policy_path)
   [[ -f "$policy_path" ]] || return 0
   # git_context, not bare git: the hook payload can name a workdir, and repo
@@ -912,11 +934,25 @@ direct_delivery_field_for_repo() {
   root="$(git_context rev-parse --show-toplevel 2>/dev/null)" || return 0
   [[ -n "$root" ]] || return 0
   repo_name="${root##*/}"
-  jq -r --arg repo "$repo_name" --arg field "$field" '
+
+  entry=$(jq -c --arg repo "$repo_name" '
     (.direct_push_exceptions // [])
     | map(select(.repo == $repo and (.delivery_branch // "") != ""))
-    | .[0][$field] // empty
+    | .[0] // empty
   ' "$policy_path" 2>/dev/null
+  )
+
+  if [[ -z "$entry" ]] && agent_push_policy_overlay_is_valid; then
+    overlay_path=$(agent_push_policy_overlay_path)
+    entry=$(jq -c --arg repo "$repo_name" '
+      .direct_push_exceptions
+      | map(select(.repo == $repo and (.delivery_branch // "") != ""))
+      | .[0] // empty
+    ' "$overlay_path" 2>/dev/null)
+  fi
+
+  [[ -n "$entry" ]] || return 0
+  jq -r --arg field "$field" '.[$field] // empty' <<< "$entry"
 }
 
 # True only for an exact, non-destructive push of this repository's configured

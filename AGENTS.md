@@ -24,8 +24,10 @@ canonical instruction entrypoint.
   push directly with an explicit branch target: `git push origin main`. The guard
   permits exactly that combination for this repository, per
   `direct_push_exceptions` in `llm/agent-push-policy.json`. Force forms, other
-  remotes, other protected refs, bare pushes, and directory-redirecting pushes
-  (`-C`, `--git-dir`, `--work-tree`) all stay blocked.
+  remotes, other protected refs, bare pushes, and unresolved repository
+  redirects (`--git-dir`, `--work-tree`, `--namespace`) all stay blocked.
+  `git -C <repo> push origin main` is allowed only after the guard resolves
+  `<repo>` and finds its matching direct-delivery entry.
 - Do not start parallel sessions unless the user asks. When parallel work is
   requested, isolate each writer in its own worktree.
 - Before delivery, run the repository's relevant focused tests and inspect the

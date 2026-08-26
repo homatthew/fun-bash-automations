@@ -56,9 +56,12 @@ Codex, and future harnesses.
   - any other remote for the delivery branch;
   - force, `--force-with-lease`, leading-plus, and delete forms;
   - bare, multi-ref, and expansion-bearing pushes;
-  - any push that redirects which repository it acts on (`-C`, `--git-dir`,
-    `--work-tree`, `--namespace`), since repo identity is resolved from the
-    working directory and would otherwise be borrowed by an unrelated repo.
+  - unresolved repository redirects (`--git-dir`, `--work-tree`,
+    `--namespace`); `-C <repo>` is allowed only after the guard resolves that
+    repository and applies its own policy entry.
+  Private installations may add direct-delivery repositories through
+  `~/.config/fba/agent-push-policy-overlay.json`; the shared policy remains the
+  source of truth for every other branch class.
 - **Enforcement note.** The agent-layer guard is the only layer actually
   enforcing this in a checkout with no installed `pre-push` hook. Earlier wording
   here claimed a git-level main pre-push hook enforced it "even for external

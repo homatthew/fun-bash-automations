@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..142"
+echo "1..144"
 
 read_allow=$(run_guard "gh api /gists/example-id")
 [[ -z "$read_allow" ]] || fail "expected gist read to be allowed, got: $read_allow"
@@ -400,6 +400,35 @@ echo "ok 57 - private repo delivery exceptions are not part of shared policy"
 dotfiles_push_c_block=$(run_guard "git -C $dotfiles_repo push origin HEAD:main")
 expect_contains "$dotfiles_push_c_block" "Deliver protected branches through no-mistakes"
 echo "ok 58 - git -C does not restore a private delivery exception"
+
+private_repo="$TEST_TMP/private-direct-repo"
+git init -q "$private_repo"
+git -C "$private_repo" checkout -q -b main
+git -C "$private_repo" remote add origin https://git.example.test/example/private-direct-repo.git
+private_overlay="$TEST_TMP/private-agent-push-policy-overlay.json"
+jq -n '{
+  version: 1,
+  direct_push_exceptions: [{
+    repo: "private-direct-repo",
+    delivery_branch: "main",
+    delivery_remote: "origin",
+    requires_explicit_user_ask: true
+  }]
+}' > "$private_overlay"
+private_push_allow=$(
+  export PG_AGENT_PUSH_POLICY_OVERLAY="$private_overlay"
+  run_guard_with_workdir "$private_repo" "git push origin main"
+)
+[[ -z "$private_push_allow" ]] || fail "expected private direct-delivery overlay to allow the exact push, got: $private_push_allow"
+echo "ok 58a - private policy overlay adds an exact direct-delivery repository"
+
+printf '%s\n' '{"version":1,"direct_push_exceptions":"invalid"}' > "$TEST_TMP/malformed-private-overlay.json"
+malformed_private_push_block=$(
+  export PG_AGENT_PUSH_POLICY_OVERLAY="$TEST_TMP/malformed-private-overlay.json"
+  run_guard_with_workdir "$private_repo" "git push origin main"
+)
+expect_contains "$malformed_private_push_block" "Deliver protected branches through no-mistakes"
+echo "ok 58a2 - malformed private policy overlay fails closed"
 
 dotfiles_bare_push_block=$(run_guard_with_workdir "$dotfiles_repo" "git push")
 expect_contains "$dotfiles_bare_push_block" "bare git push is not allowed"
