@@ -19,7 +19,7 @@ me=$(printf '%s' "$panes" | "$jq" -c --arg p "$target" \
 
 tab=$(printf '%s' "$me" | "$jq" -r '.tab_id')
 tree=$(printf '{"id":"snap","method":"layout.export","params":{"tab_id":"%s"}}\n' "$tab" \
-  | nc -U "$socket" 2>/dev/null | "$jq" -c '.result.layout.root // null')
+  | nc -w 2 -U "$socket" 2>/dev/null | "$jq" -c '.result.layout.root // null')
 [ -n "$tree" ] || tree=null
 
 entry=$("$jq" -cn --argjson me "$me" --argjson tree "$tree" --arg p "$target" '

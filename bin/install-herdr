@@ -59,7 +59,7 @@ if [ "$mode" = install ] && [ "$adopt" != true ]; then
   exit 2
 fi
 
-for command in herdr git jq nc; do
+for command in herdr git jq nc rg; do
   command -v "$command" >/dev/null 2>&1 \
     || { printf 'install-herdr: missing dependency: %s\n' "$command" >&2; exit 1; }
 done

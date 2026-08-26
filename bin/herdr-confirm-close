@@ -51,7 +51,15 @@ while :; do
   case "$key" in
     ""|$'\r'|$'\n') break ;;
     y|Y) selected=close; break ;;
-    n|N|$'\e') exit 0 ;;
+    n|N) exit 0 ;;
+    $'\e')
+      IFS= read -rsn2 -t 1 suffix || exit 0
+      case "$suffix" in
+        '[D') selected=cancel ;;
+        '[C') selected=close ;;
+        *) exit 0 ;;
+      esac
+      ;;
     h|H|$'\x02') selected=cancel ;;
     l|L|$'\x06') selected=close ;;
     ' ') [ "$selected" = close ] && selected=cancel || selected=close ;;
