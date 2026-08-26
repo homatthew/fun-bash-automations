@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# t3-claude — launch Claude Code for the T3 Code desktop app
+#
+# T3 Code spawns its Claude provider from a GUI process seeded with a PATH
+# captured from one login shell when the app started. That snapshot has two
+# problems: the node bin it captures is a per-shell fnm multishell directory
+# owned by a shell that has already exited (plugin hooks and npx-backed MCP
+# servers are one cleanup away from losing `node`), and dead entries from the
+# snapshot stay on PATH for the life of the app. This repairs both, then execs
+# whichever `claude` the PATH resolves to, so T3 threads run the same launcher,
+# settings, plugins, and skills as a terminal session.
+#
+# Wire it up in T3 Code -> Settings -> Providers -> Claude -> Binary path, or:
+#   ~/.t3/userdata/settings.json  ->  providers.claudeAgent.binaryPath
+#
+# A bare `--version` is answered from the installed CLI instead of the launcher.
+# T3 health-checks the provider with `--version` on a 4s timeout, and a launcher
+# that resolves versions or refreshes config over the network does not reliably
+# finish inside it — least of all on the launch that downloads a new release.
+# Threads still go through the launcher, where a slow start is just a slow start.
+#
+# Usage:
+#   t3-claude [args...]     exec claude with the repaired environment
+#   t3-claude --version     report the installed CLI version (fast path)
+#   t3-claude --t3-env      print the resolved binary and PATH, then exit
+# Override:
+#   T3_CLAUDE_BIN=/path/to/claude    skip PATH resolution
+#   T3_CLAUDE_FALLBACK_DIRS=a:b:c    replace the appended fallback directories
+#
+# Permission flags stay with T3: it appends its own interaction-mode flag, and
+# interactive shell aliases do not reach a GUI-spawned process.
+
+set -euo pipefail
+
+FNM_STABLE_BIN="$HOME/.local/share/fnm/aliases/default/bin"
+FALLBACK_DIRS=("$HOME/.local/bin" /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)
+
+if [[ -n "${T3_CLAUDE_FALLBACK_DIRS:-}" ]]; then
+    IFS=':' read -r -a FALLBACK_DIRS <<<"$T3_CLAUDE_FALLBACK_DIRS"
+fi
+
+RESOLVED_PATH=""
+
+add_dir() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    case ":$RESOLVED_PATH:" in
+        *":$dir:"*) return 0 ;;
+    esac
+    RESOLVED_PATH="${RESOLVED_PATH:+$RESOLVED_PATH:}$dir"
+}
+
+add_dir "$FNM_STABLE_BIN"
+while IFS= read -r dir; do
+    add_dir "$dir"
+done < <(printf '%s\n' "${PATH:-}" | tr ':' '\n')
+for dir in "${FALLBACK_DIRS[@]}"; do
+    add_dir "$dir"
+done
+
+export PATH="$RESOLVED_PATH"
+
+CLAUDE_BIN="${T3_CLAUDE_BIN:-$(command -v claude || true)}"
+
+if [[ "${1:-}" == "--t3-env" ]]; then
+    printf 'claude: %s\n' "${CLAUDE_BIN:-<not found>}"
+    printf 'node:   %s\n' "$(command -v node || echo '<not found>')"
+    printf 'npx:    %s\n' "$(command -v npx || echo '<not found>')"
+    printf 'PATH:   %s\n' "$PATH"
+    exit 0
+fi
+
+if [[ -z "$CLAUDE_BIN" ]]; then
+    echo "t3-claude: no 'claude' found on PATH; set T3_CLAUDE_BIN to the launcher T3 should use" >&2
+    exit 127
+fi
+
+INSTALLED_CLI="$HOME/.local/share/claude/bin/claude"
+
+if [[ $# -eq 1 && "$1" == "--version" && -x "$INSTALLED_CLI" ]]; then
+    exec "$INSTALLED_CLI" --version
+fi
+
+exec "$CLAUDE_BIN" "$@"
