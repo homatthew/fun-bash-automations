@@ -423,6 +423,18 @@ private_push_allow=$(
 [[ -z "$private_push_allow" ]] || fail "expected private direct-delivery overlay to allow the exact push, got: $private_push_allow"
 echo "ok 58a - private policy overlay adds an exact direct-delivery repository"
 
+custom_xdg="$TEST_TMP/custom-xdg"
+mkdir -p "$custom_xdg/fba"
+cp "$private_overlay" "$custom_xdg/fba/agent-push-policy-overlay.json"
+xdg_private_push_allow=$(
+  unset PG_AGENT_PUSH_POLICY_OVERLAY
+  export XDG_CONFIG_HOME="$custom_xdg"
+  run_guard_with_workdir "$private_repo" "git push origin main"
+)
+[[ -z "$xdg_private_push_allow" ]] \
+  || fail "expected the XDG policy overlay to allow the exact push, got: $xdg_private_push_allow"
+echo "ok 58a1 - private policy overlay loads from the XDG config root"
+
 printf '%s\n' '{"version":1,"direct_push_exceptions":"invalid"}' > "$TEST_TMP/malformed-private-overlay.json"
 malformed_private_push_block=$(
   export PG_AGENT_PUSH_POLICY_OVERLAY="$TEST_TMP/malformed-private-overlay.json"

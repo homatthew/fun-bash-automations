@@ -814,7 +814,7 @@ agent_push_policy_path() {
 }
 
 agent_push_policy_overlay_path() {
-  printf '%s\n' "${PG_AGENT_PUSH_POLICY_OVERLAY:-$HOME/.config/fba/agent-push-policy-overlay.json}"
+  printf '%s\n' "${PG_AGENT_PUSH_POLICY_OVERLAY:-${XDG_CONFIG_HOME:-$HOME/.config}/fba/agent-push-policy-overlay.json}"
 }
 
 agent_push_policy_overlay_is_valid() {
