@@ -7,15 +7,13 @@ description: Use when the user asks to draft, rewrite, polish, or review technic
 
 Use this as the prose quality pass for technical documents.
 
-Canonical anti-GPT examples below come from interviewing a Pagestore Cassandra compression analysis gist (`matthewho/71c9496f3aa5b65c3194c421e620ad9c`). Prefer the author's locked voice over generic "tighten this" rewrites.
-
 ## Workflow
 
 1. Preserve the facts. Do not invent metrics, commands, limits, error codes, owners, or outcomes.
 2. Identify the artifact and reader: PR reviewer, engineering peer, leadership reader, on-call engineer, or future agent.
 3. Rewrite section by section so each section can stand alone if retrieved without surrounding context.
 4. Lead each section with the answer, then add context, caveats, examples, and failure cases.
-5. For experiment / metrics writeups, run the **Analysis voice** rules and checklist before returning prose.
+5. For experiment or metrics writeups, apply the analysis rules before returning prose.
 6. Run the final checklist before returning prose.
 
 ## Prose Standard
@@ -47,7 +45,7 @@ Canonical anti-GPT examples below come from interviewing a Pagestore Cassandra c
 - Use standard Markdown headings, lists, tables, block quotes, and fenced code blocks.
 - Use `code` formatting for literal flags, paths, commands, filenames, APIs, fields, and error codes.
 - Use **bold** for important product names, domain terms, warnings, and identifiers a reader might search for verbatim. Do not bold every noun.
-- Spell out acronyms on first use: **CDC (change-data-capture)**, then `CDC`.
+- Spell out unfamiliar acronyms on first use, then use the acronym consistently.
 - Keep heading names stable when the document may be linked, cited, or indexed. Add explicit anchors only when the host format supports them.
 
 ### Show Real Operations
@@ -69,126 +67,73 @@ Canonical anti-GPT examples below come from interviewing a Pagestore Cassandra c
 - Aim for roughly 200-500 words per substantial section unless the artifact format requires shorter text.
 - If a table carries the claim, give at most one or two sentences of context. Do not write a thesis paragraph that only restates the table.
 
-### Name the Stat, Not a Category
-
-Do not generalize a real metric into an analytical category. Category words sound smart and create ambiguity.
-
-| Avoid (GPT category) | Prefer (named stat) |
-|---|---|
-| compaction capacity / compaction tax | pending compactions / `cass.compaction.pendingTasks` |
-| CPU tax / CPU pressure | average CPU; worst-node peak CPU |
-| the CPU mechanism is compaction-related | zstd shards show higher pending compactions and higher worst-node peak CPU together |
-| disk pressure | disk used / disk busy (name which) |
-| operationally meaningful / worth acting on | state the bar and the delta against it |
-
-**Before**
-> zstd level 3 consumes the most average CPU and compaction capacity.
-> The CPU mechanism is compaction-related.
-
-**After**
-> zstd level 3 has the highest average CPU and pending compactions.
-> zstd shards show higher pending compactions and higher worst-node peak CPU together; zstd-3 is highest on avg CPU and pending compactions.
-
-If average CPU and worst-node peak CPU are both in the doc, say both. Do not collapse them into "CPU."
-
-### Ban Managerial Soft Closers
-
-Avoid: "operationally meaningful", "worth acting on", "actionable", "preliminary conclusion", "essentially the same", "substantially lower" when the number is available.
-
-Put the number (and the success bar) in the sentence instead.
-
-## Analysis and Experiment Voice
-
-Use this section for Atlas analyses, capacity notes, A/B shard experiments, and similar metrics writeups.
+## Analysis and Experiment Writing
 
 ### State the Success Bar First
 
-Before judging regressions, define what counts.
+Define success, regression, and measurement noise before judging the result. State
+whether the threshold is absolute, relative, or both, and explain why that unit
+matches the decision.
 
-Latency example (locked from the compression analysis):
+Avoid "no meaningful regression" by itself. State the observed delta and compare
+it with the predeclared threshold.
 
-> For MutateItems and GetItems p99.9, treat a change as discernible above 0.5 ms, and as a regression at ≥1 ms if it holds consistently. Below 0.5 ms do not call it a regression.
->
-> AcquireClock is judged on percent, not absolute ms. Compression is not on the lease table, so this path should be unaffected; it is a sanity check that nothing else moved, not a primary compression metric. Within ~0.6% is fine.
+### Name the Statistic
 
-Absolute ms beats percent for Mutate/Get. Percent (plus domain reason) can be right for endpoints that should be unaffected or have a very different baseline.
+Do not replace a measured statistic with a broad category.
 
-**Before**
-> Successful-call KV p99.9 latency has no operationally meaningful regression for MutateItems, GetItems, or AcquireClock.
+| Avoid | Prefer |
+| --- | --- |
+| resource pressure | average CPU, peak memory, or disk utilization |
+| latency got worse | median p95 latency increased by the reported amount |
+| reliability improved | error rate fell from the baseline to the treatment value |
+| operationally meaningful | the delta exceeded the stated success bar |
 
-**After**
-> MutateItems median p99.9 is 0.063 ms above control, under the 0.5 ms discernible bar. GetItems is not higher than control. AcquireClock stays within ~0.6% across shards, which matches the expectation that lease-table traffic should not feel compression.
+If average and peak values both matter, name both. If a summary is a percentile
+of per-host maxima, do not call it an average.
 
 ### Validate Significance of Metrics You Choose to Show
 
 If a column invites ranking, ask whether the gaps are distinguishable given measurement error. Fuzzy error with precise-looking numbers is misleading.
 
-**Before** (false precision)
-> Worst-node peak CPU: zstd-1 75.1%, zstd-3 73.3%, zstd-2 71.8% → implied rank zstd-1 worst.
+Use point estimates with an honesty clause, confidence intervals, or a shared
+band when small differences are indistinguishable. Do not publish precise values
+that imply a ranking the data cannot support.
 
-**After** (numbers + honesty; range also fine)
-> Worst-node peak CPU (temporal p99 of max-across-nodes): zstd 75.1 / 73.3 / 71.8 (≈72–75%), vs LZ4 54.8% and control 61.0%. Gaps of a few points among zstd levels on this series are not something to treat as significant.
+### Match the Comparison to the Design
 
-Acceptable patterns: point estimates + honesty clause, or a shared band ("zstd ≈ 72–75%"). Unacceptable: precise per-treatment numbers that train a false ranking.
-
-Know what the summary is. "Temporal p99 of max-across-nodes peak" is not an average, and small gaps are often noise.
-
-### No Fake Before/After for Cross-Sectional A/B
-
-When treatments run simultaneously (p1–p5 style), the decision is **cross-shard inside one trusted window**.
-
-- Do not write a "before the dashed line" narrative. Pre-window is usually the same experiment plus confounders; it is not a control period.
-- A cutoff like "last new node + 48h" may be a motivated heuristic (e.g. TTL + gc_grace), but it is still an analysis window start, not a physical event.
-- Charts may show earlier data for eyeballing; prose should not narrate before/after as the plot.
-- Drop dedicated "what the dashed line means" sermons and caption reprints of the same disclaimer.
-
-**Keep (one breath)**
-> Comparisons use data after 2026-07-13 15:00 UTC (48h after the last new node; TTL + gc_grace heuristic). Cross-shard only.
+- Use before-and-after language only when the study has a valid temporal baseline.
+- For simultaneous treatments, compare treatment and control within the same trusted window.
+- Name confounders and explain exclusions without turning the caveat into the main result.
+- Charts may show context outside the analysis window, but the prose must not treat that context as controlled evidence.
 
 ### Section Roles: TL;DR, Decision, Recommendation
 
 TL;DR is allowed and useful. Do not let Decision and Recommendation echo it.
 
 | Block | Owns | Does not own |
-|---|---|---|
+| --- | --- | --- |
 | **TL;DR** | Success bar + verdict + a few skimmer findings | Evidence replay, figure deep-dive, caveats |
 | **Decision** | Goal, **one pick**, accepted tradeoffs, figure/table home | Dual "or" recommendations when the goal already picks one |
 | **Recommendation** | What to do / not do / follow up next | Re-proving latency or disk |
 
 State the goal, then pick one direction. Alternatives belong as rejected options, not co-winners.
 
-**Before** (hedged dual winner)
-> zstd-1 is the strongest zstd candidate; LZ4 is the lower-CPU alternative.
-
-**After** (goal → one pick; Slack-adjacent voice)
-> Goal: cut disk without moving Mutate/Get p99.9 past our bar. We're taking the spikier per-node CPU for that disk win.
->
-> Pick zstd level 1. Same ~46.5% disk reduction as zstd-2/3 vs control; lower avg CPU and pending compactions than zstd-3. LZ4 only if you refuse that CPU/peak trade for a smaller disk win (~32%). Skip zstd-3.
-
-**Recommendation actions (not evidence replay)**
-> - Move forward with zstd level 1 on that goal and accepted CPU/peak risk.
-> - Do not use zstd-3.
-> - Disk savings do not imply automatic horizontal downscale; run a separate CPU-headroom test before downscaling.
-> - AcquireClock ~350 ms p99.9 on every shard; track outside this compression change.
-
 ### Shape: Prose, Bullets, Captions
 
 - Default to prose with whitespace.
 - Use bullets for themes or parallel claims (endpoints, actions, caveats).
-- Figure captions stay short. Method detail lives once near the analysis window or in Caveats—not in every caption.
-- Ranking adjectives ("strongest candidate") can stay when they match the author's voice; do not stack coach-speak, and never invent "mechanism" labels.
+- Keep figure captions short. Put method details once near the analysis window or in caveats.
+- Do not invent causal mechanisms from co-moving statistics.
 
-### Phrasing Bank (prefer / avoid)
+### Replace Soft Conclusions
 
 | Avoid | Prefer |
-|---|---|
-| no operationally meaningful regression | under the 0.5 ms discernible bar / does not clear 1 ms |
-| worth acting on / actionable | omit; state bar + delta |
-| compaction capacity | pending compactions |
-| CPU mechanism is… | name the co-moving stats |
-| node cut | automatic horizontal downscale |
-| accept some loss of CPU buffer | we're taking the spikier per-node CPU |
-| essentially the same disk reduction | within ~0.7 GiB / ~46.5–46.7% vs control |
+| --- | --- |
+| no meaningful regression | state the delta and threshold |
+| worth acting on / actionable | state the decision and evidence |
+| essentially the same | state the range or uncertainty |
+| the mechanism is… | name the observed co-moving statistics |
 | em dash (—) | period, comma, colon, or parentheses |
 
 ## Artifact Guidance
@@ -216,19 +161,19 @@ State the goal, then pick one direction. Alternatives belong as rejected options
 ### Experiment / Metrics Analyses
 
 - Lead with success bars and the analysis window.
-- Cross-sectional A/B: no before/after story.
+- Match before-and-after or cross-sectional language to the study design.
 - TL;DR + Decision (one pick) + Recommendation (actions only).
-- Name stats; validate significance of displayed metrics; short captions.
+- Name statistics, validate the significance of displayed differences, and keep captions short.
 
 ## Final Checklist
 
 - Each section makes sense without previous sections.
 - The first sentence answers the heading without only paraphrasing it in bold.
 - Exact numbers, units, identifiers, defaults, and limits are explicit.
-- Softeners ("operationally meaningful", "essentially", "substantially") are replaced by bars and deltas.
+- Softeners are replaced by thresholds, deltas, ranges, or uncertainty.
 - Metrics in tables can support the ranking a reader will invent; if not, add an honesty clause or show a band.
-- Stats are named (pending compactions, worst-node peak CPU); no invented categories or "mechanism" labels.
-- Cross-sectional experiments do not narrate a fake before/after.
+- Statistics are named; categories and causal mechanisms are not invented.
+- The comparison language matches the experiment design.
 - TL;DR, Decision, and Recommendation do not echo the same paragraph; Decision picks one option given the goal.
 - Prose flows; bullets are for themes; no em dashes.
 - Code and commands are runnable or clearly marked as templates.

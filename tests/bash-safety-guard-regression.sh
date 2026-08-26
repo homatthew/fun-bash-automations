@@ -533,25 +533,25 @@ dotwork_pure_allow=$(
 echo "ok 60a - trusted SSH suffixes require explicit local configuration"
 
 playground_hosts="$TEST_TMP/playground-ssh-hosts"
-printf 'p1.work\np2.work # comments are allowed\n' >"$playground_hosts"
+printf 'sandbox-a.example.test\nsandbox-b.example.test # comments are allowed\n' >"$playground_hosts"
 playground_pkill_allow=$(
   export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
-  run_guard "ssh p1.work 'pkill -f antigravity'"
+  run_guard "ssh sandbox-a.example.test 'pkill -f worker-service'"
 )
 [[ -z "$playground_pkill_allow" ]] || fail "expected exact playground host to allow remote pkill without a lease, got: $playground_pkill_allow"
 playground_killall_allow=$(
-  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS="p1.work:p2.work"
-  run_guard "ssh p2.work 'killall java'"
+  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS="sandbox-a.example.test:sandbox-b.example.test"
+  run_guard "ssh sandbox-b.example.test 'killall java'"
 )
 [[ -z "$playground_killall_allow" ]] || fail "expected environment-configured playground host to allow remote killall, got: $playground_killall_allow"
 playground_lookalike_block=$(
   export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
-  run_guard "ssh not-p1.work 'pkill -f antigravity'"
+  run_guard "ssh not-sandbox-a.example.test 'pkill -f worker-service'"
 )
 expect_contains "$playground_lookalike_block" "dangerous remote ssh command: pkill"
 playground_override_block=$(
   export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
-  run_guard "ssh -o HostName=prod.example p1.work 'pkill -f antigravity'"
+  run_guard "ssh -o HostName=prod.example sandbox-a.example.test 'pkill -f worker-service'"
 )
 expect_contains "$playground_override_block" "dangerous remote ssh command: pkill"
 echo "ok 60a1 - exact playground SSH hosts bypass leases and remote command restrictions"
