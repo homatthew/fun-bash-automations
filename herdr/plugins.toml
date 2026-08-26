@@ -1,0 +1,11 @@
+[[plugin]]
+source = "smarzban/herdr-file-viewer"
+ref = "fa1946a04dd58ba9b3db2eda0125b6055fb604da"
+
+[[plugin]]
+source = "persiyanov/herdr-reviewr"
+ref = "42ccaaa72176937181c82a91484f97466fb5ed59"
+
+[local_confirmation]
+# install-herdr links this only when --local-confirmation-plugin DIR is explicit.
+enabled_by_default = false

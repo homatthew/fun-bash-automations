@@ -1,0 +1,88 @@
+onboarding = false
+
+[keys]
+prefix = "ctrl+space"
+
+# Keep Herdr's default prefix+p/prefix+n tab bindings. The retired
+# herdr-cycle-tab helper remains installable for users who want a second chord,
+# but this public profile does not bind it.
+previous_agent = ""
+next_agent = ""
+last_pane = "cmd+l"
+close_pane = "prefix+shift+q"
+
+[[keys.command]]
+key = "prefix+x"
+type = "popup"
+command = "@HELPER_DIR@/herdr-confirm-close-pane"
+width = "56%"
+height = "26%"
+description = "close pane, with confirmation"
+
+[[keys.command]]
+key = "cmd+u"
+type = "shell"
+command = "@HELPER_DIR@/herdr-cycle-agent prev"
+description = "focus previous agent in this workspace"
+
+[[keys.command]]
+key = "cmd+i"
+type = "shell"
+command = "@HELPER_DIR@/herdr-cycle-agent next"
+description = "focus next agent in this workspace"
+
+[[keys.command]]
+key = "prefix+u"
+type = "popup"
+command = "@HELPER_DIR@/herdr-reopen-pane"
+width = "56%"
+height = "26%"
+description = "reopen the last closed pane"
+
+[[keys.command]]
+key = "prefix+shift+z"
+type = "popup"
+command = "@HELPER_DIR@/herdr-confirm-close-tab"
+width = "60%"
+height = "30%"
+description = "close tab, with confirmation"
+
+[[keys.command]]
+key = "prefix+shift+v"
+type = "plugin_action"
+command = "persiyanov.reviewr.toggle"
+description = "toggle the review pane"
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer"
+description = "open the file viewer in a split"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer-tab"
+description = "open the file viewer in a tab"
+
+[ui]
+agent_panel_sort = "spaces"
+show_agent_labels_on_pane_borders = true
+confirm_close = true
+
+[ui.toast]
+delivery = "system"
+
+[ui.sound]
+enabled = true
+
+# Follow the host terminal's OSC light/dark reports. Ghostty follows macOS when
+# its theme is configured as a light/dark pair.
+[theme]
+name = "catppuccin"
+auto_switch = true
+light_name = "catppuccin-latte"
+dark_name = "catppuccin"
+
+[experimental]
+switch_ascii_input_source_in_prefix = false
