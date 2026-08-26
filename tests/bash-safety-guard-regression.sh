@@ -81,7 +81,7 @@ print(f"{digest}\t{expiry}\t{host}\t{canonical}")
 PY
 }
 
-echo "1..141"
+echo "1..142"
 
 read_allow=$(run_guard "gh api /gists/example-id")
 [[ -z "$read_allow" ]] || fail "expected gist read to be allowed, got: $read_allow"
@@ -426,6 +426,10 @@ export PATH="$guard_bin:$PATH"
 fba_push_allow=$(run_guard_with_workdir "$fba_repo" "git push origin main")
 [[ -z "$fba_push_allow" ]] || fail "expected the configured direct-delivery main push to be allowed, got: $fba_push_allow"
 echo "ok 59 - configured fun-bash-automations main push is allowed"
+
+fba_dashc_push_allow=$(run_guard "git -C $fba_repo push origin main")
+[[ -z "$fba_dashc_push_allow" ]] || fail "expected explicit-directory FBA delivery to be allowed, got: $fba_dashc_push_allow"
+echo "ok 59a - explicit-directory FBA main push resolves the target repository"
 
 # The exception is branch-exact: other protected refs stay blocked here.
 fba_master_block=$(run_guard_with_workdir "$fba_repo" "git push origin master")

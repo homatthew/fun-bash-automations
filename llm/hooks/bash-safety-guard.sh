@@ -927,14 +927,10 @@ is_configured_direct_delivery_push() {
   local target_branch="$1" configured_branch configured_remote actual_remote
   [[ -n "$target_branch" ]] || return 1
 
-  # Refuse the exception outright for any push that redirects which repository
-  # it acts on. Repo identity here is resolved from the working directory, so a
-  # `git -C <elsewhere> push origin main` run from inside a direct-delivery
-  # repository would otherwise borrow this repository's exception and deliver to
-  # an unrelated one. Direct delivery is a plain push from the repository
-  # itself; declining to parse the redirect is both simpler and stricter than
-  # trying to follow it.
-  if git_push_uses_directory_redirect; then
+  # `git -C` is safe because GUARD_WORKDIR resolves it before git_context reads
+  # the repository policy. Lower-level redirects are not resolved and must not
+  # borrow the caller repository's exception.
+  if git_push_uses_unresolved_directory_redirect; then
     return 1
   fi
 
@@ -1349,11 +1345,10 @@ for name in targets:
 PY
 }
 
-# Exit 0 when a `git push` segment itself carries a directory-redirecting global
-# option. Scoped to the push segment on purpose: grepping the whole command
-# string meant any unrelated `git -C ... status` elsewhere in a compound command
-# voided the delivery exception, which fails closed but blocks ordinary work.
-git_push_uses_directory_redirect() {
+# Exit 0 when a `git push` segment carries a repository redirect that
+# GUARD_WORKDIR cannot safely resolve. `-C` is intentionally absent: its target
+# becomes the guard's Git context before policy lookup.
+git_push_uses_unresolved_directory_redirect() {
   python3 - "$GIT_COMMAND" <<'PY'
 import re
 import shlex
@@ -1378,7 +1373,7 @@ for token in tokens:
 if current:
     segments.append(current)
 
-REDIRECT = {"-C", "--git-dir", "--work-tree", "--namespace"}
+REDIRECT = {"--git-dir", "--work-tree", "--namespace"}
 
 
 def strip_env_assignments(segment):
