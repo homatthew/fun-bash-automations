@@ -29,6 +29,8 @@ listed intentionally.
 ### chrome-devtools
 
 - Config: `mcp_servers.chrome-devtools`
+- Default: disabled. The bundled browser/Chrome capabilities cover ordinary
+  page inspection without starting a second browser-control server.
 - Command: `npx chrome-devtools-mcp@1.6.0`
 - Remote requirement: Node.js and `npx`.
 - Auth: none.
