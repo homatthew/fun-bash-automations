@@ -17,6 +17,10 @@ fail() {
   exit 1
 }
 
+stat_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+}
+
 mkdir -p "$TMP/bin" "$TMP/repo" "$TMP/run" "$TMP/sol-run" "$TMP/link-run" \
   "$TMP/again-run" "$TMP/cursor-run" "$TMP/cursor-state/runs"
 mkdir -p "$TMP/blocked-run"
@@ -340,6 +344,14 @@ grep -Fq 'diff --git a/new_module.py b/new_module.py' "$TMP/run/diff.patch" \
   || fail "--base HEAD omitted an untracked file from the review patch"
 grep -Fq '+required = true' "$TMP/run/diff.patch" \
   || fail "untracked file contents were absent from the review patch"
+[[ "$(stat_mode "$TMP/run")" == 700 ]] \
+  || fail "review artifact directory was not mode 700"
+[[ "$(stat_mode "$TMP/run/session.json")" == 600 ]] \
+  || fail "review session record was not mode 600"
+[[ "$(stat_mode "$TMP/state")" == 700 ]] \
+  || fail "review state directory was not mode 700"
+[[ "$(stat_mode "$TMP/state/events.jsonl")" == 600 ]] \
+  || fail "review events were not mode 600"
 
 ! grep -Fq -- "-c 'mcp_servers={}'" "$CTXREVIEW_RUNTIME" \
   || fail "Codex review legs still use the ineffective empty-table MCP override"

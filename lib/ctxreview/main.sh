@@ -15,6 +15,7 @@
 #
 # See: llm/skills/code-review/SKILL.md, llm/skills/cursor-sub-review/SKILL.md
 set -uo pipefail
+umask 077
 
 SELF="${CTXREVIEW_SELF:-${0##*/}}"
 SOURCE="${BASH_SOURCE[0]}"
@@ -68,6 +69,8 @@ MAINTAIN_LOCK=""
 CODEX_NO_MCP_ARGS=()
 CODEX_NO_MCP_READY=0
 
+. "$FBA/lib/ctxreview/privacy.sh"
+chmod 700 "$WORK_C"
 . "$FBA/lib/ctxreview/herdr.sh"
 
 cleanup_work() {
@@ -313,7 +316,7 @@ refresh_leg_sessions() {  # refresh every leg in the current run record
 
 cmd_sessions() {  # cmd_sessions [owner]
   local owner="${1:-}" files=() f rows="$WORK_C/session-rows.tsv" total=0
-  mkdir -p "$(session_runs_dir)"
+  secure_dir "$(session_runs_dir)"
   : > "$rows"
   for f in "$(session_runs_dir)"/*.json; do
     [ -s "$f" ] || continue
@@ -339,7 +342,7 @@ cmd_stats() {  # cmd_stats [owner]
   jq -en --arg value "$target" '($value|tonumber) as $n | $n>=0 and $n<=100' \
     >/dev/null 2>&1 || die "CTXREVIEW_FAILURE_RATE_TARGET_PERCENT must be between 0 and 100"
   : > "$records"; : > "$events"; : > "$focuses"
-  mkdir -p "$(session_runs_dir)"
+  secure_dir "$(session_runs_dir)"
   for f in "$(session_runs_dir)"/*.json; do
     [ -s "$f" ] || continue
     [ -z "$owner" ] || [ "$(jq -r '.owner_session // ""' "$f")" = "$owner" ] || continue
@@ -851,7 +854,7 @@ cmd_adjudicate() {
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   who="${CTXREVIEW_ADJUDICATOR:-$(git config user.name 2>/dev/null || true)}"
   who="${who:-${USER:-local-author}}"
-  mkdir -p "$(dirname "$ADJ_FILE")"
+  secure_dir "$(dirname "$ADJ_FILE")"
   while IFS=$'\t' read -r verdict legs sev loc finding reason; do
     case "$verdict" in ''|'#'*|VERDICT) continue ;; esac
     case "$verdict" in
@@ -872,6 +875,7 @@ cmd_adjudicate() {
     n=$((n+1))
   done < "$sheet"
   sort -u "$ADJ_FILE" -o "$ADJ_FILE"
+  secure_file "$ADJ_FILE"
   say "appended $n adjudications — corpus now $(wc -l < "$ADJ_FILE" | tr -d ' ') threads"
   [ "$n" -gt 0 ] && say "refutations with a domain fact are bible-rule material: see $ADJ_FILE"
 }
@@ -898,7 +902,7 @@ cmd_bug() {
   [ -z "$bug_run" ] || valid_session_id "$bug_run" || die "invalid --run id"
   [ -z "$bug_leg" ] || valid_leg "$bug_leg" || die "invalid --leg name"
   [ -z "$owner_session" ] || valid_session_id "$owner_session" || die "invalid --session id"
-  mkdir -p "$(dirname "$BUGS_FILE")"
+  secure_dir "$(dirname "$BUGS_FILE")"
   local id repo line
   # Second-granularity ids collided immediately: three bugs filed in the same
   # second shared an id, which would make --bug-fixed close an arbitrary one of
@@ -1093,7 +1097,7 @@ cursor_leg_settled() {  # cursor_leg_settled <agent> <report-file>
 }
 
 acquire_maintain_lock() {
-  mkdir -p "$SESSION_STATE_DIR"
+  secure_dir "$SESSION_STATE_DIR"
   local lock="$SESSION_STATE_DIR/maintain.lock"
   if command -v shlock >/dev/null 2>&1; then
     shlock -f "$lock" -p $$ >/dev/null 2>&1 || return 1
@@ -1263,7 +1267,7 @@ close_named_session_record() {  # close_named_session_record <record> [reason] [
   fi
 
   capture_dir="$REAP_DIR/$run"
-  mkdir -p "$capture_dir"
+  secure_dir "$capture_dir"
   # The original checkout may have been temporary and removed before cleanup.
   # Keep the tail in lifecycle storage instead of recreating an abandoned tree
   # or accidentally interpreting an empty run_dir as a path under `/`.
@@ -1484,7 +1488,7 @@ cmd_close_session() {  # cmd_close_session <owner> [reason]
   local owner="${1:-}" close_reason="${2:-manual}" record n=0 rows=""
   valid_session_id "$owner" || die "invalid or missing session id"
   rows="$(mktemp "${TMPDIR:-/tmp}/ctxreview-close.XXXXXX")"
-  mkdir -p "$(session_runs_dir)"
+  secure_dir "$(session_runs_dir)"
   : > "$rows"
   for record in "$(session_runs_dir)"/*.json; do
     [ -s "$record" ] || continue
@@ -1508,7 +1512,7 @@ cmd_session_ended() {  # cmd_session_ended <owner>
   local owner="${1:-}" record found=0 when
   valid_session_id "$owner" || die "invalid or missing session id"
   when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  mkdir -p "$(session_runs_dir)"
+  secure_dir "$(session_runs_dir)"
   for record in "$(session_runs_dir)"/*.json; do
     [ -s "$record" ] || continue
     [ "$(jq -r '.owner_session // ""' "$record")" = "$owner" ] || continue
@@ -1683,7 +1687,8 @@ fi
 # That matters here: the corpus has *zero* security/authz coverage, so
 # `--focus security` finding nothing is a fact about the corpus, not a clean bill
 # of health, and it must not be mistaken for one.
-LENS_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:-$HOME/repos/dump/second-brain}/review}/lenses"
+PRIVATE_REVIEW_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:+$SECOND_BRAIN_DIR/review}}"
+LENS_DIR="${PRIVATE_REVIEW_DIR:+$PRIVATE_REVIEW_DIR/lenses}"
 
 focus_lens_files() {  # focus_lens_files <topic> -> matching lens paths
   local topic="$1" hits=""
@@ -1756,6 +1761,8 @@ fi
 want sol && prepare_codex_no_mcp_args
 
 if [ -n "$focus" ]; then
+  [ -n "$LENS_DIR" ] \
+    || die "--focus requires explicit CTXPACK_BIBLE_DIR or SECOND_BRAIN_DIR"
   focus_files="$(focus_lens_files "$focus")"
   if [ -z "$focus_files" ]; then
     printf '%s: no lens matches focus "%s".\n\n' "$SELF" "$focus" >&2
@@ -1810,7 +1817,7 @@ else
        say "         reports may be lost to the 4 KB terminal tail." ;;
   esac
 fi
-mkdir -p "$dir"
+secure_dir "$dir"
 dir="$(cd "$dir" && pwd -P)"
 # A caller-selected --dir is a storage location, not a globally unique identity.
 # Keep ownership records collision-resistant even when two repositories choose

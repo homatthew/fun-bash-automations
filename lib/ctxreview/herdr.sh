@@ -36,7 +36,7 @@ start_named_session() {
   HERDR_SESSION_NAME="$name"
   if named_session_running "$name"; then return 0; fi
   bin="$(herdr_bin)" || return 1
-  mkdir -p "$SESSION_STATE_DIR/herdr-logs"
+  secure_dir "$SESSION_STATE_DIR/herdr-logs"
   log="$SESSION_STATE_DIR/herdr-logs/$name.log"
   nohup "$bin" --session "$name" server </dev/null >>"$log" 2>&1 &
   disown 2>/dev/null || true

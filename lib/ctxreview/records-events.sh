@@ -19,7 +19,7 @@ record_run_dir() {
 
 acquire_file_lock() {
   local lock="$1" attempt pid="${BASHPID:-$$}"
-  mkdir -p "$(dirname "$lock")"
+  secure_dir "$(dirname "$lock")"
   for attempt in $(seq 1 100); do
     if command -v shlock >/dev/null 2>&1; then
       shlock -f "$lock" -p "$pid" >/dev/null 2>&1 && return 0
@@ -46,7 +46,7 @@ append_line_locked() {
 record_event() {
   local event="$1" run="${2:-}" owner="${3:-}" outcome="${4:-}" reason="${5:-}"
   local leg="${6:-}" workspace="${7:-}" line event_id=""
-  mkdir -p "$(dirname "$EVENTS_FILE")"
+  secure_dir "$(dirname "$EVENTS_FILE")"
   case "$event" in
     leg_terminal) event_id="$run:$leg:terminal" ;;
     round_terminal) event_id="$run:round:terminal" ;;
@@ -72,7 +72,7 @@ persist_session_record() {
   local record="$1" run_id target tmp
   run_id="$(jq -r '.run_id // empty' "$record" 2>/dev/null)"
   [ -n "$run_id" ] || return 1
-  mkdir -p "$(session_runs_dir)"
+  secure_dir "$(session_runs_dir)"
   target="$(session_record_path "$run_id")"
   tmp="$target.tmp.$$"
   cp "$record" "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$target"

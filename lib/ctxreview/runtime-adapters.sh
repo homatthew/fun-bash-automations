@@ -30,7 +30,7 @@ prepare_cursor_config() {
   local config_dir="$1" workspace="${2:-$PWD}" tmp cursor_bin listing line id after
   cursor_bin="$(type -P cursor-agent 2>/dev/null || command -v cursor-agent 2>/dev/null || true)"
   [ -n "$cursor_bin" ] || return 1
-  mkdir -p "$config_dir" 2>/dev/null || return 1
+  secure_dir "$config_dir" 2>/dev/null || return 1
   tmp="$(mktemp "$config_dir/mcp.json.tmp.XXXXXX" 2>/dev/null)" || return 1
   if ! printf '{"mcpServers":{}}\n' > "$tmp" || ! mv "$tmp" "$config_dir/mcp.json"; then
     rm -f "$tmp"
