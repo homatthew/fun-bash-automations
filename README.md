@@ -18,8 +18,8 @@ Use this repository for behavior that is broadly reusable:
 - local workflow helpers in `bin/` such as `fba-deploy` and notification tooling
 - code-review tooling in `bin/`: `ctxpack` assembles a local review context pack
   (repo conventions, sibling precedent, per-file history, prior finding verdicts),
-  and `ctxreview` fans that pack out to four independent model legs in an
-  isolated named Herdr 0.8 session. Stop a settled round with `ctxreview --close
+  and `ctxreview run --legs LIST` fans that pack out to explicit independent
+  model legs in an isolated named Herdr 0.8 session. Stop a settled round with `ctxreview --close
   <run-id>`, restore it with `ctxreview --respawn <run-id>`, or enter one reviewer
   directly with `ctxreview --attach <run-id> <leg>`. Session hooks hibernate
   owner-ended rounds automatically; a round that is still idle and unverifiable

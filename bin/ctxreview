@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ctxreview — one context pack, four independent reviewers, four watchable panes.
 #
-#   ctxpack build  ->  prompt  ->  named Herdr session  ->  4 panes, one model each
+#   ctxreview run --legs LIST
+#     -> ctxpack build -> prompt -> named Herdr session -> reviewer panes
 #
 # Each leg gets the identical pack and diff and never sees another leg's output,
 # so the opinions stay independent. Panes remain conversible through the parent
@@ -40,11 +41,11 @@ usage() {
 $SELF — fan a context pack out to four reviewer panes in a Herdr review workspace
 
 USAGE
-  $SELF [--base REF] [--legs LIST] [--label TEXT] [--dir DIR]
+  $SELF run --legs LIST [--base REF] [--label TEXT] [--dir DIR]
 
 OPTIONS
   --base REF    Diff base. Default: ctxpack's own (merge-base with default branch).
-  --legs LIST   Comma-separated subset of: kimi,grok,sol,opus  (default: all four)
+  --legs LIST   Required comma-separated subset of: kimi,grok,sol,opus
   --label TEXT  Tab label. Default: "review: <branch>"
   --dir DIR     Where pack/prompt/results go. Default: a fresh mktemp -d.
   --dry-run     Build the pack and prompt, print the plan, spawn nothing.
@@ -155,7 +156,17 @@ ENVIRONMENT
 EOF
 }
 
-base="" legs="kimi,grok,sol,opus" label="" dir="" dry=0 force=0 again=0
+command_name=""
+case "${1:-}" in
+  run) command_name=run; shift ;;
+  -h|--help|help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+  --*) ;;
+  *) die "unknown command: $1 (expected run or an inspection/lifecycle option)" ;;
+esac
+
+base="" legs="" label="" dir="" dry=0 force=0 again=0
+legs_explicit=0
 MAX_BYTES="${CTXREVIEW_MAX_BYTES:-400000}"
 action="" close_target=""; focus=""; focus_files=""; consolidate_dir=""
 adj_dir=""; adj_commit=""; bug_text=""; bug_tool=""; bug_filter="open"; bug_id=""
@@ -232,7 +243,7 @@ trap cleanup_work EXIT
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) base="${2:?}"; shift 2 ;;
-    --legs) legs="${2:?}"; shift 2 ;;
+    --legs) legs="${2:?}"; legs_explicit=1; shift 2 ;;
     --label) label="${2:?}"; shift 2 ;;
     --dir) dir="${2:?}"; shift 2 ;;
     --dry-run) dry=1; shift ;;
@@ -1955,6 +1966,10 @@ cmd_respawn() {  # cmd_respawn <source-run>
   [ -s "$source" ] || die "no persisted review run $source_run"
   [ -n "$(jq -r '.herdr_session_name // empty' "$source")" ] \
     || die "$source_run predates named sessions and cannot be restored"
+  [ "$legs_explicit" -eq 0 ] \
+    || die "--respawn uses the persisted requested legs; do not pass --legs"
+  legs="$(jq -r '(.requested_legs // []) | join(",")' "$source")"
+  validate_legs "$legs"
   resume_named_run "$source"
 }
 
@@ -1962,8 +1977,16 @@ cmd_respawn() {  # cmd_respawn <source-run>
 # a pack, or a diff. Do not hide actions behind `command -v`: a missing runtime
 # must be a clear error, not an accidental fall-through into building a review.
 need_herdr() { herdr_bin >/dev/null 2>&1 || die "herdr not on PATH"; }
+if [ -z "$action" ]; then
+  [ "$command_name" = run ] \
+    || die "review launch requires: $SELF run --legs kimi,grok,sol,opus"
+  [ "$legs_explicit" -eq 1 ] \
+    || die "run requires --legs LIST (choose kimi,grok,sol,opus)"
+elif [ -n "$command_name" ]; then
+  die "run cannot be combined with inspection or lifecycle actions"
+fi
 case "$action" in
-  ""|respawn) validate_legs "$legs" ;;
+  "") validate_legs "$legs" ;;
 esac
 case "$action" in
   list)  need_herdr; cmd_list; exit 0 ;;
@@ -2104,7 +2127,7 @@ if [ -n "$focus" ]; then
   # prompt grows by every lens body it inlines.
   if [ "$n_focus" -gt 5 ]; then
     say "note: $n_focus lenses is broad for a focused round — a narrower topic"
-    say "      gives the reviewer fewer, sharper checks. \`ctxreview --focus\` with"
+    say "      gives the reviewer fewer, sharper checks. \`ctxreview run --focus\` with"
     say "      no match lists every available topic."
   fi
 fi

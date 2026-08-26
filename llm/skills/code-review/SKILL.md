@@ -49,14 +49,14 @@ sessions, transcripts, and lifecycle. Do not recreate those mechanics in this
 skill.
 
 ```bash
-ctxreview [--base REF] [--legs kimi,grok,sol,opus]
+ctxreview run --legs kimi,grok,sol,opus [--base REF]
 ```
 
 - Respect the prompt-size cap. Narrow or split the scope instead of forcing an
   oversized review unless the user explicitly accepts the limitation.
 - Consolidate with `ctxreview --consolidate DIR`, then adjudicate every candidate
   locally. Reviewer agreement raises attention, not truth or severity.
-- Use `ctxreview --again` for re-review after fixes. Do not ask a reviewer to
+- Use `ctxreview run --again --legs LIST` for re-review after fixes. Do not ask a reviewer to
   judge its own prior finding; reuse old legs only to explain their reasoning.
 - Close a settled round with `ctxreview --close RUN` when it is no longer needed.
 

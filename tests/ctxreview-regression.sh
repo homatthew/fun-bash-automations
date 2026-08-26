@@ -236,7 +236,24 @@ chmod +x "$TMP/bin/failing-cursor-spawn"
 if (
   cd "$TMP/repo"
   HERDR_CALLS="$TMP/invalid-calls" PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs bogus --dir "$TMP/invalid-run" >/dev/null 2>&1
+    "$ROOT/bin/ctxreview" --base HEAD --legs opus \
+      --dir "$TMP/implicit-run" >/dev/null 2>&1
+); then
+  fail "legacy implicit review launch was accepted"
+fi
+if (
+  cd "$TMP/repo"
+  HERDR_CALLS="$TMP/invalid-calls" PATH="$TMP/bin:$PATH" \
+    "$ROOT/bin/ctxreview" run --base HEAD \
+      --dir "$TMP/default-run" >/dev/null 2>&1
+); then
+  fail "review launch defaulted the requested legs"
+fi
+if (
+  cd "$TMP/repo"
+  HERDR_CALLS="$TMP/invalid-calls" PATH="$TMP/bin:$PATH" \
+    "$ROOT/bin/ctxreview" run --base HEAD --legs bogus \
+      --dir "$TMP/invalid-run" >/dev/null 2>&1
 ); then
   fail "invalid --legs value exited successfully"
 fi
@@ -246,7 +263,7 @@ for invalid_legs in 'sol,' 'sol,,opus' 'sol,sol'; do
   if (
     cd "$TMP/repo"
     HERDR_CALLS="$TMP/invalid-calls" PATH="$TMP/bin:$PATH" \
-      "$ROOT/bin/ctxreview" --base HEAD --legs "$invalid_legs" \
+      "$ROOT/bin/ctxreview" run --base HEAD --legs "$invalid_legs" \
         --dir "$TMP/invalid-run" >/dev/null 2>&1
   ); then
     fail "invalid --legs list was accepted: $invalid_legs"
@@ -258,7 +275,7 @@ done
 if (
   cd "$TMP/repo"
   HERDR_CALLS="$TMP/collision-calls" PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs opus \
+    "$ROOT/bin/ctxreview" run --base HEAD --legs opus \
       --herdr-session ctxreview-existing --dir "$TMP/collision-run" >/dev/null 2>&1
 ); then
   fail "ctxreview reused an existing named Herdr session"
@@ -272,7 +289,7 @@ if ! (
   cd "$TMP/repo"
   CURSOR_MCP_CALLS="$TMP/cursor-mcp-calls" \
     CTXREVIEW_SESSION_STATE_DIR="$TMP/link-state" PATH="$TMP/bin:$PATH" \
-    "$TMP/ctxreview-link" --base HEAD --legs kimi \
+    "$TMP/ctxreview-link" run --base HEAD --legs kimi \
     --dry-run --dir "$TMP/link-run" >/dev/null 2>&1
 ); then
   fail "ctxreview could not resolve repo-owned helpers through an installed symlink"
@@ -284,7 +301,7 @@ if ! output="$(
     HERDR_BANNER_ATTEMPT="$TMP/banner-attempt" \
     CTXREVIEW_SESSION_ID="test-parent" CTXREVIEW_SESSION_STATE_DIR="$TMP/state" \
     CTXREVIEW_PANE_READY_DELAY_SECONDS=0 PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs opus --dir "$TMP/run" 2>&1
+    "$ROOT/bin/ctxreview" run --base HEAD --legs opus --dir "$TMP/run" 2>&1
 )"; then
   printf '%s\n' "$output" >&2
   fail "ctxreview launch failed"
@@ -356,7 +373,8 @@ if ! again_output="$(
     HERDR_BANNER_ATTEMPT="$TMP/banner-attempt" HERDR_NO_REVIEW_WORKSPACES=1 \
     CTXREVIEW_SESSION_ID="again-parent" CTXREVIEW_SESSION_STATE_DIR="$TMP/again-state" \
     CTXREVIEW_PANE_READY_DELAY_SECONDS=0 PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --again --base HEAD --legs opus --dir "$TMP/again-run" 2>&1
+    "$ROOT/bin/ctxreview" run --again --base HEAD --legs opus \
+      --dir "$TMP/again-run" 2>&1
 )"; then
   printf '%s\n' "$again_output" >&2
   fail "first-use --again crashed"
@@ -370,7 +388,8 @@ if ! (
     HERDR_BANNER_ATTEMPT="$TMP/banner-attempt" HERDR_AGENT_STATUS=blocked \
     CTXREVIEW_SESSION_ID="blocked-parent" CTXREVIEW_SESSION_STATE_DIR="$TMP/blocked-state" \
     CTXREVIEW_PANE_READY_DELAY_SECONDS=0 PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs opus --dir "$TMP/blocked-run" >/dev/null 2>&1
+    "$ROOT/bin/ctxreview" run --base HEAD --legs opus \
+      --dir "$TMP/blocked-run" >/dev/null 2>&1
 ); then
   fail "blocked-leg fixture did not launch"
 fi
@@ -453,7 +472,7 @@ if ! sol_output="$(
     HERDR_AGENT_NO_SESSION=1 CTXREVIEW_SESSION_ID="sol-parent" \
     CTXREVIEW_SESSION_STATE_DIR="$TMP/sol-state" \
     CTXREVIEW_PANE_READY_DELAY_SECONDS=0 PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs sol --dir "$TMP/sol-run" 2>&1
+    "$ROOT/bin/ctxreview" run --base HEAD --legs sol --dir "$TMP/sol-run" 2>&1
 )"; then
   printf '%s\n' "$sol_output" >&2
   fail "Codex review launch failed when its native session id was late"
@@ -489,7 +508,8 @@ if partial_output="$(
     HERDR_FAIL_AGENT=ctxreview-opus-w1p1 \
     CTXREVIEW_SESSION_ID=partial-parent CTXREVIEW_SESSION_STATE_DIR="$TMP/partial-state" \
     CTXREVIEW_PANE_READY_DELAY_SECONDS=0 PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs sol,opus --dir "$TMP/partial-run" 2>&1
+    "$ROOT/bin/ctxreview" run --base HEAD --legs sol,opus \
+      --dir "$TMP/partial-run" 2>&1
 )"; then
   printf '%s\n' "$partial_output" >&2
   fail "partial launch failure exited successfully"
@@ -511,7 +531,8 @@ if (
   HERDR_CALLS="$TMP/all-failed-calls" HERDR_FAIL_ALL_START=1 \
     CTXREVIEW_SESSION_ID=all-failed-parent \
     CTXREVIEW_SESSION_STATE_DIR="$TMP/all-failed-state" PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs sol,opus --dir "$TMP/all-failed-run" \
+    "$ROOT/bin/ctxreview" run --base HEAD --legs sol,opus \
+      --dir "$TMP/all-failed-run" \
       >/dev/null 2>&1
 ); then
   fail "all-failed launch exited successfully"
@@ -529,7 +550,7 @@ if (
     CTXREVIEW_CURSOR_SPAWN="$TMP/bin/failing-cursor-spawn" \
     CTXREVIEW_SESSION_ID=cursor-failed-parent \
     CTXREVIEW_SESSION_STATE_DIR="$TMP/cursor-failed-state" PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs kimi \
+    "$ROOT/bin/ctxreview" run --base HEAD --legs kimi \
       --dir "$TMP/cursor-failed-run" >/dev/null 2>&1
 ); then
   fail "failed Cursor spawn exited successfully"
@@ -550,7 +571,7 @@ if (
     CTXREVIEW_INTERACTIVE_READY_DELAY_SECONDS=0 \
     CTXREVIEW_SESSION_ID=not-ready-parent \
     CTXREVIEW_SESSION_STATE_DIR="$TMP/not-ready-state" PATH="$TMP/bin:$PATH" \
-    "$ROOT/bin/ctxreview" --base HEAD --legs opus --dir "$TMP/not-ready-run" \
+    "$ROOT/bin/ctxreview" run --base HEAD --legs opus --dir "$TMP/not-ready-run" \
       >/dev/null 2>&1
 ); then
   fail "non-ready agent launch exited successfully"
@@ -603,7 +624,7 @@ grep -Fq "session stop $sol_herdr_session --json" "$TMP/sol-calls" \
 : > "$TMP/sol-session-calls"
 HERDR_CALLS="$TMP/sol-respawn-calls" HERDR_SESSION_CALLS="$TMP/sol-session-calls" \
   HERDR_AGENT_KIND=codex CTXREVIEW_SESSION_STATE_DIR="$TMP/sol-state" \
-  PATH="$TMP/bin:$PATH" "$ROOT/bin/ctxreview" --respawn "$sol_run_id" --legs sol >/dev/null
+  PATH="$TMP/bin:$PATH" "$ROOT/bin/ctxreview" --respawn "$sol_run_id" >/dev/null
 ! grep -Fq 'agent start' "$TMP/sol-respawn-calls" \
   || fail "named restore manually relaunched an agent"
 grep -Fq "$sol_herdr_session"$'\t''agent list' "$TMP/sol-session-calls" \
