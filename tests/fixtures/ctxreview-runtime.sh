@@ -195,3 +195,4 @@ esac
 EOF
 
 chmod +x "$TMP/bin/ctxpack" "$TMP/bin/claude" "$TMP/bin/codex" \
+  "$TMP/bin/cursor-agent" "$TMP/bin/herdr"
