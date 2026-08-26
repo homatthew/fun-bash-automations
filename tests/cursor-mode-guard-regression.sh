@@ -33,9 +33,9 @@ assert_denied "herdr agent start review --kind cursor --pane w1:pX"
 assert_denied "herdr agent start review --kind cursor --pane w1:pX -- --trust --model composer-2.5"
 
 # Correct launches.
-assert_allowed "cursor-agent -p --mode ask --force --approve-mcps --trust --model kimi-k3-high 'review'"
+assert_allowed "CURSOR_CONFIG_DIR=/tmp/empty cursor-agent -p --mode ask --force --trust --model kimi-k3-high 'review'"
 assert_allowed "cursor-agent -p --yolo --model composer-2.5 'do the thing'"
-assert_allowed "herdr agent start review --kind cursor --pane w1:pX -- --force --approve-mcps --trust --model composer-2.5"
+assert_allowed "CURSOR_CONFIG_DIR=/tmp/empty herdr agent start review --kind cursor --pane w1:pX -- --force --trust --model composer-2.5"
 
 # Read-only Cursor calls never prompt, so they must not be blocked.
 assert_allowed "cursor-agent --list-models"

@@ -76,7 +76,7 @@ Use the spawner, which sets the flags and verifies the pane actually reached Run
   \$cursor-sub-review/scripts/spawn-cursor-pane.sh --model MODEL --prompt 'TASK' [--plan]
 
 Or pass the flags yourself:
-  herdr agent start NAME --kind cursor --pane PANE -- --force --approve-mcps --trust --model MODEL
-  cursor-agent -p --mode ask --force --approve-mcps --trust --model MODEL 'PROMPT'
+  CURSOR_CONFIG_DIR=/path/to/empty-config herdr agent start NAME --kind cursor --pane PANE -- --force --trust --model MODEL
+  CURSOR_CONFIG_DIR=/path/to/empty-config cursor-agent -p --mode ask --force --trust --model MODEL 'PROMPT'
 
 Keep --mode ask (or --plan) for review legs: --force removes prompting, ask mode removes write access."

@@ -179,6 +179,14 @@ grant ungated PR, force-with-lease, or deletion privileges.
 - Block obvious dangerous remote SSH commands such as `sudo`, `su`,
   `systemctl`, `service`, process kills, broad file mutation commands,
   `cqlsh`, and shell/code wrappers such as `bash -c` or `python -c`.
+- Allow a pure SSH command to an exact host listed in
+  `BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS` (colon separated) or the file named
+  by `BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE`. When the file variable is
+  unset, read `bash-safety-guard.playground-ssh-hosts` next to the installed
+  guard. Playground hosts bypass the SSH lease and remote-command restrictions;
+  private guard extensions still run. Do not grant the exception when `-o
+  HostName=...` redirects the exact host, or when SSH is part of a compound
+  local command.
 - Allow the narrow command `kill <numeric-pid>` for a single PID greater than 1,
   and only on hosts listed in `BASH_SAFETY_GUARD_PID_KILL_HOSTS` (colon
   separated). That variable is **empty in this shared baseline**, so no host is
@@ -220,9 +228,14 @@ grant ungated PR, force-with-lease, or deletion privileges.
 
 ### GitHub gist safety
 
+- Block gist uploads that rely on the `gh` CLI's implicit default host. Require
+  every `gh gist create` and gist-creation `gh api` call to select a host
+  explicitly with `GH_HOST=...` or `--hostname ...`.
 - Block gist uploads unless uploaded filenames or gist payload keys use
   contiguous ordered prefixes like `01_...`, `02_...`, `03_...`
-- Keep company-specific host routing in dotfiles-owned guard extensions.
+- Keep company-specific host allowlists and routing in dotfiles-owned guard
+  extensions. The portable explicit-host check is defense in depth when a
+  private extension has not been projected.
 
 ### Process killing
 

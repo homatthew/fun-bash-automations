@@ -2874,6 +2874,91 @@ is_gh_gist_create() {
   echo "$COMMAND" | grep -qE '(^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*gh\s+gist\s+create([[:space:]]|$)'
 }
 
+gist_create_host_violation() {
+  python3 - "$COMMAND" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+try:
+    lexer = shlex.shlex(sys.argv[1], posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+except ValueError:
+    print("unable to parse gist command host")
+    sys.exit(0)
+
+segments = []
+current = []
+for token in tokens:
+    if token in {"&&", "||", ";", "|"}:
+        if current:
+            segments.append(current)
+            current = []
+        continue
+    current.append(token)
+if current:
+    segments.append(current)
+
+assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+for segment in segments:
+    host = None
+    while segment and assignment.match(segment[0]):
+        name, value = segment.pop(0).split("=", 1)
+        if name == "GH_HOST":
+            host = value
+    if segment and segment[0] == "command":
+        segment.pop(0)
+    if not segment or os.path.basename(segment.pop(0)) != "gh":
+        continue
+
+    args = []
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if token == "--hostname" and index + 1 < len(segment):
+            host = segment[index + 1]
+            index += 2
+            continue
+        if token.startswith("--hostname="):
+            host = token.split("=", 1)[1]
+            index += 1
+            continue
+        if token in {"-R", "--repo"} and index + 1 < len(segment):
+            index += 2
+            continue
+        if token.startswith("--repo="):
+            index += 1
+            continue
+        args.append(token)
+        index += 1
+
+    gist_create = len(args) >= 2 and args[:2] == ["gist", "create"]
+    api_create = (
+        len(args) >= 2
+        and args[0] == "api"
+        and args[1].lstrip("/") == "gists"
+        and (
+            "--input" in args
+            or any(token.startswith("--input=") for token in args)
+            or "-XPOST" in args
+            or any(
+                args[index] in {"--method", "-X"}
+                and index + 1 < len(args)
+                and args[index + 1].upper() == "POST"
+                for index in range(len(args))
+            )
+            or any(token.upper() == "--METHOD=POST" for token in args)
+        )
+    )
+    if (gist_create or api_create) and not host:
+        print("gist creation must target a host explicitly with GH_HOST=... or --hostname ...")
+        sys.exit(0)
+PY
+}
+
 check_gist_filename_sequence() {
   local filenames sorted_filenames line expected_index expected_prefix
   filenames=$(gist_upload_filenames)
@@ -3415,6 +3500,9 @@ check_scratch_pr_safety() {
 
 # --- 10d. GitHub Gist Filename Safety ---
 check_gh_gist_filename_safety() {
+  local host_violation
+  host_violation=$(gist_create_host_violation)
+  [[ -z "$host_violation" ]] || deny "Blocked: $host_violation"
   check_gist_filename_sequence
 }
 
@@ -3590,11 +3678,64 @@ is_trusted_ssh_target() {
   return 1
 }
 
+is_playground_ssh_target() {
+  local target="$1" host hosts_file
+  [[ -n "$target" ]] || return 1
+
+  while IFS= read -r host || [[ -n "$host" ]]; do
+    host="${host%%#*}"
+    host="${host//[[:space:]]/}"
+    [[ -n "$host" ]] || continue
+    [[ "$target" == "$host" ]] && return 0
+  done < <(printf '%s' "${BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS:-}" | tr ':' '\n')
+
+  hosts_file="${BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE:-$SCRIPT_DIR/bash-safety-guard.playground-ssh-hosts}"
+  [[ -f "$hosts_file" ]] || return 1
+  while IFS= read -r host || [[ -n "$host" ]]; do
+    host="${host%%#*}"
+    host="${host//[[:space:]]/}"
+    [[ -n "$host" ]] || continue
+    [[ "$target" == "$host" ]] && return 0
+  done <"$hosts_file"
+  return 1
+}
+
+ssh_has_hostname_override() {
+  python3 - "$COMMAND" <<'PY'
+import re
+import shlex
+import sys
+
+try:
+    tokens = shlex.split(sys.argv[1], posix=True)
+except ValueError:
+    sys.exit(0)
+
+for index, token in enumerate(tokens):
+    if token == "-o" and index + 1 < len(tokens):
+        value = tokens[index + 1]
+    elif token.startswith("-o") and len(token) > 2:
+        value = token[2:]
+    else:
+        continue
+    if re.match(r"\s*hostname\s*=", value, re.IGNORECASE):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 _ssh_local_execution=$(ssh_local_execution_violation)
 [[ -z "$_ssh_local_execution" ]] ||
   deny "Blocked: ssh configuration may execute a local command: $_ssh_local_execution"
 
 _trusted_ssh_target=$(extract_ssh_target)
+if is_pure_ssh_command \
+  && ! ssh_has_hostname_override \
+  && is_playground_ssh_target "$_trusted_ssh_target"; then
+  run_guard_extensions
+  exit 0
+fi
+
 if is_pure_ssh_command && is_trusted_ssh_target "$_trusted_ssh_target"; then
   if ! has_valid_ssh_lease "$_trusted_ssh_target"; then
     deny "Blocked: ssh to '$_trusted_ssh_target' requires a lease. Ask the user to run: ssh-gate $_trusted_ssh_target"

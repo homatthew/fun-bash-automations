@@ -87,11 +87,13 @@ read_allow=$(run_guard "gh api /gists/example-id")
 [[ -z "$read_allow" ]] || fail "expected gist read to be allowed, got: $read_allow"
 echo "ok 1 - gist reads stay allowed"
 
-gist_cli_allow=$(run_guard "gh gist create 01_diagram.py 02_architecture.png 03_README.md --desc \"ordered files\"")
-[[ -z "$gist_cli_allow" ]] || fail "expected ordered gh gist create files to be allowed, got: $gist_cli_allow"
-echo "ok 2 - ordered gh gist create files are allowed"
+gist_cli_allow=$(run_guard "GH_HOST=example.test gh gist create 01_diagram.py 02_architecture.png 03_README.md --desc \"ordered files\"")
+[[ -z "$gist_cli_allow" ]] || fail "expected explicitly hosted ordered gh gist create files to be allowed, got: $gist_cli_allow"
+gist_cli_flag_allow=$(run_guard "gh --hostname example.test gist create 01_diagram.py 02_architecture.png 03_README.md --desc \"ordered files\"")
+[[ -z "$gist_cli_flag_allow" ]] || fail "expected --hostname ordered gh gist create files to be allowed, got: $gist_cli_flag_allow"
+echo "ok 2 - explicitly hosted ordered gh gist create files are allowed"
 
-gist_cli_block=$(run_guard "gh gist create diagram.py 02_architecture.png README.md --desc \"unordered files\"")
+gist_cli_block=$(run_guard "GH_HOST=example.test gh gist create diagram.py 02_architecture.png README.md --desc \"unordered files\"")
 expect_contains "$gist_cli_block" "gist uploads must use contiguous ordered filenames"
 echo "ok 3 - unordered gh gist create files are blocked"
 
@@ -100,11 +102,11 @@ unordered_payload="$TEST_TMP/unordered-gist.json"
 write_payload "$ordered_payload" '{"01_summary.md":{"content":"a"},"02_graph.png":{"content":"b"}}'
 write_payload "$unordered_payload" '{"summary.md":{"content":"a"},"02_graph.png":{"content":"b"}}'
 
-payload_allow=$(run_guard "gh api /gists --method POST --input $ordered_payload")
+payload_allow=$(run_guard "GH_HOST=example.test gh api /gists --method POST --input $ordered_payload")
 [[ -z "$payload_allow" ]] || fail "expected ordered gist payload keys to be allowed, got: $payload_allow"
 echo "ok 4 - ordered gist payload keys are allowed"
 
-payload_block=$(run_guard "gh api /gists --method POST --input $unordered_payload")
+payload_block=$(run_guard "GH_HOST=example.test gh api /gists --method POST --input $unordered_payload")
 expect_contains "$payload_block" "gist uploads must use contiguous ordered filenames"
 echo "ok 5 - unordered gist payload keys are blocked"
 
@@ -496,6 +498,30 @@ dotwork_pure_allow=$(
 [[ -z "$dotwork_pure_allow" ]] || fail "expected pure leased .work ssh to short-circuit, got: $dotwork_pure_allow"
 echo "ok 60a - trusted SSH suffixes require explicit local configuration"
 
+playground_hosts="$TEST_TMP/playground-ssh-hosts"
+printf 'p1.work\np2.work # comments are allowed\n' >"$playground_hosts"
+playground_pkill_allow=$(
+  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
+  run_guard "ssh p1.work 'pkill -f antigravity'"
+)
+[[ -z "$playground_pkill_allow" ]] || fail "expected exact playground host to allow remote pkill without a lease, got: $playground_pkill_allow"
+playground_killall_allow=$(
+  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS="p1.work:p2.work"
+  run_guard "ssh p2.work 'killall java'"
+)
+[[ -z "$playground_killall_allow" ]] || fail "expected environment-configured playground host to allow remote killall, got: $playground_killall_allow"
+playground_lookalike_block=$(
+  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
+  run_guard "ssh not-p1.work 'pkill -f antigravity'"
+)
+expect_contains "$playground_lookalike_block" "dangerous remote ssh command: pkill"
+playground_override_block=$(
+  export BASH_SAFETY_GUARD_PLAYGROUND_SSH_HOSTS_FILE="$playground_hosts"
+  run_guard "ssh -o HostName=prod.example p1.work 'pkill -f antigravity'"
+)
+expect_contains "$playground_override_block" "dangerous remote ssh command: pkill"
+echo "ok 60a1 - exact playground SSH hosts bypass leases and remote command restrictions"
+
 dotwork_compound_remote_block=$(run_guard "ssh builder.work 'sudo systemctl restart test-service'; printf done")
 expect_contains "$dotwork_compound_remote_block" "dangerous remote ssh command: sudo"
 echo "ok 60a2 - compound .work ssh does not bypass later guard checks"
@@ -806,9 +832,11 @@ yolo_disabled_delete_block=$(
 expect_contains "$yolo_disabled_delete_block" "force-deletes a branch"
 echo "ok 81 - yolo branch -D exemption fails closed when yolo_branches.enabled=false"
 
-gist_cli_host_allow=$(run_guard "gh gist create 01_report.md --desc \"portable report\"")
-[[ -z "$gist_cli_host_allow" ]] || fail "expected portable gist creation to be allowed, got: $gist_cli_host_allow"
-echo "ok 82 - portable gist creation is allowed"
+gist_cli_host_block=$(run_guard "gh gist create 01_report.md --desc \"portable report\"")
+expect_contains "$gist_cli_host_block" "gist creation must target a host explicitly"
+gist_cli_other_segment_host_block=$(run_guard "GH_HOST=example.test true && gh gist create 01_report.md --desc \"portable report\"")
+expect_contains "$gist_cli_other_segment_host_block" "gist creation must target a host explicitly"
+echo "ok 82 - implicit-host gist creation is blocked"
 
 kill_pid_allow=$(run_guard "kill 12345")
 [[ -z "$kill_pid_allow" ]] || fail "expected local kill PID to be allowed, got: $kill_pid_allow"
