@@ -44,7 +44,11 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 FAKE
-chmod +x "$TMP/bin/herdr"
+cat > "$TMP/bin/nc" <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
+chmod +x "$TMP/bin/herdr" "$TMP/bin/nc"
 
 export PATH="$TMP/bin:$PATH"
 export HOME="$TMP/home"
@@ -56,6 +60,18 @@ export HERDR_TEST_LOCAL="$TMP/local-plugin"
 mkdir "$HERDR_TEST_LOCAL"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+grep -Fq 'cask "ghostty" if OS.mac?' "$ROOT/Brewfile" \
+  || fail "Ghostty cask is not guarded for macOS"
+
+no_nc_path="$TMP/no-nc-bin"
+mkdir "$no_nc_path"
+for command in bash dirname herdr git jq; do
+  ln -s "$(command -v "$command")" "$no_nc_path/$command"
+done
+missing_nc="$(PATH="$no_nc_path" "$ROOT/bin/install-herdr" --check 2>&1 || true)"
+[[ "$missing_nc" == *"missing dependency: nc"* ]] \
+  || fail "installer did not reject a missing Unix-socket netcat: $missing_nc"
 
 if "$ROOT/bin/install-herdr" >/dev/null 2>&1; then
   fail "installation did not require explicit adoption"

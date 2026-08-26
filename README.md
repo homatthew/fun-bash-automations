@@ -98,8 +98,8 @@ Do not use this repository as the final MacBook install if the private
 
 ### Herdr and Ghostty
 
-The root `Brewfile` declares the portable FBA, Herdr, and Ghostty dependencies.
-Herdr adoption is deliberately separate from package installation:
+The root `Brewfile` declares portable FBA and Herdr dependencies, plus Ghostty
+on macOS. Herdr adoption is deliberately separate from package installation:
 
 ```bash
 brew bundle

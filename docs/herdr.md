@@ -44,9 +44,10 @@ only with `--local-confirmation-plugin DIR`.
 | `nc` | Herdr socket layout export in `herdr-pane-snapshot` |
 | Ghostty | OSC appearance reporting, notifications, and terminal UI |
 
-macOS provides `nc`; other platforms must provide a compatible Unix-socket
-netcat. `fzf`, `gh`, and GNU core utilities are part of the broader FBA toolset
-declared by the root `Brewfile`.
+macOS provides `nc`. On Linux, install a Unix-socket-capable `nc` with the
+distribution's native package manager; the Brewfile does not supply it.
+`fzf`, `gh`, and GNU core utilities are part of the broader FBA toolset declared
+by the root `Brewfile`. Ghostty is installed by Brew Bundle only on macOS.
 
 ## Bindings
 

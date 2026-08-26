@@ -7,4 +7,4 @@ brew "herdr"
 brew "jq"
 brew "ripgrep"
 
-cask "ghostty"
+cask "ghostty" if OS.mac?
