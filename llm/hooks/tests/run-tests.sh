@@ -107,12 +107,18 @@ stdin_out=$(
   echo "FAIL gh api --input - did not fail closed"
   exit 1
 }
-reviewed_stdin=$(
+reviewed_stdin=$(FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook \
+  'PUBLIC_POST_REVIEWED=1 gh api /repos/Example-Org/repo/issues/1 --input -')
+[ "$(decision "$reviewed_stdin")" = allow ] || {
+  echo "FAIL reviewed gh api --input - was not allowed"
+  exit 1
+}
+ambient_review=$(
   PUBLIC_POST_REVIEWED=1 FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook \
     'gh api /repos/Example-Org/repo/issues/1 --input -'
 )
-[ "$(decision "$reviewed_stdin")" = allow ] || {
-  echo "FAIL reviewed gh api --input - was not allowed"
+[ "$(decision "$ambient_review")" = deny ] || {
+  echo "FAIL ambient PUBLIC_POST_REVIEWED disabled more than one command"
   exit 1
 }
 

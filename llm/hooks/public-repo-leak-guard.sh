@@ -63,7 +63,6 @@ COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command')
 # command is not a public publish. Exits non-zero if it cannot parse.
 PUBLISH=$(python3 - "$COMMAND" <<'PY'
 import json
-import os
 import shlex
 import sys
 
@@ -103,7 +102,7 @@ for segment in segments:
         segment = segment[1:]
     if not segment or segment[0] != "gh":
         continue
-    if env.get("PUBLIC_POST_REVIEWED", os.environ.get("PUBLIC_POST_REVIEWED")) == "1":
+    if env.get("PUBLIC_POST_REVIEWED") == "1":
         continue
 
     args = segment[1:]
