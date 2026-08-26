@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Record enough layout and session state to reopen one pane.
+set -uo pipefail
+umask 077
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/herdr-helper-lib"
+herdr="$(herdr_helper_bin)" || exit 0
+jq="$(herdr_helper_jq)" || exit 0
+socket="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+stack="${HERDR_CLOSED_PANES_FILE:-$HOME/.local/state/herdr/closed-panes.jsonl}"
+keep="${HERDR_CLOSED_PANES_KEEP:-20}"
+target="${1:-}"
+
+[ -n "$target" ] || exit 0
+panes=$("$herdr" pane list 2>/dev/null) || exit 0
+me=$(printf '%s' "$panes" | "$jq" -c --arg p "$target" \
+  '.result.panes[] | select(.pane_id == $p)') || exit 0
+[ -n "$me" ] || exit 0
+
+tab=$(printf '%s' "$me" | "$jq" -r '.tab_id')
+tree=$(printf '{"id":"snap","method":"layout.export","params":{"tab_id":"%s"}}\n' "$tab" \
+  | nc -U "$socket" 2>/dev/null | "$jq" -c '.result.layout.root // null')
+[ -n "$tree" ] || tree=null
+
+entry=$("$jq" -cn --argjson me "$me" --argjson tree "$tree" --arg p "$target" '
+  def leftmost: if .type == "pane" then .pane_id else (.first | leftmost) end;
+  def parent_of($p):
+    if type != "object" or .type != "split" then empty
+    elif (.first.type == "pane" and .first.pane_id == $p)
+      then {direction, ratio, side:"first", sibling:.second}
+    elif (.second.type == "pane" and .second.pane_id == $p)
+      then {direction, ratio, side:"second", sibling:.first}
+    else (.first | parent_of($p)), (.second | parent_of($p))
+    end;
+  ($tree | if . == null then null else [parent_of($p)] | .[0] // null end) as $par
+  | {
+      pane_id:$me.pane_id, tab_id:$me.tab_id, workspace_id:$me.workspace_id,
+      cwd:($me.cwd // $me.foreground_cwd // null),
+      label:($me.terminal_title_stripped // null), agent:($me.agent // null),
+      session_kind:($me.agent_session.kind // null),
+      session_value:($me.agent_session.value // null),
+      parent:(if $par == null then null else {
+        direction:$par.direction, ratio:$par.ratio, side:$par.side,
+        anchor:($par.sibling | leftmost), exact:($par.sibling.type == "pane")
+      } end)
+    }') || exit 0
+
+mkdir -p "$(dirname "$stack")" 2>/dev/null || exit 0
+chmod 700 "$(dirname "$stack")" 2>/dev/null || exit 0
+printf '%s\n' "$entry" >> "$stack" 2>/dev/null || exit 0
+chmod 600 "$stack" 2>/dev/null || true
+
+lines=$(wc -l < "$stack" 2>/dev/null | tr -d ' ')
+case "$lines" in
+  ''|*[!0-9]*) ;;
+  *) if [ "$lines" -gt "$keep" ]; then
+       tmp="$stack.tmp.$$"
+       tail -n "$keep" "$stack" > "$tmp" 2>/dev/null \
+         && chmod 600 "$tmp" && mv -f "$tmp" "$stack"
+     fi ;;
+esac

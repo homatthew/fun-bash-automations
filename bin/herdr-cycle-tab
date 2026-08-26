@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Focus the next or previous tab in live display order within one workspace.
+set -uo pipefail
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/herdr-helper-lib"
+herdr="$(herdr_helper_bin)" || exit 0
+jq="$(herdr_helper_jq)" || exit 0
+direction="${1:-next}"
+case "$direction" in next|prev) ;; *) exit 0 ;; esac
+
+tabs=$("$herdr" tab list 2>/dev/null) || exit 0
+target=$(printf '%s' "$tabs" | "$jq" -r --arg direction "$direction" '
+  .result.tabs as $all
+  | (($all[] | select(.focused) | .workspace_id) // ($all[0].workspace_id // "")) as $ws
+  | [$all[] | select(.workspace_id == $ws)] as $ordered
+  | ($ordered | map(.focused) | index(true)) as $at
+  | if ($ordered | length) == 0 then empty
+    elif $at == null then ($ordered[0].tab_id // empty)
+    else
+      (if $direction == "prev" then $at - 1 else $at + 1 end) as $next
+      | $ordered[($next % ($ordered | length))].tab_id
+    end') || exit 0
+
+[ -n "$target" ] || exit 0
+exec "$herdr" tab focus "$target"

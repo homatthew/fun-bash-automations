@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Focus the next or previous agent in the workspace active at the keypress.
+set -uo pipefail
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/herdr-helper-lib"
+herdr="$(herdr_helper_bin)" || exit 0
+jq="$(herdr_helper_jq)" || exit 0
+direction="${1:-next}"
+workspace="${HERDR_ACTIVE_WORKSPACE_ID:-}"
+pane="${HERDR_ACTIVE_PANE_ID:-}"
+
+case "$direction" in next|prev) ;; *) exit 0 ;; esac
+[ -n "$workspace" ] && [ -n "$pane" ] || exit 0
+
+agents=$("$herdr" agent list 2>/dev/null) || exit 0
+target=$(printf '%s' "$agents" | "$jq" -r \
+  --arg workspace "$workspace" --arg pane "$pane" --arg direction "$direction" '
+    [.result.agents[] | select(.workspace_id == $workspace)] as $ordered
+    | ($ordered | map(.pane_id) | index($pane)) as $at
+    | if ($ordered | length) == 0 then empty
+      elif $at == null then
+        (if $direction == "prev" then $ordered[-1] else $ordered[0] end).pane_id
+      else
+        (if $direction == "prev" then $at - 1 else $at + 1 end) as $next
+        | $ordered[($next % ($ordered | length))].pane_id
+      end' 2>/dev/null) || exit 0
+[ -n "$target" ] || exit 0
+
+# Detached commands must not pull focus back after the user has moved elsewhere.
+panes=$("$herdr" pane list 2>/dev/null) || exit 0
+printf '%s' "$panes" | "$jq" -e \
+  --arg workspace "$workspace" --arg pane "$pane" '
+    any(.result.panes[]; .focused == true and
+      .workspace_id == $workspace and .pane_id == $pane)' \
+  >/dev/null 2>&1 || exit 0
+
+exec "$herdr" agent focus "$target"

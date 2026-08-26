@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+herdr_helper_bin() {
+  if [ -n "${HERDR_BIN_PATH:-}" ] && [ -x "$HERDR_BIN_PATH" ]; then
+    printf '%s\n' "$HERDR_BIN_PATH"
+    return 0
+  fi
+  command -v herdr 2>/dev/null && return 0
+  local candidate
+  for candidate in \
+    /opt/homebrew/bin/herdr \
+    /usr/local/bin/herdr \
+    /home/linuxbrew/.linuxbrew/bin/herdr; do
+    [ ! -x "$candidate" ] || { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+herdr_helper_jq() {
+  command -v jq 2>/dev/null && return 0
+  local candidate
+  for candidate in \
+    /opt/homebrew/bin/jq \
+    /usr/local/bin/jq \
+    /home/linuxbrew/.linuxbrew/bin/jq; do
+    [ ! -x "$candidate" ] || { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
