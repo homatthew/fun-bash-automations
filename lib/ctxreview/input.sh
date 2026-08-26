@@ -125,7 +125,6 @@ want() { case ",$legs," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 # hand-rolled `codex exec` invocations does not arise here.
 want sol  && command -v codex  >/dev/null || ! want sol  || die "codex not found"
 want opus && command -v claude >/dev/null || ! want opus || die "claude not found"
-{ want kimi || want grok; } && [ -x "$SPAWN" ] || true
 if { want kimi || want grok; } && [ ! -x "$SPAWN" ]; then
   die "missing $SPAWN"
 fi
