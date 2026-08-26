@@ -23,7 +23,7 @@ while [ -L "$SOURCE" ]; do
   SOURCE="$(readlink "$SOURCE")"
   case "$SOURCE" in /*) ;; *) SOURCE="$SOURCE_DIR/$SOURCE" ;; esac
 done
-FBA="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+FBA="$(cd -P "$(dirname "$SOURCE")/../.." && pwd)"
 SPAWN="${CTXREVIEW_CURSOR_SPAWN:-$FBA/llm/skills/cursor-sub-review/scripts/spawn-cursor-pane.sh}"
 
 # Resolve with `cursor-agent --list-models` / your codex + claude builds.
