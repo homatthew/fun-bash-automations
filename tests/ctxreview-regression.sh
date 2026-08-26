@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTXREVIEW_IMPL="$ROOT/lib/ctxreview/main.sh"
+CTXREVIEW_LAUNCH="$ROOT/lib/ctxreview/launch.sh"
 CTXREVIEW_RUNTIME="$ROOT/lib/ctxreview/runtime-adapters.sh"
 CURSOR_SPAWN_IMPL="$ROOT/lib/cursor-sub-review/spawn-cursor-pane.sh"
 TMP="$(mktemp -d -t fba-ctxreview-XXXXXX)"
@@ -321,12 +322,12 @@ grep -Eq '^workspace create .*--no-focus$' "$TMP/calls" \
   || fail "ctxreview did not explicitly preserve focus while creating its workspace"
 ! grep -Fq 'tab create' "$TMP/calls" \
   || fail "ctxreview created a redundant tab inside its dedicated workspace"
-if grep -E 'herdr (workspace create|tab create|pane split)' "$CTXREVIEW_IMPL" \
+if grep -E 'herdr (workspace create|tab create|pane split)' "$CTXREVIEW_LAUNCH" \
      | grep -Ev '^[[:space:]]*#' \
      | grep -Fv -- '--no-focus' >/dev/null; then
   fail "a ctxreview background creation path can still steal focus"
 fi
-! grep -E 'herdr workspace focus' "$CTXREVIEW_IMPL" \
+! grep -E 'herdr workspace focus' "$CTXREVIEW_LAUNCH" \
   | grep -Ev '^[[:space:]]*#' >/dev/null \
   || fail "ctxreview explicitly focuses a workspace"
 [[ "$(grep -Fc 'agent start ctxreview-opus-w1p1' "$TMP/calls")" -eq 2 ]] \
@@ -358,7 +359,7 @@ grep -Fq '+required = true' "$TMP/run/diff.patch" \
   || fail "Codex review legs still use the ineffective empty-table MCP override"
 grep -Fq -- 'mcp_servers.$id.enabled=false' "$CTXREVIEW_RUNTIME" \
   || fail "Codex review legs do not disable each effective MCP server"
-grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$CTXREVIEW_IMPL" \
+grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$CTXREVIEW_LAUNCH" \
   || fail "Cursor review legs do not use an isolated config"
 ! grep -Fq -- '--approve-mcps' "$CURSOR_SPAWN_IMPL" \
   || fail "Cursor review legs still auto-approve every MCP server"
