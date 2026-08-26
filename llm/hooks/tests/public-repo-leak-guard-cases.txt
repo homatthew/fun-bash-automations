@@ -7,7 +7,11 @@ deny|gh pr comment 1 --repo Example-Org/repo --body "EXTERNAL_POLICY_MARKER cost
 deny|gh pr comment 1 --repo Example-Org/repo --body "see https://build.restricted.example.invalid/apps/x"
 deny|gh pr create --repo Example-Org/repo --title x --body "run EXTERNAL_POLICY_MARKER"
 deny|gh api -X PATCH /repos/Example-Org/repo/issues/comments/1 -f body=EXTERNAL_POLICY_MARKER
+deny|env GH_HOST=github.com gh api -X POST /repos/Example-Org/repo/issues -f body=EXTERNAL_POLICY_MARKER
+deny|command gh pr comment 1 --repo Example-Org/repo --body "EXTERNAL_POLICY_MARKER"
+deny|/usr/bin/gh pr comment 1 --repo Example-Org/repo --body "EXTERNAL_POLICY_MARKER"
 allow|GH_HOST=forge.example.invalid gh pr comment 1 --repo example/repo --body "EXTERNAL_POLICY_MARKER"
+allow|env GH_HOST=forge.example.invalid gh pr comment 1 --repo example/repo --body "EXTERNAL_POLICY_MARKER"
 allow|gh pr view 1 --repo Example-Org/repo
 allow|gh pr list --repo Example-Org/repo
 allow|PUBLIC_POST_REVIEWED=1 gh pr comment 1 --repo Example-Org/repo --body "EXTERNAL_POLICY_MARKER"

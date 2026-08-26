@@ -121,6 +121,12 @@ ambient_review=$(
   echo "FAIL ambient PUBLIC_POST_REVIEWED disabled more than one command"
   exit 1
 }
+continued_command=$'gh api -X POST /repos/Example-Org/repo/issues \\\n  -f body=EXTERNAL_POLICY_MARKER'
+continued_out=$(FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook "$continued_command")
+[ "$(decision "$continued_out")" = deny ] || {
+  echo "FAIL escaped-newline gh publish bypassed inspection"
+  exit 1
+}
 
 pass=0
 fail=0

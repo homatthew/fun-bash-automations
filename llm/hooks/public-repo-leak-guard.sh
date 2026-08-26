@@ -63,6 +63,8 @@ COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command')
 # command is not a public publish. Exits non-zero if it cannot parse.
 PUBLISH=$(python3 - "$COMMAND" <<'PY'
 import json
+import posixpath
+import re
 import shlex
 import sys
 
@@ -70,7 +72,19 @@ PUBLISH_NOUNS = {"pr", "issue", "release", "gist"}
 PUBLISH_VERBS = {"comment", "create", "edit", "review"}
 SEPARATORS = {";", "&&", "||", "|", "&"}
 
-command = sys.argv[1].replace("\n", " ; ")
+
+def split_env_assignment(token):
+    if "=" not in token or token.startswith("-"):
+        return None
+    key, _, value = token.partition("=")
+    if not key.replace("_", "").isalnum():
+        return None
+    return key, value
+
+
+# Shell removes escaped newlines before tokenization. Preserve that behavior so
+# a continued gh command cannot be mistaken for two unrelated segments.
+command = re.sub(r"\\\r?\n", "", sys.argv[1]).replace("\n", " ; ")
 try:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -94,13 +108,50 @@ payloads = []
 uninspectable_stdin = False
 for segment in segments:
     env = {}
-    while segment and "=" in segment[0] and not segment[0].startswith("-"):
-        key, _, value = segment[0].partition("=")
-        if not key.replace("_", "").isalnum():
+    while segment:
+        assignment = split_env_assignment(segment[0])
+        if assignment is None:
             break
+        key, value = assignment
         env[key] = value
         segment = segment[1:]
-    if not segment or segment[0] != "gh":
+
+    # Normalize wrappers that still execute the following command.
+    while segment:
+        executable = posixpath.basename(segment[0])
+        if executable == "command":
+            segment = segment[1:]
+            if segment and segment[0] in ("-v", "-V"):
+                segment = []
+                break
+            while segment and segment[0] in ("-p", "--"):
+                segment = segment[1:]
+            continue
+        if executable != "env":
+            break
+        segment = segment[1:]
+        while segment:
+            token = segment[0]
+            if token == "--":
+                segment = segment[1:]
+                break
+            if token in ("-i", "--ignore-environment"):
+                segment = segment[1:]
+                continue
+            if token in ("-u", "--unset"):
+                segment = segment[2:] if len(segment) > 1 else []
+                continue
+            if token.startswith("--unset="):
+                segment = segment[1:]
+                continue
+            assignment = split_env_assignment(token)
+            if assignment is None:
+                break
+            key, value = assignment
+            env[key] = value
+            segment = segment[1:]
+
+    if not segment or posixpath.basename(segment[0]) != "gh":
         continue
     if env.get("PUBLIC_POST_REVIEWED") == "1":
         continue
