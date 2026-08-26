@@ -22,7 +22,15 @@
 #   PUBLIC_POST_REVIEWED=1 gh pr comment ...
 
 INPUT=$(cat)
-POLICY_FILE="${FBA_PUSH_SAFETY_POLICY_FILE:-}"
+DEFAULT_POLICY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/fba/push-safety-policy.tsv"
+if [ "${FBA_PUSH_SAFETY_POLICY_FILE+x}" = x ]; then
+  POLICY_FILE="$FBA_PUSH_SAFETY_POLICY_FILE"
+  POLICY_REQUIRED=true
+else
+  POLICY_FILE="$DEFAULT_POLICY_FILE"
+  POLICY_REQUIRED=false
+fi
+[ "${FBA_PUSH_SAFETY_POLICY_REQUIRED:-0}" = 1 ] && POLICY_REQUIRED=true
 
 if ! command -v jq >/dev/null 2>&1; then
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Blocked: public-repo leak guard requires jq."}}'
@@ -51,9 +59,11 @@ printf '%s' "$INPUT" | jq -e '
 command -v python3 >/dev/null 2>&1 || allow
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command')
 
-# Emits the text that a public publish would send, or nothing at all when the
+# Emits a JSON object describing a public publish, or an empty payload when the
 # command is not a public publish. Exits non-zero if it cannot parse.
-PAYLOAD=$(python3 - "$COMMAND" <<'PY'
+PUBLISH=$(python3 - "$COMMAND" <<'PY'
+import json
+import os
 import shlex
 import sys
 
@@ -82,6 +92,7 @@ if current:
     segments.append(current)
 
 payloads = []
+uninspectable_stdin = False
 for segment in segments:
     env = {}
     while segment and "=" in segment[0] and not segment[0].startswith("-"):
@@ -92,7 +103,7 @@ for segment in segments:
         segment = segment[1:]
     if not segment or segment[0] != "gh":
         continue
-    if env.get("PUBLIC_POST_REVIEWED") == "1":
+    if env.get("PUBLIC_POST_REVIEWED", os.environ.get("PUBLIC_POST_REVIEWED")) == "1":
         continue
 
     args = segment[1:]
@@ -102,12 +113,15 @@ for segment in segments:
     for noun, verb in zip(words, words[1:]):
         if noun in PUBLISH_NOUNS and verb in PUBLISH_VERBS:
             publishing = True
-    if "api" in words and any(
-        args[i] in ("-X", "--method") and i + 1 < len(args)
-        and args[i + 1].upper() in ("POST", "PATCH", "PUT")
-        for i in range(len(args))
-    ):
-        publishing = True
+    if "api" in words:
+        if any(
+            args[i] in ("-X", "--method") and i + 1 < len(args)
+            and args[i + 1].upper() in ("POST", "PATCH", "PUT")
+            for i in range(len(args))
+        ):
+            publishing = True
+        if any(arg == "--input" or arg.startswith("--input=") for arg in args):
+            publishing = True
     if not publishing:
         continue
 
@@ -132,6 +146,13 @@ for segment in segments:
             path = nxt.split("@", 1)[1] if "@" in nxt else nxt
         elif arg.startswith("--body-file="):
             path = arg.split("=", 1)[1]
+        elif arg == "--input" and i + 1 < len(args):
+            path = args[i + 1]
+        elif arg.startswith("--input="):
+            path = arg.split("=", 1)[1]
+        if path == "-":
+            uninspectable_stdin = True
+            continue
         if not path or path.startswith("-"):
             continue
         try:
@@ -140,13 +161,24 @@ for segment in segments:
         except OSError:
             pass
 
-print("\n".join(payloads))
+print(json.dumps({
+    "payload": "\n".join(payloads),
+    "uninspectable_stdin": uninspectable_stdin,
+}))
 PY
 ) || allow
 
+PAYLOAD=$(printf '%s' "$PUBLISH" | jq -r '.payload // empty')
 [ -n "$PAYLOAD" ] || allow
-[ -n "$POLICY_FILE" ] || allow
-[ -r "$POLICY_FILE" ] || allow
+
+if [ "$(printf '%s' "$PUBLISH" | jq -r '.uninspectable_stdin // false')" = true ]; then
+  deny "Blocked: gh api --input - reads a public request body from stdin, which cannot be inspected before execution. Re-run only after review with PUBLIC_POST_REVIEWED=1."
+fi
+
+if [ ! -n "$POLICY_FILE" ] || [ ! -r "$POLICY_FILE" ]; then
+  [ "$POLICY_REQUIRED" = false ] && allow
+  deny "Blocked: required public-repo leak policy is missing or unreadable: ${POLICY_FILE:-<empty>}."
+fi
 
 HITS=""
 while IFS=$'\t' read -r label regex extra || [ -n "$label$regex$extra" ]; do

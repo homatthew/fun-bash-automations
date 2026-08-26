@@ -22,11 +22,97 @@ printf '%s\t%s\n' \
 [ -f "$HOOK" ] || { echo "missing hook: $HOOK"; exit 1; }
 [ -f "$CASES" ] || { echo "missing cases: $CASES"; exit 1; }
 
+run_hook() {
+  printf '%s' "$1" | jq -Rs '{tool_input:{command:.}}' | bash "$HOOK" 2>/dev/null || true
+}
+
+decision() {
+  if [ -z "$1" ]; then
+    printf 'allow\n'
+  else
+    printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecision'
+  fi
+}
+
 without_policy=$(printf '%s' \
   'gh pr comment 1 --repo Example-Org/repo --body EXTERNAL_POLICY_MARKER' \
-  | jq -Rs '{tool_input:{command:.}}' | bash "$HOOK" 2>/dev/null || true)
+  | jq -Rs '{tool_input:{command:.}}' \
+  | HOME="$TEST_TMP/empty-home" bash "$HOOK" 2>/dev/null || true)
 [ -z "$without_policy" ] || {
-  echo "FAIL guard discovered policy without explicit opt-in"
+  echo "FAIL optional default policy blocked when absent"
+  exit 1
+}
+
+default_dir="$TEST_TMP/config/fba"
+mkdir -p "$default_dir"
+cp "$POLICY" "$default_dir/push-safety-policy.tsv"
+with_default=$(
+  XDG_CONFIG_HOME="$TEST_TMP/config" run_hook \
+    'gh pr comment 1 --repo Example-Org/repo --body EXTERNAL_POLICY_MARKER'
+)
+[ "$(decision "$with_default")" = deny ] || {
+  echo "FAIL guard did not load the portable default policy"
+  exit 1
+}
+
+explicit_missing=$(
+  FBA_PUSH_SAFETY_POLICY_FILE="$TEST_TMP/missing.tsv" run_hook \
+    'gh pr comment 1 --repo Example-Org/repo --body public'
+)
+[ "$(decision "$explicit_missing")" = deny ] || {
+  echo "FAIL explicitly configured missing policy did not fail closed"
+  exit 1
+}
+
+unreadable_policy="$TEST_TMP/unreadable.tsv"
+cp "$POLICY" "$unreadable_policy"
+chmod 000 "$unreadable_policy"
+explicit_unreadable=$(
+  FBA_PUSH_SAFETY_POLICY_FILE="$unreadable_policy" run_hook \
+    'gh pr comment 1 --repo Example-Org/repo --body public'
+)
+chmod 600 "$unreadable_policy"
+[ "$(decision "$explicit_unreadable")" = deny ] || {
+  echo "FAIL explicitly configured unreadable policy did not fail closed"
+  exit 1
+}
+
+required_missing=$(
+  HOME="$TEST_TMP/required-home" FBA_PUSH_SAFETY_POLICY_REQUIRED=1 run_hook \
+    'gh pr comment 1 --repo Example-Org/repo --body public'
+)
+[ "$(decision "$required_missing")" = deny ] || {
+  echo "FAIL required default policy did not fail closed"
+  exit 1
+}
+
+request_file="$TEST_TMP/request.json"
+printf '{"body":"EXTERNAL_POLICY_MARKER"}\n' > "$request_file"
+for input_arg in "--input $request_file" "--input=$request_file"; do
+  out=$(
+    FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook \
+      "gh api /repos/Example-Org/repo/issues/1 $input_arg"
+  )
+  [ "$(decision "$out")" = deny ] || {
+    echo "FAIL gh api $input_arg did not scan its request file"
+    exit 1
+  }
+done
+
+stdin_out=$(
+  FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook \
+    'gh api /repos/Example-Org/repo/issues/1 --input -'
+)
+[ "$(decision "$stdin_out")" = deny ] || {
+  echo "FAIL gh api --input - did not fail closed"
+  exit 1
+}
+reviewed_stdin=$(
+  PUBLIC_POST_REVIEWED=1 FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" run_hook \
+    'gh api /repos/Example-Org/repo/issues/1 --input -'
+)
+[ "$(decision "$reviewed_stdin")" = allow ] || {
+  echo "FAIL reviewed gh api --input - was not allowed"
   exit 1
 }
 
