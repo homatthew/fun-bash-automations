@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTXREVIEW_IMPL="$ROOT/lib/ctxreview/main.sh"
 CTXREVIEW_RUNTIME="$ROOT/lib/ctxreview/runtime-adapters.sh"
+CURSOR_SPAWN_IMPL="$ROOT/lib/cursor-sub-review/spawn-cursor-pane.sh"
 TMP="$(mktemp -d -t fba-ctxreview-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 export CTXREVIEW_REAP_DIR="$TMP/reaped"
@@ -359,7 +360,7 @@ grep -Fq -- 'mcp_servers.$id.enabled=false' "$CTXREVIEW_RUNTIME" \
   || fail "Codex review legs do not disable each effective MCP server"
 grep -Fq -- '--config-dir "$SESSION_STATE_DIR/cursor-config"' "$CTXREVIEW_IMPL" \
   || fail "Cursor review legs do not use an isolated config"
-! grep -Fq -- '--approve-mcps' "$ROOT/llm/skills/cursor-sub-review/scripts/spawn-cursor-pane.sh" \
+! grep -Fq -- '--approve-mcps' "$CURSOR_SPAWN_IMPL" \
   || fail "Cursor review legs still auto-approve every MCP server"
 ! grep -Fq -- '--approve-mcps' "$ROOT/llm/skills/cursor-sub-review/scripts/run-review.sh" \
   || fail "headless Cursor review legs still auto-approve every MCP server"

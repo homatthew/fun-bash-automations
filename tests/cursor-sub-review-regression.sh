@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SPAWN_IMPL="$ROOT/lib/cursor-sub-review/spawn-cursor-pane.sh"
 TMP="$(mktemp -d -t fba-cursor-sub-review-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -130,7 +131,7 @@ HOME="$TMP/home" HERDR_ENV=1 HERDR_SCENARIO=success \
 grep -Fxq 'disabled workspace-tool' "$TMP/spawn-mcp-calls" \
   || fail "standalone Cursor spawner did not disable effective workspace MCPs"
 grep -Fq 'herdr tab create --label "$label" --cwd "$cwd" --no-focus' \
-  "$ROOT/llm/skills/cursor-sub-review/scripts/spawn-cursor-pane.sh" \
+  "$SPAWN_IMPL" \
   || fail "standalone Cursor spawner can still steal focus when creating a tab"
 
 : > "$TMP/prompt-fail-calls"
