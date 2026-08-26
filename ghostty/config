@@ -1,18 +1,19 @@
 # Ghostty configuration
 # https://ghostty.org/docs/config/reference
 
-# Disable Ghostty's shell integration title setting
-# This allows our custom zsh hooks to control the terminal title
-# showing directory name and git branch (e.g., "fun-bash-automations (main)")
-# See: https://github.com/anthropics/claude-code/issues/4765
+# Keep ordinary shell panes on the zsh-provided directory/branch title. Agent
+# TUIs may still publish status titles, which Herdr uses for lifecycle detection.
 shell-integration-features = no-title
 
 # Agent hooks emit Ghostty-native OSC 9 desktop notifications.
 desktop-notifications = true
 
-# Live theme switching: browse `ghostty +list-themes`, press `w` on one, reload
-# with cmd+shift+comma. Keeps the theme choice in a local file, so experimenting
-# never dirties this repo. `?` stays quiet until that file exists.
+# Follow the macOS appearance automatically using themes bundled with Ghostty.
+theme = light:Catppuccin Latte,dark:Catppuccin Mocha
+
+# Optional local override: browse `ghostty +list-themes`, press `w`, then reload
+# with cmd+shift+comma. The local file can override the adaptive pair without
+# dirtying this repository; `?` stays quiet until that file exists.
 #
 # Absolute, not the `?auto/theme.ghostty` the picker suggests: a relative
 # config-file resolves against its own file's directory, and this config is a

@@ -14,11 +14,6 @@
 # Source an optional private or machine-specific overlay.
 [ -f ~/.zsh/local.zsh ] && source ~/.zsh/local.zsh
 
-# Mac OS specific settings (run manually if needed)
-# defaults write -g com.apple.trackpad.scaling -float 5.0
-# defaults write .GlobalPreferences com.apple.mouse.scaling -1
-# defaults write -g ApplePressAndHoldEnabled -bool false
-
 fpath+=~/.zfunc; autoload -Uz compinit; compinit
 
 zstyle ':completion:*' menu select

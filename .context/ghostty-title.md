@@ -109,9 +109,9 @@ worked here, which is precisely the problem.
 
 ## Verification
 
-1. Run `source ~/.zshrc` to reload shell config
-2. Restart Ghostty (needed for config changes)
-3. `cd` into a git repo and verify title shows `dirname (branch)`
-4. Run `claude` and verify the title persists (not overwritten to "claude")
+1. Run `source ~/.zshrc` to reload shell config.
+2. Restart Ghostty (needed for config changes).
+3. `cd` into a git repo and verify a shell pane shows `dirname (branch)`.
+4. Run `claude` and verify its title changes between idle and working status.
 5. Inside Herdr, start a fresh `claude` pane, send it work, and confirm
    `herdr agent list` reports `working` rather than `idle`
