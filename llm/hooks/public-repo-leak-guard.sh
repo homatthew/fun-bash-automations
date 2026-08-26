@@ -8,8 +8,9 @@
 # comment edit history, so the original stays readable. The only reliable
 # control is refusing the write before it happens.
 #
-# The private identifiers come from a policy file outside this repository:
-#   ${PUBLIC_REPO_LEAK_POLICY_FILE:-~/.config/fba/push-safety-policy.tsv}
+# The environment-specific identifiers come from the same explicit policy file
+# used by the push-safety scanner:
+#   FBA_PUSH_SAFETY_POLICY_FILE=/path/outside/the/repository/policy.tsv
 # Each non-comment line is label<TAB>extended-regular-expression, the same format
 # accepted by scripts/check-push-safety.sh.
 #
@@ -21,7 +22,7 @@
 #   PUBLIC_POST_REVIEWED=1 gh pr comment ...
 
 INPUT=$(cat)
-POLICY_FILE="${PUBLIC_REPO_LEAK_POLICY_FILE:-$HOME/.config/fba/push-safety-policy.tsv}"
+POLICY_FILE="${FBA_PUSH_SAFETY_POLICY_FILE:-}"
 
 if ! command -v jq >/dev/null 2>&1; then
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Blocked: public-repo leak guard requires jq."}}'
@@ -144,6 +145,7 @@ PY
 ) || allow
 
 [ -n "$PAYLOAD" ] || allow
+[ -n "$POLICY_FILE" ] || allow
 [ -r "$POLICY_FILE" ] || allow
 
 HITS=""

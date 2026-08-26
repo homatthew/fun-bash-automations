@@ -15,12 +15,20 @@ POLICY="$TEST_TMP/policy.tsv"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
 printf '%s\t%s\n' \
-  private-domain '([A-Za-z0-9-]+\.)*corp\.example([^A-Za-z0-9.-]|$)' \
-  private-system '(^|[^A-Za-z0-9_-])private_service([^A-Za-z0-9_-]|$)' \
+  boundary-host '([A-Za-z0-9-]+\.)*restricted\.example\.invalid([^A-Za-z0-9.-]|$)' \
+  boundary-marker '(^|[^A-Za-z0-9_-])EXTERNAL_POLICY_MARKER([^A-Za-z0-9_-]|$)' \
   > "$POLICY"
 
 [ -f "$HOOK" ] || { echo "missing hook: $HOOK"; exit 1; }
 [ -f "$CASES" ] || { echo "missing cases: $CASES"; exit 1; }
+
+without_policy=$(printf '%s' \
+  'gh pr comment 1 --repo Example-Org/repo --body EXTERNAL_POLICY_MARKER' \
+  | jq -Rs '{tool_input:{command:.}}' | bash "$HOOK" 2>/dev/null || true)
+[ -z "$without_policy" ] || {
+  echo "FAIL guard discovered policy without explicit opt-in"
+  exit 1
+}
 
 pass=0
 fail=0
@@ -32,7 +40,7 @@ while IFS= read -r line; do
   want=${line%%|*}
   cmd=${line#*|}
   out=$(printf '%s' "$cmd" | jq -Rs '{tool_input:{command:.}}' \
-    | PUBLIC_REPO_LEAK_POLICY_FILE="$POLICY" bash "$HOOK" 2>/dev/null || true)
+    | FBA_PUSH_SAFETY_POLICY_FILE="$POLICY" bash "$HOOK" 2>/dev/null || true)
   if [ -z "$out" ]; then
     got=allow
   else
