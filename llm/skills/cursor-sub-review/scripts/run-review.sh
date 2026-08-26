@@ -9,16 +9,49 @@ Usage: run-review.sh --prompt FILE --model MODEL [options]
 Options:
   --workspace DIR       Repository root (default: current directory)
   --output-dir DIR      Preserve results here (default: temporary directory)
+  --config-dir DIR      Isolated zero-MCP Cursor state (default: user state)
   --heartbeat-seconds N Progress heartbeat interval (default: 15)
   --stall-seconds N     Stop after no JSONL progress (default: 300)
   --timeout-seconds N   Hard runtime limit (default: 900)
 EOF
 }
 
+prepare_zero_mcp() {  # prepare_zero_mcp <config-dir> <workspace>
+  local cfg="$1" workspace="$2" tmp listing line id after
+  mkdir -p "$cfg" 2>/dev/null || return 1
+  tmp="$(mktemp "$cfg/mcp.json.tmp.XXXXXX" 2>/dev/null)" || return 1
+  if ! printf '{"mcpServers":{}}\n' > "$tmp" || ! mv "$tmp" "$cfg/mcp.json"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [[ "$(cat "$cfg/mcp.json" 2>/dev/null)" == '{"mcpServers":{}}' ]] || return 1
+  listing="$(cd "$workspace" && CURSOR_CONFIG_DIR="$cfg" "$cursor_cmd" mcp list 2>/dev/null)" \
+    || return 1
+  case "$listing" in "No MCP servers configured"*) return 0 ;; esac
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      *": disabled") continue ;;
+      *:*) id="${line%%:*}" ;;
+      *) return 1 ;;
+    esac
+    [[ -n "$id" ]] || return 1
+    (cd "$workspace" && CURSOR_CONFIG_DIR="$cfg" \
+      "$cursor_cmd" mcp disable "$id" >/dev/null 2>&1) || return 1
+  done <<< "$listing"
+  after="$(cd "$workspace" && CURSOR_CONFIG_DIR="$cfg" "$cursor_cmd" mcp list 2>/dev/null)" \
+    || return 1
+  case "$after" in "No MCP servers configured"*) return 0 ;; esac
+  while IFS= read -r line; do
+    [[ -z "$line" ]] || case "$line" in *": disabled") ;; *) return 1 ;; esac
+  done <<< "$after"
+}
+
 prompt_file=""
 model=""
 workspace="$PWD"
 output_dir=""
+config_dir="${CURSOR_REVIEW_CONFIG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cursor-sub-review/config}"
 heartbeat_seconds=15
 stall_seconds=300
 timeout_seconds=900
@@ -39,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       output_dir="${2:-}"
+      shift 2
+      ;;
+    --config-dir)
+      config_dir="${2:-}"
       shift 2
       ;;
     --heartbeat-seconds)
@@ -146,12 +183,32 @@ rc_file="$output_dir/cursor.rc"
 
 absolute_prompt="$(cd "$(dirname "$prompt_file")" && pwd)/$(basename "$prompt_file")"
 instruction="Read the complete review instructions and context from $absolute_prompt. Follow them exactly. This is a read-only review: do not edit files or perform git writes."
+if ! prepare_zero_mcp "$config_dir" "$workspace"; then
+  echo "Could not verify zero effective Cursor MCP servers" >&2
+  exit 2
+fi
 
+# Headless means nobody can answer a permission prompt, so every approval path
+# has to be closed before launch or the reviewer stalls until --stall-seconds
+# fires and the leg is lost.
+#
+#   --force        allow commands unless explicitly denied. `~/.cursor/cli-config.json`
+#                  pre-allows only Shell(ls), Shell(git -C) and Shell(echo), so
+#                  without this a reviewer blocks on its first `git diff`, `rg`, or
+#                  file read. --trust alone does NOT cover this: it only answers
+#                  "do you trust this workspace", not per-command approval.
+#   CURSOR_CONFIG_DIR holds isolated disable state for every effective workspace
+#                  and user MCP server, verified before launch.
+#   --mode ask     read-only. This, not the absence of --force, is what keeps the
+#                  reviewer from editing: --force removes PROMPTING, ask mode
+#                  removes WRITE ACCESS. Keep both -- dropping ask mode turns a
+#                  review leg into an unattended agent with write and shell.
 (
   cd "$workspace" || exit 2
-  "$cursor_cmd" -p \
+  CURSOR_CONFIG_DIR="$config_dir" "$cursor_cmd" -p \
     --mode ask \
     --model "$model" \
+    --force \
     --trust \
     --output-format stream-json \
     --stream-partial-output \
@@ -201,7 +258,8 @@ if [[ "$runner_rc" -eq 0 ]]; then
   runner_rc=$child_rc
 fi
 
-jq -r 'select(.type == "result") | .result // empty' "$jsonl_file" | tail -1 > "$result_file" || true
+jq -rs '[.[] | select(.type == "result") | .result // empty] | last // empty' \
+  "$jsonl_file" > "$result_file" || true
 printf '%s\n' "$runner_rc" > "$rc_file"
 
 echo "review_dir=$output_dir"

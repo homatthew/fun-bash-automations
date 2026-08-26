@@ -9,6 +9,12 @@
             "command": "~/.codex/hooks/beads-prime.sh",
             "statusMessage": "Priming beads context",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/ctxreview-session-start.sh",
+            "statusMessage": "Reconciling review lifecycle",
+            "timeout": 3
           }
         ]
       }
@@ -53,6 +59,19 @@
             "type": "command",
             "command": "~/.codex/hooks/post-tool-audit.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/ctxreview-session-end.sh",
+            "statusMessage": "Reclaiming owned review sessions",
+            "timeout": 3
           }
         ]
       }

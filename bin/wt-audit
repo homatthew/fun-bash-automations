@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# wt-audit — find the registered git worktrees that are SAFE to reclaim.
+#
+# Worktrees accumulate from sources that do not know about each other: treehouse
+# pools, no-mistakes gates, `.codex/worktrees`, `.claude/worktrees`, and
+# hand-made ones. `treehouse prune` correctly refuses anything it does not
+# manage, so the unmanaged majority is invisible to it.
+#
+# Scope, deliberately narrow: this reports what can be reclaimed without losing
+# anything. A worktree holding uncommitted changes or unpushed commits is simply
+# **excluded** — it is not a finding, not a backlog, and not this tool's
+# business. Reporting it as a to-do turns a cleanup tool into a nag list, and a
+# nag list is something you learn to scroll past.
+#
+# Reclaimable:
+#   GONE   path missing, still registered   -> `git worktree prune` (registration only)
+#   SAFE   clean, HEAD reachable from a remote
+#
+# Excluded (checked so "safe" means safe, then set aside):
+#   DIRTY  uncommitted changes
+#   AHEAD  commits reachable from no remote
+set -uo pipefail
+
+REPOS="${CTXPACK_REPOS_DIR:-$HOME/repos}"
+mode="${1:---summary}"
+
+case "$mode" in
+  -h|--help)
+    cat <<EOF
+wt-audit — find the registered git worktrees that are safe to reclaim
+
+USAGE
+  wt-audit [--summary | --reclaim | --safe | --gone | --excluded | --all]
+
+  --summary   what is reclaimable (default)
+  --reclaim   every reclaimable worktree, GONE and SAFE together
+  --gone      dead registrations; \`git worktree prune\` in that repo
+  --safe      clean and pushed; \`treehouse return <path>\` or \`git worktree remove\`
+  --excluded  worktrees skipped because they hold uncommitted or unpushed work.
+              Shown on request only — deciding what to do with those is yours,
+              not this tool's.
+  --all       every row
+
+Reads only. Nothing here deletes a worktree.
+EOF
+    exit 0 ;;
+esac
+
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+
+for d in "$REPOS"/*/; do
+  d="${d%/}"; [ -d "$d/.git" ] || continue
+  while read -r p; do
+    [ -n "$p" ] || continue
+    [ "$p" = "$d" ] && continue
+    if [ ! -d "$p" ]; then printf 'GONE\t%s\t%s\t-\n' "$(basename "$d")" "$p" >> "$tmp"; continue; fi
+    dirty=$( { git -C "$p" status --porcelain 2>/dev/null || true; } | wc -l | tr -d ' ')
+    if [ "${dirty:-0}" -gt 0 ]; then
+      printf 'DIRTY\t%s\t%s\t%s files\n' "$(basename "$d")" "$p" "$dirty" >> "$tmp"; continue
+    fi
+    # Commits on HEAD that no remote ref reaches are the ones a removal loses.
+    ahead=$( { git -C "$p" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0; } )
+    if [ "${ahead:-0}" -gt 0 ]; then
+      printf 'AHEAD\t%s\t%s\t%s commits\n' "$(basename "$d")" "$p" "$ahead" >> "$tmp"
+    else
+      printf 'SAFE\t%s\t%s\t-\n' "$(basename "$d")" "$p" >> "$tmp"
+    fi
+  done < <( { git -C "$d" worktree list --porcelain 2>/dev/null || true; } | awk '/^worktree /{print $2}')
+done
+
+show() { awk -F'\t' -v want="$1" '$1 ~ want {printf "%-6s %-26s %-8s %s\n", $1, $2, $4, $3}' "$tmp" | sort; }
+
+count() { awk -F'\t' -v w="$1" '$1==w' "$tmp" | wc -l | tr -d ' '; }
+
+case "$mode" in
+  --reclaim)  show '^(GONE|SAFE)$' ;;
+  --excluded) show '^(DIRTY|AHEAD)$' ;;
+  --safe)     show '^SAFE$' ;;
+  --gone)     show '^GONE$' ;;
+  --all)      show '.' ;;
+  *)
+    printf 'Reclaimable\n'
+    printf '  GONE %-4s dead registrations   git worktree prune\n' "$(count GONE)"
+    printf '  SAFE %-4s clean and pushed     treehouse return / git worktree remove\n' "$(count SAFE)"
+    printf '\nExcluded (holding work; not this tool'"'"'s business)\n'
+    printf '  %s worktrees — wt-audit --excluded if you want the list\n' \
+      "$(( $(count DIRTY) + $(count AHEAD) ))"
+    printf '\nwt-audit --reclaim for the actionable set.\n'
+    ;;
+esac

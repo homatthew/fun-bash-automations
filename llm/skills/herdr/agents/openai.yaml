@@ -1,0 +1,4 @@
+interface:
+  display_name: "Herdr Claude Workflow"
+  short_description: "Run isolated Claude implementation sessions in Herdr"
+  default_prompt: "Use $herdr to run the approved implementation plan in an isolated Herdr pane."

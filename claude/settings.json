@@ -21,6 +21,10 @@
           {
             "command": "~/.claude/hooks/beads-prime.sh",
             "type": "command"
+          },
+          {
+            "command": "~/.claude/hooks/ctxreview-session-start.sh",
+            "type": "command"
           }
         ],
         "matcher": ""
@@ -44,6 +48,15 @@
           }
         ],
         "matcher": "Bash"
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/public-repo-leak-guard.sh"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -51,6 +64,17 @@
         "hooks": [
           {
             "command": "~/.claude/hooks/beads-prime.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "~/.claude/hooks/ctxreview-session-end.sh",
             "type": "command"
           }
         ],

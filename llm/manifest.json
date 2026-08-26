@@ -3,6 +3,7 @@
   "canonical": {
     "repo_agent_doc": "AGENTS.md",
     "shared_agent_doc": "llm/AGENTS.md",
+    "shared_skills_allowlist": "llm/skills.allowlist",
     "agent_push_policy": "llm/agent-push-policy.json",
     "agent_push_policy_schema": "llm/agent-push-policy.schema.json",
     "shared_skills_dir": "llm/skills",
@@ -11,7 +12,10 @@
     "codex_mcp_template": "codex/mcp.toml",
     "codex_mcp_docs": "codex/MCP.md",
     "codex_hooks_template": "codex/hooks.json",
-    "shared_command_guard_policy": "llm/command-guard-policy.md"
+    "shared_command_guard_policy": "llm/command-guard-policy.md",
+    "review_pack_tool": "bin/ctxpack",
+    "review_fanout_tool": "bin/ctxreview",
+    "context_pack_docs": "llm/context-packs/README.md"
   },
   "adapters": {
     "claude_repo_shim": "CLAUDE.md",

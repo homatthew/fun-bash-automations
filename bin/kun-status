@@ -6,6 +6,7 @@
 #   gate   no-mistakes validation gate       (source: `no-mistakes axi status`)
 #   crew   firstmate crewmates               (source: tmux windows named `fm-*`)
 #   wake   scheduled / cron wakeups          (source: crontab + launchd, best-effort)
+#   review ctxreview multi-model review legs  (source: Herdr named sessions)
 #
 # Output:
 #   stdout  structured TOON only (what the agent consumes)
@@ -17,6 +18,7 @@
 #   kun-status --gate          no-mistakes gate only
 #   kun-status --crew          firstmate crew only
 #   kun-status --wake          wake-queue only
+#   kun-status --review        ctxreview review legs only
 #   kun-status --pool --gate   any combination of section flags
 #   kun-status -h | --help     this help
 #
@@ -37,7 +39,7 @@ self_path() {
     printf '%s' "${p/#$HOME/~}"
 }
 
-DESC="One-glance Kun stack state (pool, gate, crew, wake) as TOON."
+DESC="One-glance Kun stack state (pool, gate, crew, wake, review) as TOON."
 
 print_help() {
     # Help reads from this file's own header comment block.
@@ -72,7 +74,16 @@ toon_val() {
             $'\t') printf '\\t' ;;
             *)
                 printf -v code '%d' "'$char"
-                if ((code < 32)); then
+                # Guard the LOW end too. `"'$char"` yields the first byte, which
+                # bash reports as NEGATIVE for anything >= 0x80, so `code < 32`
+                # was true for every non-ASCII byte and emitted
+                # `￿ffffffffffc2` instead of the character. The `·` in a
+                # derived review label rendered as exactly that in TOON output.
+                # Found by an opus review leg against this file, at this line.
+                #
+                # Non-ASCII passes through unescaped: TOON here is UTF-8, and only
+                # genuine C0 control characters need escaping.
+                if ((code >= 0 && code < 32)); then
                     printf '\\u%04x' "$code"
                 else
                     printf '%s' "$char"
@@ -348,22 +359,125 @@ section_wake() {
     done
 }
 
+# =========================================================================
+# review — ctxreview multi-model review legs (source: Herdr named sessions)
+# =========================================================================
+# Review legs stay conversible while their parent is active. The lifecycle
+# manager reclaims them after owner end or settled retention; this section shows
+# live legs plus persisted lifecycle health so missed cleanup remains visible.
+section_review() {
+    log "kun-status: probing ctxreview named sessions..."
+    if ! command -v herdr >/dev/null 2>&1; then
+        printf 'review:\n'
+        toon_field '  ' status unavailable
+        toon_field '  ' reason 'herdr not installed'
+        return
+    fi
+
+    local state_dir="${CTXREVIEW_SESSION_STATE_DIR:-$HOME/.local/state/ctxreview/sessions}"
+    local records=("$state_dir"/runs/*.json) sessions rows record
+    local tracked=0 running=0 stopped=0 working=0 settled=0
+    rows="$(mktemp "${TMPDIR:-/tmp}/kun-status-review.XXXXXX")" || return
+    : > "$rows"
+    sessions="$(herdr session list --json 2>/dev/null || printf '{"sessions":[]}')"
+
+    for record in "${records[@]}"; do
+        [[ -s "$record" ]] || continue
+        local name run label state leg_summary agents
+        name="$(jq -r '.herdr_session_name // empty' "$record" 2>/dev/null)"
+        [[ -n "$name" ]] || continue
+        run="$(jq -r '.run_id // "?"' "$record")"
+        label="$(jq -r '.label // "?"' "$record")"
+        tracked=$((tracked+1))
+        if printf '%s' "$sessions" | jq -e --arg name "$name" \
+            '.sessions[]? | select(.name==$name and .running==true)' >/dev/null 2>&1; then
+            state=running
+            running=$((running+1))
+            agents="$(herdr --session "$name" agent list 2>/dev/null || printf '{"result":{"agents":[]}}')"
+            leg_summary="$(printf '%s' "$agents" | jq -r '
+              [.result.agents[]? | select(.name // "" | startswith("ctxreview-")) |
+               ((.name | sub("^ctxreview-";"") | sub("-w[0-9].*$";"")) +
+                "(" + (.agent_status // "?") + ")")] | join(" ")' 2>/dev/null)"
+            working=$((working + $(printf '%s' "$agents" | jq -r \
+              '[.result.agents[]? | select(.agent_status=="working")]|length' 2>/dev/null || printf 0)))
+            settled=$((settled + $(printf '%s' "$agents" | jq -r \
+              '[.result.agents[]? | select(.agent_status=="idle" or .agent_status=="done")]|length' 2>/dev/null || printf 0)))
+            printf '%s\t%s\t%s\t%s\t%s\n' "$run" "$name" "$state" "$label" "$leg_summary" >> "$rows"
+        else
+            state=stopped
+            stopped=$((stopped+1))
+        fi
+    done
+
+    printf 'review:\n'
+    if [[ "$tracked" -eq 0 ]]; then
+        toon_field '  ' status idle
+        printf '  count: 0\n'
+        toon_field '  ' help 'ctxreview fans a context pack out in an isolated Herdr session'
+        rm -f "$rows"
+        return
+    fi
+    if [[ "$working" -gt 0 ]]; then
+        toon_field '  ' status working
+    elif [[ "$running" -gt 0 ]]; then
+        toon_field '  ' status settled
+    else
+        toon_field '  ' status idle
+    fi
+    printf '  count: %s\n' "$running"
+    printf '  running_sessions: %s\n' "$running"
+    printf '  persisted_stopped_sessions: %s\n' "$stopped"
+    printf '  working: %s\n' "$working"
+    printf '  settled: %s\n' "$settled"
+    printf '  sessions[%s]{run,session,state,label,legs}:\n' "$running"
+    while IFS=$'\t' read -r run name state label leg_summary; do
+        printf '    %s,%s,%s,%s,%s\n' \
+          "$(toon_val "$run")" "$(toon_val "$name")" "$(toon_val "$state")" \
+          "$(toon_val "$label")" "$(toon_val "${leg_summary:-none}")"
+    done < "$rows"
+    rm -f "$rows"
+
+    printf '  focus_isolation:\n'
+    toon_field '    ' strategy named_herdr_session_socket
+    printf '    default_session_mutations: 0\n'
+    local focus_file="$state_dir/focus-events.jsonl"
+    if [[ -s "$focus_file" ]]; then
+        printf '    historical_focus_drifts: %s\n' \
+          "$(jq -s 'map(select(.focus_drift==true))|length' "$focus_file" 2>/dev/null || printf 0)"
+        printf '    historical_restore_failed: %s\n' \
+          "$(jq -s 'map(select(.restore_outcome=="failed"))|length' "$focus_file" 2>/dev/null || printf 0)"
+    fi
+    toon_field '  ' stats 'ctxreview --stats'
+    [[ "$settled" -eq 0 ]] || toon_field '  ' maintain 'ctxreview --maintain --all'
+
+    local bugs_file="${CTXREVIEW_BUGS_FILE:-$HOME/.local/state/ctxreview/bugs.jsonl}"
+    if [[ -s "$bugs_file" ]]; then
+        local open_bugs
+        open_bugs="$(jq -r 'select(.status=="open")|1' "$bugs_file" 2>/dev/null | grep -c . || true)"
+        [[ "${open_bugs:-0}" -eq 0 ]] || {
+            printf '  tool_bugs_open: %s\n' "$open_bugs"
+            toon_field '  ' tool_bugs 'ctxreview --bugs'
+        }
+    fi
+}
+
 # --- arg parsing ----------------------------------------------------------
-want_pool=0 want_gate=0 want_crew=0 want_wake=0 any=0
+want_pool=0 want_gate=0 want_crew=0 want_wake=0 want_review=0 any=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pool) want_pool=1; any=1 ;;
         --gate) want_gate=1; any=1 ;;
         --crew) want_crew=1; any=1 ;;
         --wake) want_wake=1; any=1 ;;
+        --review) want_review=1; any=1 ;;
         -h|--help) print_help; exit 0 ;;
         --) shift; break ;;
         -*)
-            output="$(toon_field '' error "unknown flag: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+            output="$(toon_field '' error "unknown flag: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] [--review] | --help')"
             printf '%s' "$output"
             exit 2 ;;
         *)
-            output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+            output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] [--review] | --help')"
             printf '%s' "$output"
             exit 2 ;;
     esac
@@ -371,14 +485,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $# -gt 0 ]]; then
-    output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] | --help')"
+    output="$(toon_field '' error "unexpected argument: $1"; toon_field '' help 'kun-status [--pool] [--gate] [--crew] [--wake] [--review] | --help')"
     printf '%s' "$output"
     exit 2
 fi
 
 # Default = all sections.
 if [[ $any -eq 0 ]]; then
-    want_pool=1 want_gate=1 want_crew=1 want_wake=1
+    want_pool=1 want_gate=1 want_crew=1 want_wake=1 want_review=1
 fi
 
 # --- home view header (identity, per AXI §10) -----------------------------
@@ -389,6 +503,7 @@ output="$({
     [[ $want_gate -eq 1 ]] && section_gate
     [[ $want_crew -eq 1 ]] && section_crew
     [[ $want_wake -eq 1 ]] && section_wake
+    [[ $want_review -eq 1 ]] && section_review
     true
 })"
 printf '%s' "$output"
