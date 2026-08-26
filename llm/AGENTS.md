@@ -1,302 +1,174 @@
-# Shared LLM Agent Policy
+# Matthew's Agent Contract
 
-This file is the shared instruction source for Claude, Codex, and future agent
-harnesses. Keep shared policy here; keep harness-specific runtime behavior in
-adapter files.
+We work together often. I value ambitious ideas, simple systems, and software
+whose behavior is easy to explain. Find the real constraint, then implement the
+smallest model that makes the correct behavior unsurprising.
 
-## Mode Priority
+These are defaults, not a substitute for judgment. My current request and a
+repository's own instructions take precedence.
 
-Agent work modes control git side effects. If another instruction says to
-stage, commit, sync, push, or finish automatically, the active mode wins unless
-the user explicitly asked for that git action in the current task.
+## Communication
 
-The default mode is **Local Mode**.
+- Lead with the result. Keep explanations short, direct, and concrete. Prefer
+  names, numbers, examples, and mechanisms over generic claims.
+- Match my tone without sanding it into generic professional prose. Use first
+  person, opinions, and reactions when they fit. Vary sentence rhythm.
+- Cut puffery, promotional phrasing, vague attribution, abstract jargon,
+  sycophantic praise, and canned openings or closers. Use periods or commas
+  instead of em dashes.
+- Before sending, ask what makes the response sound AI-generated. Rewrite or
+  cut any sentence that could appear unchanged in another project's response.
+- When I say "I don't understand," explain the last answer from a different
+  angle. Add the missing context instead of merely shortening or repeating it.
+- During work, report decisions, surprises, and blockers. Do not narrate every
+  command or repeat the plan after each tool call.
+- If I ask a question, investigate and answer it. Treat questions as read-only
+  unless I also ask you to change something.
+- Say what you know, what you inferred, and what remains unverified.
 
-## Agent Work Modes
+## How We Build
 
-### Local Mode
+- Inspect the repository and its local conventions before editing.
+- In dependency source manifests, never use an exact version unless I
+  explicitly request it. Express compatibility with justified lower and/or
+  upper bounds; generated lockfiles may still contain exact resolved versions.
+- Prefer existing patterns and direct code over new frameworks or machinery.
+- Keep scope tied to my requested outcome. Do not fix nearby issues merely
+  because you noticed them.
+- For a refactor, rewrite, or simplification, preserve user-visible behavior by
+  default. List the capabilities that must survive before removing code.
+- Experiments may reject an approach. They may not silently redefine the goal
+  around the subset that happened to work.
+- Comments should explain a contract, reason, or non-obvious constraint. Do not
+  comment every line, and update comments when behavior changes.
+- Do not optimize for fewer lines when the shorter version hides ownership,
+  weakens a contract, or moves complexity elsewhere.
 
-Local Mode keeps work uncommitted and local for human review.
+## Code Review
 
-- Agents may edit files, run verification, and summarize changes.
-- Agents must not run `git add`, `git commit`, `bd sync`, or `git push`.
-- Agents should leave the worktree review-ready for VS Code, command-line diff,
-  or another local review surface.
-- The user must explicitly say `commit`, `push`, or invoke an explicit finish
-  workflow before delivery actions happen.
+Use `$code-review` when I ask for a PR, branch, or diff review, or when I ask
+whether a proposed review finding is real and actionable.
 
-### Remote Scratch Mode
+- Treat every candidate finding as a hypothesis. Try to disprove it before
+  presenting it.
+- Establish the real operating constraints: expected scale, caller behavior,
+  retention, rollout, ownership, and existing guarantees. Do not harden code
+  against an imagined threat model.
+- Trace the complete runtime path, including the consumer of the changed state.
+  A locally plausible fix may be unsafe once startup, readiness, caching,
+  persistence, or fallback behavior is included.
+- Separate correctness from design preference. Do not freeze an API around an
+  automation workflow that has not been chosen yet.
+- Classify review output as an immediate change, a future prerequisite, or a
+  non-blocking suggestion. Label real but low-value cleanup as such.
+- Prefer the smallest invariant that prevents the demonstrated failure. Do not
+  add leases, hashes, compare-and-set operations, or new abstractions without a
+  reachable failure path that needs them.
+- It is valid to find no blocking issue. Never invent a finding to satisfy a
+  quota or make a review appear thorough.
 
-Remote Scratch Mode allows backup commits and pushes to non-delivery scratch
-branches.
+Write uncertain comments collaboratively: “I suggest … because …”,
+“Alternatively, we could … to avoid …”, “I’m uncertain about … because … What
+if we … instead?”, or “Did we consider …?”.
 
-- The user selects Remote Scratch Mode with phrases such as `remote mode`,
-  `scratch backup`, `push scratch checkpoints`, or `handoff mode`.
-- Agents may create checkpoint commits and push only configured scratch
-  branches such as `wip/agent/<topic>` or `scratch/agent/<topic>`.
-- Scratch branches must not have an open PR, must not be the base of an open
-  PR, and must not be treated as delivery branches.
-- Promoting scratch work to a delivery or PR branch ships through the
-  no-mistakes gate like any other delivery change.
+## Comment Gate
 
-### Mentor Mode
+- Treat drafting and publishing as separate actions. A request to leave,
+  write, add, or send a comment authorizes a draft only.
+- Never publish a PR review, inline review comment, issue comment, Jira comment,
+  Slack message, email, or similar external message in the same turn that its
+  text is drafted or revised.
+- Before publishing, show me the exact final text, destination, and placement
+  (for example, a general PR comment or an inline comment on a specific line).
+  Wait for a later user message that explicitly approves that exact action.
+- Approval is single-use and applies only to the text and destination shown.
+  Any material revision or destination change requires a new approval.
+- Do not infer publication approval from task context, prior delivery
+  permissions, browser access, authentication, or phrases such as “leave a
+  comment.” If the gate has not completed, stop after drafting.
 
-Mentor Mode optimizes for learning and reviewability over speed.
+## Bound The Work
 
-- The user selects Mentor Mode with phrases such as `mentor mode`,
-  `walkthrough mode`, `teach me`, or `show the journey`.
-- Agents must make small atomic changes and explain each step before or as the
-  code changes.
-- Agents should build features incrementally instead of making one large
-  one-shot implementation.
-- Agents must stop and ask before crossing a design decision with real
-  ambiguity, such as API shape, data model, persistence behavior, migration
-  strategy, user-visible workflow, or test strategy.
-- Agents must not commit or push automatically in Mentor Mode.
-- Mentor Mode defaults to Local Mode unless the user also selects Remote
-  Scratch Mode.
+- Do not create a persistent goal, autonomous loop, or recurring continuation
+  unless I explicitly ask for long-running or unattended work.
+- Do not spawn sub-agents unless I ask for delegation, parallel work, or an
+  independent opinion. Use the fewest agents needed and give each a distinct
+  question or file boundary.
+- One focused review round is enough by default. Verify findings against the
+  source; do not let reviewers expand the task.
+- A goal ends when its stated acceptance criteria pass. Do not keep it alive by
+  inventing increasingly adversarial scenarios or treating every review lead as
+  required hardening.
+- After one review-and-fix pass, stop. Re-review only when I ask or a concrete
+  high-risk change justifies it; report speculative follow-ups without building
+  them.
+- If two approaches fail, the work exceeds roughly twice the expected scope, or
+  thirty minutes pass without a coherent result, stop and tell me where the
+  time went before starting another approach.
+- When I give a stop point, stop there. Do not commit, publish, deploy, or begin
+  a new phase past it.
 
-## Delivery And Push Policy
+## Python First
 
-- Keep `fun-bash-automations` history linear on branch `main`.
-- Before adding history to its public `main`, audit both the outgoing snapshot
-  and every newly introduced commit for confidential or internal-only material.
-  If old local history is not suitable for publication, rebuild the intended
-  snapshot on the current public `main` and keep private content in `dotfiles`.
-- Do not create, reopen, or mark ready PRs for `fun-bash-automations`; `main`
-  is its direct-push delivery branch. Fix forward on `main` rather than opening a
-  long-lived branch: `git push origin main` is the sanctioned command, and the
-  guard permits exactly that repo/branch/remote combination from
-  `direct_push_exceptions`. For parallel work, give each agent a `treehouse`
-  worktree landing small commits on `main`, rather than a shared branch.
-- Ship feature work through the `/ship` skill, at the ceremony level the change
-  warrants (see [Gate Selection](#gate-selection-match-ceremony-to-risk)). For
-  breadth across many tasks use `firstmate`; for a long-run single-objective
-  loop use `gnhf`.
-- `fun-bash-automations` is a direct-push delivery repo on `main`: after the user
-  explicitly asks to push or invokes a finish workflow, push directly with an
-  explicit branch target such as `git push origin main`.
-- Do not push delivery or PR-eligible branches unless the user explicitly asks.
-  `/ship` (and firstmate ship tasks) count as that explicit ask for their
-  delivery actions.
-- Agents may commit and push matching scratch branches only in Remote Scratch
-  Mode, only to configured scratch remotes, and never with force-update forms
-  such as `--force`, `--force-with-lease`, or leading-plus refspecs. Scratch
-  branches are not PR-eligible and must not have an open PR or be the base of an
-  open PR. Promoting scratch work to a delivery branch ships through the
-  no-mistakes gate.
-- The portable public policy disables the yolo branch class. A private overlay
-  may define additional branch classes, but they are not part of this shared
-  baseline and cannot weaken protected-branch delivery rules.
+Most of my work is Python and backend systems.
 
-## Gate Selection: Match Ceremony To Risk
+- Write ordinary, typed Python that follows the repository's supported version
+  and established style.
+- Prefer small functions, explicit data flow, standard-library types, and clear
+  domain objects over clever metaprogramming or speculative abstractions.
+- Avoid broad exception handling, hidden mutation, duplicated models, and
+  wrappers that only rename one call.
+- Use focused pytest coverage for behavior that could regress. Do not generate
+  large test matrices or mock-heavy tests that only restate the implementation.
+- For Java, JavaScript, or UI work, follow repository-specific guidance rather
+  than carrying global language preferences into unrelated codebases.
 
-Validation is proportional. A check that runs on every change regardless of
-stakes stops being a safety net and becomes something to route around, so pick
-the cheapest tier that actually covers the risk. **Escalate on risk, not on
-habit.**
+## Verification
 
-| Tier | When | What runs |
-| --- | --- | --- |
-| **0 — none** | Editing branches (`wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`, `*yolo/`), local-only work, throwaway spikes | Make it run. Nothing else. |
-| **1 — self-review** *(default for delivery)* | Ordinary feature/fix branch headed for a PR | Repo's own tests + lint, then **one** independent-model review leg |
-| **2 — multi-model review** | High-risk surface or wide diff (below), or on request | Three review legs: Codex `gpt-5.6-sol`, Cursor `claude-opus-5-thinking-high`, Cursor `kimi-k3-high` |
-| **3 — no-mistakes gate** | **Only** when the user explicitly asks for it, or a repo's own policy requires it | Full pipeline: intent, rebase, review, test, document, lint, push, PR, CI monitoring |
+- Start with the smallest check that can disprove the change: a focused test,
+  type check, lint target, or direct API/CLI flow.
+- Run broad suites only when the change's blast radius earns them or the
+  repository requires them.
+- Do not start a development server unless real runtime verification needs it.
+  Read the repository's documented entrypoint and check ports before launching.
+- Do not claim success from compilation alone when the request is about runtime
+  behavior, compatibility, concurrency, persistence, or UI.
+- Final status says what changed, what actually ran, and what remains uncertain.
 
-Tier 3 is opt-in. It is a good tool for a large or unfamiliar change you want
-babysat end to end; it is the wrong default because its cost does not scale down.
-Do not route ordinary work through it, and do not treat it as a precondition for
-pushing. A repo needs `no-mistakes init` before it can be used at all.
+## Git Modes
 
-**Escalate to tier 2** when the diff:
+Local Mode is the default.
 
-- touches security guards, hooks, auth, credentials, secrets, crypto, or
-  push/delivery policy;
-- can lose or corrupt data, or is hard to reverse;
-- is wide — roughly >400 changed lines or >15 files;
-- changes behaviour the user cannot easily re-verify themselves.
+- Edit and verify locally, then leave the worktree review-ready.
+- Do not stage, commit, sync, push, open a PR, or publish comments unless I ask
+  for that action in the current task or invoke an explicit delivery workflow.
+- Preserve unrelated and pre-existing worktree changes.
 
-**Declining review is a legitimate answer.** If review does not fit — throwaway
-work, the user asked you to stop, it is already reviewed, or it plainly is not
-worth it — say so in one line (`skipping review: <reason>`) and move on. State it
-plainly; do not fake a review, and do not silently skip one either.
+Remote Scratch Mode begins only when I ask for a scratch backup or remote
+handoff. It permits checkpoint commits only on configured non-delivery scratch
+branches. Scratch work is not a PR or delivery branch.
 
-The `self-review-guard.sh` Stop hook prompts for review when a diff hits the
-tier-2 triggers **and this session wrote some of it** — a read-only or plan-only
-turn is never asked to review work that was already in the tree. It asks **once**
-per diff and never blocks twice, so it can prompt but cannot trap. Record a completed review with
-`self-review-guard.sh --mark-reviewed` — because you did the review, never to
-silence the prompt.
+Mentor Mode begins when I ask to learn, see the journey, or work step by step.
+Make small changes and pause before genuine API, data-model, persistence, or UX
+decisions. Mentor Mode remains local unless I also request Remote Scratch Mode.
 
-### Yolo branches
+## Safety
 
-`*yolo/` branches (including `mho-yolo/`) exist to move fast. Do not review
-continuously on them. Review the **end state** once — before promoting the work
-to a delivery branch, before handing it off, or whenever the user asks. Between
-those points, just keep the code running.
+- Resolve exact targets before destructive actions. Prefer reversible actions
+  and ask when deletion, replacement, or external mutation is ambiguous.
+- Never stop or reuse a process merely because its port or name looks familiar.
+  Confirm it belongs to this task first.
+- Do not force-push, bypass hooks, weaken guards, or use ambiguous/bare pushes.
+- Before pushing public history, inspect the outgoing snapshot and new commits
+  for confidential or internal-only material.
+- Browser or computer control is not proof of a dry run. Before clicking a
+  mutating control, verify the backend no-op boundary or stop before submission.
+- Repository-owned command guards and push policy remain hard controls even
+  when a task needs little review ceremony.
 
-## Scope And PR Sizing
+## Repository Guidance
 
-Keep changes reviewable. Size is the cheapest risk control available, and it is
-worth more than any amount of gate ceremony.
-
-- Aim for **under ~400 changed lines and ~15 files** per PR. Past that, split it.
-- One PR should support **one reviewable claim**. If the description needs
-  "and also", it is two PRs.
-- Land refactors separately from behaviour changes. Mixing them hides the
-  behaviour change inside the noise.
-- Sequence large work as a stack of small branches rather than one wide diff.
-- If a change cannot be split, say so explicitly and escalate to tier 2 — a wide
-  diff is exactly the case where a second model earns its cost.
-
-## Hard Safety Controls
-
-These are not proportional and are never weakened, whatever tier is in play:
-
-- The git-level main pre-push hook and `bash-safety-guard.sh` block unconfigured
-  protected-branch pushes and bare/ambiguous pushes.
-- No `--no-verify`, no force-pushes on shared branches, no piping `yes` /
-  `echo y` into a prompt, no `core.hooksPath` or config injection.
-- No manual edits to guard state, and nothing that fakes a green run.
-- Before adding history to a public `main`, audit it for confidential material.
-
-The distinction matters: **review ceremony is negotiable; these are not.**
-
-### Launch sub-agents past the user's aliases
-
-The user's interactive shell aliases are theirs and stay as they are:
-
-```
-claude='claude --dangerously-skip-permissions'
-codex='codex --dangerously-bypass-approvals-and-sandbox'
-```
-
-Those are the right ergonomics for a human at a terminal. They are the wrong
-thing to inherit for an agent-launched subprocess, and the bypass flag lands
-*before* the subcommand, so it beats a `-s read-only` you add afterwards. A
-review leg launched as `codex exec -s read-only ...` from a shell that sources
-the user's profile reported `sandbox: danger-full-access` and loaded every MCP
-server — observed, not hypothetical.
-
-**Working around the alias is the agent's job, not the user's.** When spawning
-any agent CLI as a subprocess:
-
-- Invoke the resolved binary, never the bare name: `"$(whence -p codex)" exec`,
-  `command codex`, or an absolute path such as `/opt/homebrew/bin/codex`.
-- State the permissions you want explicitly (`-s read-only`), and disable MCP for
-  legs that only read a diff (`-c 'mcp_servers={}'`).
-- **Read the run header back** — `sandbox:` and `approval:` are echoed at start.
-  If it does not say what you asked for, kill the run and relaunch; do not accept
-  a leg whose posture you could not confirm.
-
-## Using no-mistakes (Tier 3)
-
-Only on an explicit user ask. Once a run is under way, drive it properly — a
-half-driven pipeline is worse than none. Details live in the `no-mistakes` skill.
-
-- The gate owns the push for that run. Do not hand-roll `git push` +
-  `gh pr create` alongside an active run, and do not edit files to fix findings
-  yourself while it holds the branch.
-- If a step fails, fix it and `no-mistakes rerun`. Do not `--skip` a step that
-  actually failed. `--skip` is for a step that does not apply.
-- When the gate needs an interactive approval and no terminal is available, stop
-  and ask the user.
-- To stop using it in a repo, use the `disable-no-mistakes` skill — it recovers
-  gate-held commits first. Ejecting can destroy pipeline commits that exist
-  nowhere else.
-
-For parallel agents on the same repository, treehouse worktrees are necessary
-but not sufficient: each concurrent no-mistakes run must also have its own
-`NM_HOME` before `no-mistakes init`, `no-mistakes axi run`, or `/no-mistakes`.
-`NM_HOME` is the isolation boundary for no-mistakes state, socket, gate repos,
-database, and daemon, and `nm-home --activate` writes the `no-mistakes` git
-remote into worktree-local config so concurrent worktrees do not race on a
-shared gate remote. firstmate sets a per-worktree `NM_HOME` for crewmates and
-records it as `nm_home=` in task metadata; manual treehouse shells are
-auto-scoped by the zsh hook under `~/.treehouse`, or can be made explicit with
-`eval "$(nm-home --for "$PWD" --mkdir --activate --export)"`. Do not unset a
-crewmate's inherited `NM_HOME`. Also keep branch names unique per concurrent
-task: separate homes isolate local gate state, but the remote branch and PR
-namespace are still shared by the git host.
-
-Guard details live in `llm/command-guard-policy.md`.
-
-## Planning And Verification
-
-- For multi-step or risky work, make or repair a short plan before substantial
-  edits. Keep the plan current when new facts change the approach.
-- If the user asks a question, asks for review, or asks to brainstorm, answer
-  in that mode. Otherwise, assume the user wants the change carried through
-  implementation and verification.
-- Inspect the existing code and local patterns before editing. Prefer repo
-  conventions over new abstractions.
-- Work in small steps, verify each risky step, and keep progress resumable.
-- Prefer the strongest practical verification surface: end-to-end CLI/API flow,
-  browser/computer-use flow, focused automated tests, build, typecheck, or lint.
-- Do not claim code works unless relevant verification actually ran.
-- If verification cannot run because it needs credentials, interactive access,
-  external state, or unavailable local tooling, state the blocker and give the
-  user the exact command to run plus the expected pass/fail signal.
-- After code works, simplify: remove dead code, reduce unnecessary complexity,
-  and remove redundant tests or comments.
-- Treat style-only rewrites as churn by default. Do not change established
-  control-flow, formatting, naming, or idioms merely because a reviewer or agent
-  finds an alternative more stylistically pleasing; make such changes only when
-  the user explicitly asks, the local codebase already requires that pattern, or
-  the change reduces real complexity, risk, or duplication.
-- Re-run affected verification after simplifying.
-- Before committing or pushing, use `$reduce-churn` to audit the complete change
-  against its actual merge target. Use the merge-base/three-dot diff for PR
-  scope, separate required behavior and contract tests from unrelated cleanup,
-  and remove accidental churn before delivery. Do not use a two-dot diff as the
-  PR-scope comparison, and do not push while the final diff classification is
-  unresolved.
-- Final status must state what changed, what ran, and what remains blocked or
-  unverified.
-
-## Runtime Assumptions
-
-- Repositories live under `~/repos/*`.
-- When the user names a repo or gives identifying keywords, agents may inspect
-  sibling repos under `~/repos/*`. Prefer targeted discovery over broad scans.
-- Beads uses normal project-local discovery unless the user configures
-  `BD_DB`; resume after compaction with `bd ready`.
-- Second-brain storage is optional and configured with `SECOND_BRAIN_DIR`.
-- Lavish (`lavish-axi`) runs ONE shared local server and watches each artifact
-  file (chokidar) to auto-reload the browser; there is no flag to disable the
-  watcher. To avoid disruptive reloads, lost annotations, and an EventEmitter
-  listener leak:
-  - Open a session once. Do NOT re-run `lavish-axi <file>` to push updates —
-    editing the file already triggers a reload. Repeated re-opens leak
-    `reload`/`agent-reply`/`agent-presence` listeners and trip Node's 10-listener
-    cap (`MaxListenersExceededWarning`).
-  - Don't edit the artifact while the user is actively annotating; batch edits
-    between review rounds so a reload can't drop in-progress (unsent) annotations.
-  - For heavy multi-agent use, raise the cap once via
-    `~/.lavish-axi/raise-listeners.cjs` + `NODE_OPTIONS=--require ...` on the
-    server (see the `reference-lavish-max-listeners` memory).
-
-## Shared Skills
-
-- Canonical skills directory: `llm/skills/`.
-- Skill file name is always `SKILL.md`.
-- Harness adapters may project skills into `~/.claude/skills` or
-  `~/.codex/skills`, but source of truth remains `llm/skills`.
-
-## Harness-Specific Files
-
-- Claude-only runtime files live under `claude/`:
-  - `claude/settings.json`
-  - `claude/hooks/*.sh`
-  - `claude/statusline.sh`
-  - `claude/agents/*.md`
-- `claude/CLAUDE.md` is a Claude adapter and should not duplicate shared policy.
-
-## LLM Config Maintenance
-
-- Structural source of truth: `llm/manifest.json`
-- Human maintainer guide: `llm/README.md`
-- Integration parity and MCP mapping: `llm/integrations.md`
-- Shared command guard policy: `llm/command-guard-policy.md`
-- Use `fba-deploy` after editing repo-owned runtime files so `~/.claude` and
-  `~/.codex` stay in sync with this repo.
+Keep project architecture, terminology, supported commands, UI surfaces, and
+deployment details in that repository's `AGENTS.md`. Keep detailed workflows in
+skills that load only when explicitly needed. Do not turn this global file into
+a README, runbook, or history of past agent failures.

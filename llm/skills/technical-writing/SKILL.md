@@ -1,11 +1,11 @@
 ---
 name: technical-writing
-description: Improve or draft technical prose for documentation, PR descriptions, one-pagers, design docs, runbooks, knowledge-base articles, release notes, architecture notes, experiment/Atlas analyses, troubleshooting guides, and AI/RAG-consumable content. Use when asked to write, rewrite, polish, review, or structure technical writing for clarity, context independence, concrete detail, human voice, or LLM retrieval.
+description: Use when the user asks to draft, rewrite, polish, or review technical prose such as docs, PR descriptions, design docs, runbooks, one-pagers, release notes, or engineering reports.
 ---
 
 # Technical Writing
 
-Use this as the prose quality pass for technical docs and as a companion to task skills such as `update-pr-description`, `commit-push-pr`, and `one-pager`.
+Use this as the prose quality pass for technical documents.
 
 Canonical anti-GPT examples below come from interviewing a Pagestore Cassandra compression analysis gist (`matthewho/71c9496f3aa5b65c3194c421e620ad9c`). Prefer the author's locked voice over generic "tighten this" rewrites.
 

@@ -26,22 +26,17 @@ canonical instruction entrypoint.
   `direct_push_exceptions` in `llm/agent-push-policy.json`. Force forms, other
   remotes, other protected refs, bare pushes, and directory-redirecting pushes
   (`-C`, `--git-dir`, `--work-tree`) all stay blocked.
-- **Parallel sessions use worktrees, not branches.** If several agents work here
-  at once, give each one a `treehouse` worktree and let each land small commits on
-  `main`. Sharing one checkout is what causes files to change underneath a
-  running session; a shared branch does not fix that and a worktree does.
-- The finish-the-job entrypoint is the `/ship` skill for a single change. It runs
-  the repository's own checks plus an independent-model code review, at the tier
-  the change warrants — see Gate Selection in `llm/AGENTS.md`. Validation is
-  proportional to risk; the `no-mistakes` gate is an opt-in tier-3 tool, not a
-  precondition for pushing. For breadth across many tasks use `firstmate`; for a
-  long-run single-objective loop use `gnhf`.
+- Do not start parallel sessions unless the user asks. When parallel work is
+  requested, isolate each writer in its own worktree.
+- Before delivery, run the repository's relevant focused tests and inspect the
+  outgoing diff. Add review ceremony only when the change's risk warrants it or
+  the user requests it.
 - Keep PRs and delivery commits reviewable: target under ~400 changed lines and
   ~15 files, one reviewable claim each, refactors separate from behaviour changes.
 - That delivery push rule does not apply to configured non-delivery scratch
   branches when Remote Scratch Mode is active; see `llm/AGENTS.md` and
-  `llm/agent-push-policy.json`. Promoting scratch work to a delivery branch goes
-  through the `no-mistakes` gate.
+  `llm/agent-push-policy.json`. Promoting scratch work to a delivery branch uses
+  the normal delivery checks above.
 - Do not create, reopen, or mark ready PRs for this repository; `main` is the
   direct-push delivery branch.
 
@@ -58,8 +53,6 @@ canonical instruction entrypoint.
 - Edit shared policy/skills in `llm/` only.
 - Do not treat `~/.claude/*` or `~/.codex/*` as source of truth.
 - Use setup/install scripts to project shared files to home directories.
-- For durable resumption across compaction, use beads (`bd ready`) and the
-  optional `SECOND_BRAIN_DIR` knowledge store.
 
 ## Install Boundary
 

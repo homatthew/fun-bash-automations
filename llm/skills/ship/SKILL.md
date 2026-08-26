@@ -138,6 +138,18 @@ relevant verification afterward.
 
 ## Step 7 — Record the review, commit, and push
 
+Before creating PRs, choose the delivery topology from the actual final diff.
+Do not turn commit boundaries into PR boundaries automatically. For more than
+one PR, present a short table with each PR's claim, base, independently usable
+result, deployment safety boundary, and verification; get explicit user
+approval before publishing the stack. If a layer needs a later PR to become
+correct, reviewable, or useful, keep the layers as ordered commits in one PR.
+
+Check for an existing live PR or stack for the same objective. Update it when
+its topology is still valid; otherwise close or explicitly supersede it before
+opening a replacement. Never leave multiple speculative stacks open while the
+contract is still changing.
+
 ```bash
 git add <the files that belong to this task>
 git commit -m "..."
@@ -154,9 +166,12 @@ Run it **because you actually did steps 4-5**, never to silence the guard. If yo
 skipped review, say so instead — the guard prompts only once per diff and will
 not trap you.
 
-Keep the PR reviewable: aim for **under ~400 changed lines and ~15 files**, and
-one reviewable claim per PR. If the description needs "and also", split it. Land
-refactors separately from behaviour changes.
+Keep the PR reviewable: aim for **under ~400 changed lines and ~15 files** when
+the change has natural boundaries, and keep one reviewable claim per PR. If the
+description needs "and also", split it. Land refactors separately from behaviour
+changes. Size is a review signal, not permission to invent unsafe or useless PR
+boundaries; use one coherent PR with ordered commits when that is the honest
+merge and deployment unit.
 
 ## Step 8 — Many tasks? Use firstmate
 
