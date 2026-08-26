@@ -1,0 +1,994 @@
+#!/usr/bin/env bash
+# ctxpack — assemble a local context pack for code review.
+#
+# A context pack is the evidence a reviewer (human or agent) needs *besides*
+# the diff: the conventions the diff is being judged against, the sibling code
+# that establishes them, the domain notes, and the record of which findings
+# were upheld or rejected last time.
+#
+# No network, no index, no install. Everything is derived from the working
+# tree, git history, and two plain-text corpora on disk.
+#
+# See: llm/context-packs/README.md
+set -euo pipefail
+
+VERSION="0.1.0"
+SELF="${0##*/}"
+
+# ---------------------------------------------------------------- config ----
+
+BIBLE_DIR="${CTXPACK_BIBLE_DIR:-${SECOND_BRAIN_DIR:-$HOME/repos/dump/second-brain}/review}"
+BRAIN_DIR="${SECOND_BRAIN_DIR:-$HOME/repos/dump/second-brain}"
+REPOS_DIR="${CTXPACK_REPOS_DIR:-$HOME/repos}"
+
+# Tunables. Every cap is explicit so a truncated pack is never silent.
+MAX_SIBLINGS="${CTXPACK_MAX_SIBLINGS:-40}"
+MAX_FILES="${CTXPACK_MAX_FILES:-60}"
+PRECEDENT_QUORUM="${CTXPACK_PRECEDENT_QUORUM:-60}"   # percent of siblings
+PRECEDENT_MIN="${CTXPACK_PRECEDENT_MIN:-3}"          # absolute floor
+
+# ----------------------------------------------------------------- utils ----
+
+# One scratch dir for the whole run. A per-function `trap ... RETURN` looks
+# tidier but bash installs it globally without `functrace`, so it fires on
+# every other function's return and trips `set -u` on the stale variable.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/ctxpack.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+die() { printf '%s: %s\n' "$SELF" "$*" >&2; exit 2; }
+note() { [ -n "${CTXPACK_QUIET:-}" ] || printf '%s: %s\n' "$SELF" "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<EOF
+$SELF $VERSION — assemble a local code-review context pack
+
+USAGE
+  $SELF build [--base REF] [--out FILE] [--sections LIST]
+  $SELF precedent [--base REF]
+  $SELF bible [--match] [--base REF]
+  $SELF harvest REPO [--host HOST] [--prs N | --prs-list N,N,N]
+  $SELF read [--min N] [--all]
+  $SELF mine scope | sizes --authors a,b,c
+  $SELF doctor
+
+COMMANDS
+  build       Assemble the full pack for the current diff (markdown on stdout).
+  precedent   Only the sibling-precedent evidence table.
+  bible       List code-bible rules; --match filters to rules touching this diff.
+  harvest     Mine PR review threads from a GitHub host into the adjudication
+              corpus, so the bible compounds from real verdicts.
+  read        Order harvested findings for READING. Retrieval, not ranking —
+              the corpus is small enough to read, and every score tried so far
+              inverted what it was meant to measure.
+  mine scope  List repos you have committed to — the corpus boundary.
+  mine sizes  Commit-churn distribution per author. A diagnostic, not a target.
+  mine outcomes  Post-merge repair rate. A diagnostic about *where* you work.
+  doctor      Report which corpora and tools resolved.
+
+OPTIONS
+  --base REF     Diff base. Default: merge-base with the repo's default branch,
+                 falling back to staged then unstaged changes.
+  --out FILE     Write the pack to FILE instead of stdout.
+  --sections L   Comma-separated subset of:
+                 claim,scope,constitution,precedent,history,brain,bible,persona
+  --prs N        How many recent PRs to harvest (default 60).
+  --host HOST    GitHub host for harvest (default: the repo's origin host).
+
+ENVIRONMENT
+  SECOND_BRAIN_DIR      Root of the second brain. Default ~/repos/dump/second-brain
+  CTXPACK_BIBLE_DIR     Review corpus root.  Default \$SECOND_BRAIN_DIR/review
+  CTXPACK_MAX_SIBLINGS  Sibling files scanned per directory (default 40)
+  CTXPACK_PRECEDENT_QUORUM  Percent of siblings that makes a token a convention (60)
+
+EXIT
+  0 ok   1 nothing to review   2 usage/config error
+EOF
+}
+
+# Resolve the diff base: explicit flag, else merge-base against the default
+# branch, else HEAD if there are staged/unstaged changes.
+resolve_base() {
+  local want="${1:-}"
+  if [ -n "$want" ]; then printf '%s\n' "$want"; return 0; fi
+  local head_ref
+  head_ref=$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)
+  [ -n "$head_ref" ] || {
+    for ref in refs/remotes/origin/main refs/remotes/origin/master \
+               refs/heads/main refs/heads/master; do
+      git show-ref -q --verify "$ref" && { head_ref="$ref"; break; }
+    done
+  }
+  if [ -n "$head_ref" ]; then
+    local mb
+    mb=$(git merge-base HEAD "$head_ref" 2>/dev/null || true)
+    if [ -n "$mb" ] && [ "$mb" != "$(git rev-parse HEAD)" ]; then
+      printf '%s\n' "$mb"; return 0
+    fi
+  fi
+  printf 'HEAD\n'
+}
+
+# stderr is dropped: in a repo with no commits every form of this is a fatal
+# "ambiguous argument HEAD", and the empty result is already the right answer.
+changed_files() {
+  local base="$1"
+  if [ "$base" = "HEAD" ]; then
+    git diff --name-only HEAD 2>/dev/null
+  else
+    git diff --name-only "$base"...HEAD 2>/dev/null
+    git diff --name-only HEAD 2>/dev/null
+  fi
+  # Untracked files are part of the working snapshot reviewers and tests see.
+  # Omitting them can turn a non-landable patch into an apparently green review
+  # when tracked code imports an untracked implementation.
+  git ls-files --others --exclude-standard 2>/dev/null
+}
+
+untracked_diff() {
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # Plain `--no-index` emits a compact "Binary files differ" marker for
+    # binaries rather than embedding their bytes. Text files are included in
+    # full; ctxreview's existing prompt-size cap rejects an oversized result
+    # explicitly instead of silently omitting it.
+    git diff --no-index -- /dev/null "$f" 2>/dev/null || true
+  done < <(git ls-files --others --exclude-standard 2>/dev/null)
+}
+
+diff_body() {
+  local base="$1"
+  if [ "$base" = "HEAD" ]; then
+    git diff HEAD 2>/dev/null
+  else
+    git diff "$base"...HEAD 2>/dev/null; git diff HEAD 2>/dev/null
+  fi
+  untracked_diff
+}
+
+is_test_path() {
+  case "$1" in
+    */test/*|*/tests/*|*/spec/*|*_test.*|*test_*|*.test.*|*.spec.*|*Test.java|*Tests.java) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Only multi-word program identifiers count as convention signal:
+# camelCase, multi-word PascalCase, or SCREAMING_SNAKE.
+#
+# The first cut of this used "any word >=6 chars" and the top hits were
+# `without`, `storage`, `status`, `require` — English prose, scored 3/3.
+# A convention is something a programmer *named*, and in every language here
+# that means a case transition or an underscore.
+IDENT_RE='([a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*|[A-Z][A-Z0-9]*_[A-Z0-9_]+)'
+
+# Precedent only means something inside one language's idiom. Prose files have
+# no call sites, so counting tokens across them measures vocabulary, not
+# convention.
+is_code_path() {
+  case "${1##*.}" in
+    java|kt|kts|scala|groovy|gradle|ts|tsx|js|jsx|vue|py|go|rb|rs|swift|c|cc|cpp|h|hpp|cs|php|sh|bash|proto) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tokens_of() {
+  grep -oE "$IDENT_RE" "$1" 2>/dev/null | sort -u || true
+}
+
+# ------------------------------------------------------------- sections ----
+
+section_claim() {
+  local base="$1"
+  printf '## Claim under review\n\n'
+  local branch; branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+  printf -- '- Branch: `%s`   Base: `%s`\n' "$branch" "$base"
+  local jira; jira=$(printf '%s' "$branch" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true)
+  [ -n "$jira" ] && printf -- '- Ticket: `%s`\n' "$jira"
+  printf '\n### Commit subjects\n\n```\n'
+  if [ "$base" = "HEAD" ]; then
+    printf '(uncommitted working-tree changes; no commit messages yet)\n'
+  else
+    # Subjects only. Bodies are frequently longer than the diff and would
+    # crowd out every other section of the pack.
+    git log --format='%h %s' "$base"..HEAD | awk 'NR<=40'
+  fi
+  printf '```\n\n'
+  printf '> A reviewer judges the diff against *this* claim. If the diff does more\n'
+  printf '> than the claim says, that surplus is the first finding.\n\n'
+}
+
+section_scope() {
+  local base="$1"; shift
+  local files=("$@")
+  printf '## Scope ledger\n\n'
+  local impl=() tests=()
+  local f
+  for f in "${files[@]}"; do
+    if is_test_path "$f"; then tests+=("$f"); else impl+=("$f"); fi
+  done
+  local adds dels
+  adds=$(diff_body "$base" | grep -c '^+[^+]' || true); adds="${adds:-0}"
+  dels=$(diff_body "$base" | grep -c '^-[^-]' || true); dels="${dels:-0}"
+  printf -- '- Files: %d implementation, %d test\n' "${#impl[@]}" "${#tests[@]}"
+  printf -- '- Lines: +%s / -%s\n' "$adds" "$dels"
+
+  # Tier trigger mirrors llm/AGENTS.md "Gate Selection". Stated, not enforced.
+  local tier="1 — self-review"
+  if [ "$adds" -gt 400 ] || [ "${#files[@]}" -gt 15 ]; then tier="2 — multi-model (wide diff)"; fi
+  for f in "${files[@]}"; do
+    case "$f" in
+      *auth*|*Auth*|*secret*|*Secret*|*credential*|*crypto*|*hook*|*push*|*token*|*Token*)
+        tier="2 — multi-model (sensitive surface: $f)"; break ;;
+    esac
+  done
+  printf -- '- Suggested tier: **%s**\n\n' "$tier"
+
+  if [ "${#tests[@]}" -eq 0 ] && [ "${#impl[@]}" -gt 0 ]; then
+    printf '> **No test files changed.** Either the behaviour is already locked by an\n'
+    printf '> existing test (name it) or this is the finding.\n\n'
+  fi
+
+  # awk rather than `| head`: head closes the pipe early, which under
+  # `set -o pipefail` turns a successful listing into a failed section.
+  printf '### Implementation\n\n'
+  printf '%s\n' "${impl[@]:-(none)}" | awk -v n="$MAX_FILES" \
+    'NR<=n {print "- `" $0 "`"} END {if (NR>n) printf "- _(%d more not shown)_\n", NR-n}'
+  printf '\n### Tests\n\n'
+  printf '%s\n' "${tests[@]:-(none)}" | awk -v n="$MAX_FILES" \
+    'NR<=n {print "- `" $0 "`"} END {if (NR>n) printf "- _(%d more not shown)_\n", NR-n}'
+  printf '\n'
+}
+
+section_constitution() {
+  printf '## Repo constitution\n\n'
+  local found=0 f
+  for f in AGENTS.md CLAUDE.md CONTRIBUTING.md ARCHITECTURE.md; do
+    [ -f "$f" ] && { printf -- '- `%s` (%s lines)\n' "$f" "$(wc -l < "$f" | tr -d ' ')"; found=1; }
+  done
+  if [ -d .agents ]; then
+    while IFS= read -r f; do
+      printf -- '- `%s` (%s lines)\n' "$f" "$(wc -l < "$f" | tr -d ' ')"
+      found=1
+    done < <(find .agents -name '*.md' -type f | sort)
+  fi
+  # Nested AGENTS.md: a module-level file overrides the root for its subtree.
+  while IFS= read -r f; do
+    printf -- '- `%s` (module-scoped, %s lines)\n' "$f" "$(wc -l < "$f" | tr -d ' ')"
+    found=1
+  done < <(find . -mindepth 2 -maxdepth 3 -name AGENTS.md -not -path './.git/*' 2>/dev/null | sort)
+  [ "$found" -eq 1 ] || printf -- '- (none found — the reviewer has no written convention to cite)\n'
+  printf '\n> Findings that cite one of these by file and line are actionable.\n'
+  printf '> Findings that cite the reviewer'"'"'s taste are churn.\n\n'
+}
+
+# The sibling-precedent miner. This is the section that earns the pack.
+#
+# Two questions, both answered by counting, not by taste:
+#   absent-precedent — N of M sibling files use token X; this file does not.
+#   novel token      — this diff introduces X, which 0 siblings use.
+#
+# The first catches "every other axios factory attaches the auth interceptor".
+# The second catches a new pattern being smuggled in next to an old one.
+section_precedent() {
+  local base="$1"; shift
+  local files=("$@")
+  printf '## Sibling precedent\n\n'
+  printf 'Counted over files in the same directory with the same extension.\n'
+  printf 'Quorum: a token used by >=%s%% of siblings (min %s) counts as convention.\n\n' \
+    "$PRECEDENT_QUORUM" "$PRECEDENT_MIN"
+
+  local tmp="$WORK/precedent"; mkdir -p "$tmp"
+  local added="$tmp/added"
+  diff_body "$base" | grep '^+[^+]' | cut -c2- > "$added" || true
+
+  local any=0 blocks=0 f
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    is_test_path "$f" && continue
+    is_code_path "$f" || continue
+    if [ "$blocks" -ge 15 ]; then
+      printf '_(precedent capped at 15 files; re-run on a narrower diff for the rest)_\n\n'
+      break
+    fi
+    local dir ext
+    dir=$(dirname "$f"); ext="${f##*.}"
+
+    local siblings=()
+    while IFS= read -r s; do
+      [ "$s" = "$f" ] && continue
+      siblings+=("$s")
+    done < <(find "$dir" -maxdepth 1 -type f -name "*.${ext}" 2>/dev/null | sort | head -"$MAX_SIBLINGS")
+    local m=${#siblings[@]}
+    [ "$m" -ge "$PRECEDENT_MIN" ] || continue
+
+    # Count, per token, how many siblings mention it.
+    : > "$tmp/sibtokens"
+    local s
+    for s in "${siblings[@]}"; do tokens_of "$s" >> "$tmp/sibtokens"; done
+    sort "$tmp/sibtokens" | uniq -c | sort -rn > "$tmp/counts"
+
+    local need=$(( m * PRECEDENT_QUORUM / 100 ))
+    [ "$need" -lt "$PRECEDENT_MIN" ] && need="$PRECEDENT_MIN"
+
+    tokens_of "$f" > "$tmp/mine"
+
+    local absent
+    absent=$(awk -v need="$need" '$1 >= need { print $2 }' "$tmp/counts" \
+      | grep -vxF -f "$tmp/mine" 2>/dev/null | head -12 || true)
+
+    # Novel tokens ranked by how often the diff actually uses them — an
+    # alphabetical head() just returns whatever starts with "A".
+    local novel
+    novel=$(grep -oE "$IDENT_RE" "$added" 2>/dev/null \
+      | grep -xF -f "$tmp/mine" 2>/dev/null | sort | uniq -c | sort -rn \
+      | awk '{print $2"\t"$1}' \
+      | grep -vF -f <(awk '{print $2}' "$tmp/counts") 2>/dev/null \
+      | awk 'NR<=10' || true)
+
+    if [ -n "$absent" ] || [ -n "$novel" ]; then
+      any=1; blocks=$((blocks+1))
+      printf '### `%s`  (%d siblings in `%s`)\n\n' "$f" "$m" "$dir"
+      if [ -n "$absent" ]; then
+        printf '**Absent precedent** — used by >=%d/%d siblings, not by this file:\n\n' "$need" "$m"
+        local t
+        while IFS= read -r t; do
+          local c; c=$(awk -v k="$t" '$2==k{print $1}' "$tmp/counts")
+          printf -- '- `%s` — %s/%d siblings\n' "$t" "$c" "$m"
+        done <<< "$absent"
+        printf '\n'
+      fi
+      if [ -n "$novel" ]; then
+        printf '**Novel in this family** — introduced here, 0 siblings use it:\n\n'
+        printf '%s\n' "$novel" | awk -F'\t' '{printf "- `%s` — %s use(s) in the diff\n", $1, $2}'
+        printf '\n'
+      fi
+    fi
+  done
+  [ "$any" -eq 1 ] || printf '(no directory in this diff had enough siblings to establish precedent)\n\n'
+  printf '> Absent precedent is a *lead*, not a finding. Open two of the cited\n'
+  printf '> siblings before writing the comment — the token may be irrelevant here,\n'
+  printf '> and a miscounted convention is the most annoying kind of review noise.\n\n'
+}
+
+section_history() {
+  local base="$1"; shift
+  local files=("$@")
+  printf '## History on the touched files\n\n'
+  local f n=0
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    n=$((n+1)); [ "$n" -gt 20 ] && { printf -- '- … (%d more files not shown)\n' $(( ${#files[@]} - 20 )); break; }
+    printf '### `%s`\n\n```\n' "$f"
+    git log -n 4 --format='%h %ad %an  %s' --date=short -- "$f" 2>/dev/null || true
+    printf '```\n\n'
+  done
+  printf '> A file rewritten three times this quarter is a design smell the diff\n'
+  printf '> may be repeating. A file untouched for two years deserves more caution.\n\n'
+}
+
+section_brain() {
+  shift 0
+  local files=("$@")
+  printf '## Second-brain topics\n\n'
+  if [ ! -d "$BRAIN_DIR/topics" ]; then
+    printf '(no second brain at `%s`)\n\n' "$BRAIN_DIR"; return 0
+  fi
+  # Match on path words rather than file contents: cheap, and precise enough
+  # because topic folders are named after the subsystems they document.
+  local words
+  words=$(printf '%s\n' "${files[@]}" | tr '/._-' '\n' | tr 'A-Z' 'a-z' \
+    | grep -E '^[a-z]{4,}$' | sort | uniq -c | sort -rn \
+    | awk 'NR<=25 {print $2}' || true)
+  [ -n "$words" ] || { printf '(no usable path words in this diff)\n\n'; return 0; }
+  local hits=0 t
+  while IFS= read -r t; do
+    local name; name=$(basename "$t")
+    local w
+    while IFS= read -r w; do
+      case "$name" in *"$w"*)
+        printf -- '- [`%s`](%s/README.md)\n' "$name" "$t"; hits=$((hits+1)); break ;;
+      esac
+    done <<< "$words"
+  done < <(find "$BRAIN_DIR/topics" -mindepth 1 -maxdepth 1 -type d | sort)
+  [ "$hits" -gt 0 ] || printf '(no topic folder matched a path word from this diff)\n'
+  printf '\n'
+}
+
+section_bible() {
+  shift 0
+  local files=("$@")
+  printf '## Code bible — prior adjudications\n\n'
+  local rules="$BIBLE_DIR/code-bible/rules"
+  if [ ! -d "$rules" ]; then
+    printf '(no code bible at `%s`)\n\n' "$rules"; return 0
+  fi
+  local shown=0 r
+  for r in "$rules"/*.md; do
+    [ -f "$r" ] || continue
+    local applies title
+    applies=$(awk -F': *' '/^applies:/ {print $2; exit}' "$r")
+    title=$(awk '/^# / {sub(/^# /,""); print; exit}' "$r")
+    local match=0
+    if [ -z "$applies" ] || [ "$applies" = "*" ]; then
+      match=1
+    else
+      local f
+      for f in "${files[@]}"; do
+        printf '%s\n' "$f" | grep -qE "$applies" && { match=1; break; }
+      done
+    fi
+    if [ "$match" -eq 1 ]; then
+      shown=$((shown+1))
+      local verdict; verdict=$(awk -F': *' '/^verdict:/ {print $2; exit}' "$r")
+      printf -- '- **%s** _(%s)_ — `%s`\n' "$title" "${verdict:-unclassified}" "$(basename "$r")"
+    fi
+  done
+  [ "$shown" -gt 0 ] || printf '(no rule matched this diff)\n'
+  printf '\n> `verdict: rejected` rules are findings that were raised and turned down\n'
+  printf '> with a reason. Raising one again without addressing that reason is noise.\n'
+  printf '> `verdict: upheld` rules are the checks worth spending review budget on.\n\n'
+}
+
+# Review lenses: reusable checks distilled from engineers whose work is worth
+# learning from, attributed to evidence but named after the principle. These
+# are what to *look for*; the bible is what has already been *decided*.
+section_lens() {
+  local files=("$@")
+  printf '## Review lenses\n\n'
+  local dir="$BIBLE_DIR/lenses"
+  if [ ! -d "$dir" ]; then printf '(none at `%s`)\n\n' "$dir"; return 0; fi
+  local shown=0 l
+  for l in "$dir"/*.md; do
+    [ -f "$l" ] || continue
+    local applies title weight
+    applies=$(awk -F': *' '/^applies:/ {print $2; exit}' "$l")
+    title=$(awk '/^# / {sub(/^# /,""); print; exit}' "$l")
+    weight=$(awk -F': *' '/^weight:/ {print $2; exit}' "$l")
+    local match=0
+    if [ -z "$applies" ] || [ "$applies" = ".*" ]; then
+      match=1
+    else
+      local f
+      for f in "${files[@]}"; do
+        printf '%s\n' "$f" | grep -qE "$applies" && { match=1; break; }
+      done
+    fi
+    if [ "$match" -eq 1 ]; then
+      shown=$((shown+1))
+      printf -- '- **%s** _(%s)_ — `%s`\n' "$title" "${weight:-?}" "$(basename "$l")"
+    fi
+  done
+  [ "$shown" -gt 0 ] || printf '(no lens matched this diff)\n'
+  printf '\n> Open the lens file before using it — the one-line title is a\n'
+  printf '> reminder, the evidence and the "how to apply" are the content.\n\n'
+}
+
+section_persona() {
+  printf '## Reviewer personas\n\n'
+  local p="$BIBLE_DIR/personas"
+  if [ ! -d "$p" ]; then printf '(none at `%s`)\n\n' "$p"; return 0; fi
+  local f
+  for f in "$p"/*.md; do
+    [ -f "$f" ] || continue
+    printf -- '- `%s` — %s\n' "$(basename "$f" .md)" \
+      "$(awk -F': *' '/^summary:/ {print $2; exit}' "$f")"
+  done
+  printf '\n> These describe what the humans on this repo actually flag. Pre-empting\n'
+  printf '> them is the cheapest review round you will ever run.\n\n'
+}
+
+# ------------------------------------------------------------- commands ----
+
+cmd_build() {
+  local base_arg="" out="" sections="claim,scope,constitution,precedent,history,brain,bible,lens,persona"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) base_arg="${2:?--base needs a ref}"; shift 2 ;;
+      --out) out="${2:?--out needs a path}"; shift 2 ;;
+      --sections) sections="${2:?--sections needs a list}"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository"
+
+  local base; base=$(resolve_base "$base_arg")
+  local files=()
+  while IFS= read -r f; do files+=("$f"); done < <(changed_files "$base" | sort -u | grep -v '^$' || true)
+  [ "${#files[@]}" -gt 0 ] || { note "no changed files against $base"; return 1; }
+
+  # A section that fails must say so in the pack. A pack that silently stops
+  # half way is worse than no pack: the reviewer cannot tell "no precedent
+  # found" from "the precedent miner crashed".
+  run_section() {
+    local name="$1"; shift
+    case ",$sections," in *",$name,"*) ;; *) return 0 ;; esac
+    if ! "$@"; then
+      printf '\n> ⚠️ section `%s` failed — this pack is incomplete.\n\n' "$name"
+    fi
+  }
+
+  render() {
+    printf '# Review context pack — %s\n\n' "$(basename "$(git rev-parse --show-toplevel)")"
+    printf '_Generated by %s %s. Diff base `%s`, %d changed files._\n\n' \
+      "$SELF" "$VERSION" "$base" "${#files[@]}"
+    printf -- '---\n\n'
+    run_section claim        section_claim "$base"
+    run_section scope        section_scope "$base" "${files[@]}"
+    run_section constitution section_constitution
+    run_section precedent    section_precedent "$base" "${files[@]}"
+    run_section history      section_history "$base" "${files[@]}"
+    run_section brain        section_brain "${files[@]}"
+    run_section bible        section_bible "${files[@]}"
+    run_section lens         section_lens "${files[@]}"
+    run_section persona      section_persona
+  }
+
+  if [ -n "$out" ]; then render > "$out"; note "wrote $out ($(wc -l < "$out" | tr -d ' ') lines)"
+  else render; fi
+}
+
+cmd_precedent() {
+  local base_arg=""
+  [ "${1:-}" = "--base" ] && { base_arg="${2:?}"; shift 2; }
+  local base; base=$(resolve_base "$base_arg")
+  local files=(); while IFS= read -r f; do files+=("$f"); done < <(changed_files "$base" | sort -u | grep -v '^$' || true)
+  [ "${#files[@]}" -gt 0 ] || { note "no changed files"; return 1; }
+  section_precedent "$base" "${files[@]}"
+}
+
+cmd_bible() {
+  local match=0 base_arg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --match) match=1; shift ;;
+      --base) base_arg="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  if [ "$match" -eq 1 ]; then
+    local base; base=$(resolve_base "$base_arg")
+    local files=(); while IFS= read -r f; do files+=("$f"); done < <(changed_files "$base" | sort -u | grep -v '^$' || true)
+    section_bible "${files[@]}"
+  else
+    local rules="$BIBLE_DIR/code-bible/rules"
+    [ -d "$rules" ] || die "no code bible at $rules"
+    local r
+    for r in "$rules"/*.md; do
+      printf '%-10s %-9s %s\n' \
+        "$(basename "$r" .md)" \
+        "$(awk -F': *' '/^verdict:/ {print $2; exit}' "$r")" \
+        "$(awk '/^# / {sub(/^# /,""); print; exit}' "$r")"
+    done
+  fi
+}
+
+# Mine real PR review threads into the adjudication corpus. Every entry is a
+# finding paired with what a human actually did about it — the only honest
+# source for "which of these findings are worth making".
+cmd_harvest() {
+  local repo="${1:?usage: $SELF harvest REPO [--host HOST] [--prs N]}"; shift
+  local host="" prs=60 prs_list=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host="${2:?}"; shift 2 ;;
+      --prs) prs="${2:?}"; shift 2 ;;
+      --prs-list) prs_list="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  have gh || die "harvest needs the gh CLI"
+  have jq || die "harvest needs jq"
+  if [ -z "$host" ]; then
+    host=$(git -C "$REPOS_DIR/$repo" remote get-url origin 2>/dev/null \
+      | sed -E 's#^https?://([^/]+)/.*#\1#; s#^git@([^:]+):.*#\1#') || true
+  fi
+  [ -n "$host" ] || die "could not resolve a host; pass --host"
+  # Accept an explicit owner/repo slug so a repo that is not cloned locally can
+  # still be harvested -- the evidence that matters is not always in a repo you
+  # have a checkout of.
+  local owner_repo
+  case "$repo" in
+    */*) owner_repo="$repo" ;;
+    *) owner_repo=$(git -C "$REPOS_DIR/$repo" remote get-url origin 2>/dev/null \
+         | sed -E 's#^https?://[^/]+/##; s#^git@[^:]+:##; s#\.git$##') \
+         || die "no origin for $repo (pass owner/repo explicitly if it is not cloned)" ;;
+  esac
+  [ -n "$owner_repo" ] || die "could not resolve a slug for $repo"
+
+  local out="$BIBLE_DIR/adjudications.jsonl"
+  mkdir -p "$(dirname "$out")"
+  note "harvesting $owner_repo from $host (last $prs PRs) -> $out"
+
+  # The API caps per_page at 100 regardless of what you ask for, and
+  # sort=updated is NOT monotonic in PR number -- so a single unpaginated page
+  # silently omits PRs that are neither recent nor low-numbered. Four PRs the
+  # corpus already cites were unreachable at every --prs value because of this.
+  # --paginate walks the pages; --prs-list fetches exact PRs regardless of window.
+  local nums
+  if [ -n "$prs_list" ]; then
+    nums=$(printf '%s\n' "${prs_list//,/ }" | tr ' ' '\n' | grep -E '^[0-9]+$' || true)
+    note "explicit PR list: $(printf '%s' "$nums" | tr '\n' ' ')"
+  else
+    nums=$(gh api --hostname "$host" --paginate \
+      "repos/${owner_repo}/pulls?state=all&per_page=100&sort=updated&direction=desc" \
+      --jq '.[].number' 2>/dev/null | grep -E '^[0-9]+$' | awk -v n="$prs" 'NR<=n' || true)
+  fi
+  [ -n "$nums" ] || die "no PRs resolved for $owner_repo"
+
+  local tmp="$WORK/harvest.jsonl" threads="$WORK/threads.jsonl"
+  : > "$tmp"; : > "$threads"
+  local n
+  while IFS= read -r n; do
+    gh api --hostname "$host" "repos/${owner_repo}/pulls/${n}/comments?per_page=100" \
+      --jq ".[] | {repo: \"${owner_repo}\", pr: ${n}, id: .id, reply_to: .in_reply_to_id,
+                   who: .user.login, path: .path, body: .body}" 2>/dev/null || true
+
+    # Thread state, which is the adjudication signal that actually matters.
+    # isOutdated means the code at that line changed after the comment -- a
+    # silent fix, which is how most correct findings get accepted. isResolved
+    # means somebody explicitly closed the thread. Neither leaves a reply.
+    local owner="${owner_repo%%/*}" name="${owner_repo##*/}"
+    gh api --hostname "$host" graphql -f query="
+      { repository(owner:\"${owner}\", name:\"${name}\") {
+          pullRequest(number:${n}) {
+            reviewThreads(first:100) { nodes {
+              isResolved isOutdated
+              comments(first:1){ nodes { databaseId } } } } } } }" 2>/dev/null \
+      | jq -c '.data.repository.pullRequest.reviewThreads.nodes[]?
+               | select(.comments.nodes[0].databaseId != null)
+               | {root: .comments.nodes[0].databaseId, resolved: .isResolved, outdated: .isOutdated}' \
+        2>/dev/null >> "$threads" || true
+  done <<< "$nums" >> "$tmp"
+
+  # Record EVERY root review comment, replied to or not.
+  #
+  # An earlier version kept only threads that had a reply, on the theory that a
+  # thread with no reply carries no verdict. That was wrong twice over. Silence
+  # is not refutation: the most clearly-correct findings are the ones least
+  # likely to draw a reply, because the author just pushes a fix. Keeping only
+  # argued threads therefore selects FOR contested and wrong findings and
+  # against obvious ones. And it discarded the evidence outright rather than
+  # down-weighting it, so the loss was unrecoverable without a re-harvest.
+  #
+  # `adjudication` now carries the real signal, in descending strength:
+  #   replied      an author wrote a verdict
+  #   code-changed the diff at that line moved afterwards (isOutdated) -- a silent fix
+  #   resolved     thread explicitly closed with no reply
+  #   pending      none of the above yet. On a day-old PR this means "too early",
+  #                NOT "worthless". Weight it as unknown, never as refuted.
+  jq -c -s --slurpfile th "$threads" '
+    ($th | map({key: (.root|tostring), value: .}) | from_entries) as $state
+    | (map(select(.reply_to != null)) | group_by(.reply_to)
+       | map({key: (.[0].reply_to|tostring), value: map({who, body})}) | from_entries) as $replies
+    | map(select(.reply_to == null))
+    | map(. as $r
+          | ($replies[($r.id|tostring)] // []) as $rep
+          | ($state[($r.id|tostring)] // {}) as $st
+          | {repo: $r.repo, pr: $r.pr, path: $r.path, by: $r.who, id: $r.id,
+             finding: $r.body, replies: $rep,
+             resolved: ($st.resolved // null), outdated: ($st.outdated // null),
+             adjudication: (if ($rep|length) > 0 then "replied"
+                            elif $st.outdated == true then "code-changed"
+                            elif $st.resolved == true then "resolved"
+                            else "pending" end)})
+    | .[]
+  ' "$tmp" >> "$out"
+
+  # Harvest is append-only and re-runnable, so the same thread arrives again
+  # every time its PR is still inside the window. jq emits keys in a fixed
+  # order, which makes whole-line dedup exact.
+  sort -u "$out" -o "$out"
+  note "corpus now $(wc -l < "$out" | tr -d ' ') unique threads"
+}
+
+# Quantitative backbone for evidence weighting: which repos are in scope, and
+# how big a "normal" change is for the people whose work is worth learning from.
+cmd_mine() {
+  local sub="${1:-}"; shift || true
+  local me="${CTXPACK_ME:-$(git config user.email 2>/dev/null || echo unknown)}"
+  local authors="${CTXPACK_AUTHORS:-}"
+  local only_repos=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --me) me="${2:?}"; shift 2 ;;
+      --authors) authors="${2:?}"; shift 2 ;;
+      --repos) only_repos="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  case "$sub" in
+    scope)
+      # In-scope == I have committed there. Patterns from code I do not touch
+      # are not actionable.
+      #
+      # The identity is echoed because `git config user.email` is per-repo:
+      # run from a repo with a personal identity, the default silently counts
+      # the wrong author and reports a plausible, wrong scope. Pass a
+      # comma-separated list to --me when you commit under more than one.
+      printf 'identity: %s   (override with --me a@x,b@y)\n\n' "$me"
+      printf '%-34s %-8s %s\n' "repo" "mine" "total"
+      local d n tot addr sum
+      for d in "$REPOS_DIR"/*/; do
+        d="${d%/}"; [ -d "$d/.git" ] || continue
+        # `|| true` on every count: ~/repos contains worktrees, gate clones and
+        # a node_modules whose git calls exit non-zero. Under `set -e` +
+        # pipefail an unguarded assignment aborts the whole sweep inside this
+        # subshell, and the truncated list still looks like a complete answer.
+        sum=0
+        for addr in ${me//,/ }; do
+          n=$( { git -C "$d" log --author="$addr" --oneline 2>/dev/null || true; } | wc -l | tr -d ' ')
+          sum=$(( sum + ${n:-0} ))
+        done
+        [ "$sum" -gt 0 ] || continue
+        tot=$( { git -C "$d" log --oneline 2>/dev/null || true; } | wc -l | tr -d ' ')
+        printf '%-34s %-8s %s\n' "$(basename "$d")" "$sum" "$tot"
+      done | sort -k2 -rn
+      ;;
+    sizes)
+      [ -n "$authors" ] || die "mine sizes needs --authors a,b,c (or CTXPACK_AUTHORS)"
+      local tsv="$WORK/commits.tsv"; : > "$tsv"
+      local a d
+      for a in ${authors//,/ }; do
+        for d in "$REPOS_DIR"/*/; do
+          d="${d%/}"; [ -d "$d/.git" ] || continue
+          # Solo repos (dotfiles, personal tooling) are not comparable evidence:
+          # nobody else commits there, so they only skew my own distribution.
+          # --repos restricts the sweep to the shared repos that matter.
+          if [ -n "$only_repos" ]; then
+            case ",$only_repos," in *",$(basename "$d"),"*) ;; *) continue ;; esac
+          fi
+          # --format needs a '%' or git reads the string as a *named* pretty
+          # format and dies with "invalid --pretty format".
+          git -C "$d" log --no-merges --author="${a}" --format="__C__%h" --numstat 2>/dev/null \
+          | awk -v OFS='\t' -v A="$a" '
+              /^__C__/ { if (seen) print A, ch, nf; seen=1; ch=0; nf=0; next }
+              NF==3 && $1 ~ /^[0-9]+$/ {
+                if ($3 ~ /(lock|\.sum|generated|\.pb\.|_pb2)/) next
+                ch += $1 + $2; nf++
+              }
+              END { if (seen) print A, ch, nf }' || true
+          # `|| true`: ~/repos holds worktrees and gate clones whose git calls
+          # exit 128; under pipefail that would abort the whole sweep.
+        done
+      done >> "$tsv"
+      printf '%-14s %-7s %-8s %-8s %-11s %s\n' author n median p90 "<=50 lines" ">500 lines"
+      for a in ${authors//,/ }; do
+        awk -F'\t' -v a="$a" '$1==a {print $2}' "$tsv" | sort -n \
+        | awk -v a="$a" '{v[NR]=$1} END {
+            if (NR==0) next
+            p=0; b=0
+            for (i=1;i<=NR;i++) { if (v[i]<=50) p++; if (v[i]>500) b++ }
+            printf "%-14s %-7d %-8d %-8d %-11s %s\n", a, NR, v[int(NR/2)+1],
+                   v[int(NR*0.9)+1], sprintf("%.0f%%",100*p/NR), sprintf("%.0f%%",100*b/NR)
+          }'
+      done
+      printf '\nChurn = added+deleted per non-merge commit, lock/generated excluded.\n'
+      printf 'See the corpus weighting doc: large diffs are weak evidence.\n'
+      ;;
+    outcomes)
+      # Size is a gameable proxy: you can halve every diff without improving
+      # anything. This measures what happened AFTER the merge instead.
+      #
+      # repair-rate = share of an author's non-fix commits that are followed,
+      # on at least one of the same files, by a fix-language commit within N
+      # days -- i.e. somebody had to come back and repair it.
+      #
+      # The raw rate is confounded by WHERE you work: per-repo fix-share ranges
+      # roughly 1%-17%. So each author is also scored against the volume-
+      # weighted baseline of the same repos. `ratio` is the number to read;
+      # 1.0 means "as often as the average change to this same code".
+      local win="${CTXPACK_REPAIR_WINDOW_DAYS:-30}" ev="$WORK/events.tsv"
+      : > "$ev"
+      local d db
+      for d in "$REPOS_DIR"/*/; do
+        d="${d%/}"; [ -d "$d/.git" ] || continue
+        if [ -n "$only_repos" ]; then
+          case ",$only_repos," in *",$(basename "$d"),"*) ;; *) continue ;; esac
+        fi
+
+        # Measure the DEFAULT BRANCH, not HEAD. A repo checked out on a feature
+        # branch would otherwise count unmerged local commits as landed work --
+        # which silently inflates whoever has branches checked out (me).
+        db=$(git -C "$d" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
+        if [ -z "$db" ]; then
+          for c in origin/main origin/master main master; do
+            git -C "$d" rev-parse -q --verify "$c" >/dev/null 2>&1 && { db="$c"; break; }
+          done
+        fi
+        [ -n "$db" ] || continue
+
+        # --first-parent restricts to the spine of landings. Every repo here uses
+        # merge commits, so plain `log --no-merges` also returns PR-BRANCH
+        # commits -- and a "fix review comments" commit pushed to a branch would
+        # then score as a repair of the commit it was written alongside. Those
+        # are pre-merge fixups, not repairs.
+        #
+        # `-m --first-parent` gives each merge's diff against the first parent,
+        # i.e. exactly what main gained when that PR landed. On GHE the merge
+        # commit's author is the PR author, so %ae attributes correctly.
+        { git -C "$d" log --first-parent -m --name-only \
+            --format="__C__%H|%at|%ae|%s" "$db" 2>/dev/null || true; } \
+        | awk -v OFS='\t' -v R="$(basename "$d")" '
+            /^__C__/ {
+              split(substr($0,6), p, "|"); h=p[1]; ep=p[2]; ae=p[3]
+              s=""; for (i=4; i<=length(p); i++) s = s (i>4 ? "|" : "") p[i]
+              # Automation lands most dependency-lock traffic; counting it as an
+              # engineer flooded the earlier table with a bot at rank 3.
+              skip = (ae ~ /(\[bot\]|noreply|^builds@|^msrc@)/) ? 1 : 0
+              gsub(/@.*/, "", ae)
+              isfix = (tolower(s) ~ /^(revert|fix|hotfix|bugfix)|\bfix(es|ed)?\b|\brevert|\bregression|\bbroke|follow.?up|\bmissed\b|\boops\b|\bcorrect/) ? 1 : 0
+              next
+            }
+            NF>0 && h!="" && !skip {
+              if ($0 ~ /(lock|\.sum|generated|\.pb\.|_pb2)/) next
+              print $0, ep, ae, isfix, R":"h
+            }' >> "$ev" || true
+      done
+      [ -s "$ev" ] || die "no history collected"
+      sort -t"$(printf '\t')" -k1,1 -k2,2n "$ev" \
+      | awk -F'\t' -v WIN="$win" '
+          # Called once per file, with the landings for that file in time order.
+          #
+          # Two baselines come out of this. The repo baseline asks "how often does
+          # a landing in this repo get repaired". The FILE baseline asks "how often
+          # does a landing touching these particular files get repaired" -- which is
+          # the control that actually matters, because a file a dozen people edit
+          # generates repairs belonging to nobody, and the repo average cannot see
+          # that.
+          function flush() {
+            L=0; R=0
+            for (i=1; i<=n; i++) {
+              if (fx[i]) continue
+              split(hs[i], rp, ":")
+              key = au[i] "\x1f" hs[i]; seen[key]=1; kr[key]=rp[1]
+              L++
+              hit = 0
+              for (j=i+1; j<=n; j++) {
+                if (ep[j]-ep[i] > WIN*86400) break
+                if (fx[j] && hs[j] != hs[i]) { hit=1; break }
+              }
+              if (hit) { rep[key]=1; R++ }
+              order[L] = key
+            }
+            # Per-file repair rate, then fold it into each landing that touched
+            # this file. Files are treated as independent, so the expected repair
+            # probability for one landing is 1 - PROD(1 - rate_f) -- the same
+            # "any file counts" semantics the observed number uses.
+            # (No apostrophes in this awk block: it is inside a single-quoted
+            # shell string and one would terminate the program.)
+            if (L > 0) {
+              rate = R / L
+              if (rate > 0.999) rate = 0.999
+              for (i=1; i<=L; i++) {
+                k2 = order[i]
+                if (!(k2 in prod)) prod[k2] = 1
+                prod[k2] *= (1 - rate)
+              }
+            }
+            n=0
+          }
+          { if ($1 != cur) { flush(); cur=$1 }
+            n++; ep[n]=$2; au[n]=$3; fx[n]=$4; hs[n]=$5 }
+          END {
+            flush()
+            for (k in seen) {
+              split(k, a, "\x1f"); r=kr[k]
+              tot[a[1] "\x1f" r]++; rtot[r]++
+              if (k in rep) { bad[a[1] "\x1f" r]++; rbad[r]++ }
+              # Expected repairs for this landing given only which files it touched.
+              fexp[a[1]] += (k in prod) ? (1 - prod[k]) : 0
+              who[a[1]]=1
+            }
+            printf "%-14s %-9s %-9s %-9s %-10s %-8s %-10s %s\n",
+                   "author","landings","repaired","raw-rate","repo-base","repo-r","file-base","file-r"
+            for (a_ in who) {
+              N=0; B=0; exp_=0
+              for (k in tot) {
+                split(k, p, "\x1f"); if (p[1] != a_) continue
+                N += tot[k]; B += (bad[k]+0)
+                exp_ += tot[k] * ((rbad[p[2]]+0) / rtot[p[2]])
+              }
+              if (N < 30) continue
+              raw = 100*B/N; base = 100*exp_/N; fbase = 100*(fexp[a_]+0)/N
+              printf "%-14s %-9d %-9d %-9s %-10s %-8s %-10s %s\n", a_, N, B,
+                     sprintf("%.1f%%", raw), sprintf("%.1f%%", base),
+                     sprintf("%.2f", (base>0 ? raw/base : 0)),
+                     sprintf("%.1f%%", fbase),
+                     sprintf("%.2f", (fbase>0 ? raw/fbase : 0))
+            }
+          }' | { IFS= read -r hdr; printf '%s\n' "$hdr"; sort -k8 -n; }
+      printf '\nA "landing" is one first-parent commit on the default branch: a merged PR\n'
+      printf 'or a direct push. Repaired = a LATER landing whose subject reads like a fix\n'
+      printf 'touched one of the same files within %s days. Bots excluded.\n' "$win"
+      printf 'ratio <1.0 = repaired less often than the average landing in the same repos.\n'
+      printf 'Confounders: shared hot files inflate everyone (control is per-repo, not\n'
+      printf 'per-file), and a conventional-commit `fix:` for an unrelated bug can\n'
+      printf 'false-positive. Quote no figure without its n and baseline.\n'
+      ;;
+    *)
+      die "usage: $SELF mine scope | sizes --authors a,b | outcomes [--repos x,y]"
+      ;;
+  esac
+}
+
+# Reading order over the harvested findings. RETRIEVAL, NOT RANKING.
+#
+# Every quantitative layer in this corpus turned out to be a proxy that inverted
+# what it was supposed to measure, so evidence is now selected by reading it. The
+# corpus is small enough for that: a few hundred human findings, median ~120
+# characters. This just puts the ones most likely to carry a transferable insight
+# first.
+#
+# Deliberately NOT used for ordering: adjudication outcome (a rejected finding
+# produced one of the strongest rules in the bible) and length (the best comments
+# here are one-liners).
+cmd_read() {
+  local min=2 who="human"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --min) min="${2:?}"; shift 2 ;;
+      --all) who="all"; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  local adj="$BIBLE_DIR/adjudications.jsonl"
+  [ -f "$adj" ] || die "no corpus at $adj"
+
+  jq -r --arg who "$who" --argjson min "$min" '
+    select(.by != null)
+    | select(if $who == "human" then (.by | test("\\[bot\\]") | not) else true end)
+    | (.finding // "" | gsub("\\s+"; " ")) as $b
+    | select(($b | length) > 25 and ($b | length) < 4000)
+    | [ ($b | test("[0-9]+ *(k|ms|MB|GB|KiB|%|x|rps|qps|days?|hours?|min)\\b|[0-9]{3,}")),
+        ($b | test("[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][A-Z0-9]*_[A-Z0-9_]+")),
+        ($b | test("(?i)\\b(because|since|so that|which means|otherwise|leads to|causes|results in|the reason|that way)\\b")),
+        ($b | test("(?i)\\b(race|deadlock|corrupt|data loss|silent|silently|overflow|leak|stale|drift|split.?brain|unbounded|throttl|timeout|regress|starv|amplif|hot ?key|blast radius|mixed.?mode|rollback|idempot|fail open|retry)\\b")),
+        ($b | test("(?m)[1-9][.)] .*[1-9][.)] |\\b[0-9]+ of [0-9]+\\b|\\bevery other\\b|\\ball other\\b")),
+        ($b | test("(?i)\\b(instead|prefer|rather than|we could|we should|what about|why not)\\b")),
+        ($b | test("(?i)\\b(operator|on.?call|production|prod\\b|upgrade|fleet|customer)\\b"))
+      ] as $m
+    | ($m | map(select(.)) | length) as $ord
+    | select($ord >= $min)
+    | "\($ord)\t\(.by)\t\(.adjudication)\t\(.repo|split("/")|last)#\(.pr)\t\(.path // "-" | split("/") | last)\t\($b | .[0:520])"
+  ' "$adj" | sort -rn -k1,1 \
+  | awk -F'\t' '{printf "\n── [%s] %-14s %-14s %-28s %s\n%s\n", $1, $2, $3, $4, $5, $6}'
+  printf '\nOrder is a reading aid, not a quality rank. Adjudication is shown, never\n'
+  printf 'ranked on: a refuted finding can be the most valuable thing in the corpus.\n'
+}
+
+cmd_doctor() {
+  printf '%-22s %s\n' "ctxpack" "$VERSION"
+  printf '%-22s %s %s\n' "second brain" "$BRAIN_DIR" \
+    "$([ -d "$BRAIN_DIR/topics" ] && echo "(ok, $(find "$BRAIN_DIR/topics" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') topics)" || echo '(MISSING)')"
+  printf '%-22s %s %s\n' "code bible" "$BIBLE_DIR/code-bible/rules" \
+    "$([ -d "$BIBLE_DIR/code-bible/rules" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/code-bible/rules"/*.md 2>/dev/null | wc -l | tr -d ' ') rules)" || echo '(MISSING)')"
+  printf '%-22s %s %s\n' "adjudications" "$BIBLE_DIR/adjudications.jsonl" \
+    "$([ -f "$BIBLE_DIR/adjudications.jsonl" ] && echo "(ok, $(wc -l < "$BIBLE_DIR/adjudications.jsonl" | tr -d ' ') threads)" || echo '(empty)')"
+  printf '%-22s %s %s\n' "lenses" "$BIBLE_DIR/lenses" \
+    "$([ -d "$BIBLE_DIR/lenses" ] && echo "(ok, $(ls -1 "$BIBLE_DIR/lenses"/*.md 2>/dev/null | wc -l | tr -d ' ') lenses)" || echo '(MISSING)')"
+  printf '%-22s %s\n' "personas" \
+    "$([ -d "$BIBLE_DIR/personas" ] && ls -1 "$BIBLE_DIR/personas"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  local t
+  for t in git jq gh; do
+    printf '%-22s %s\n' "$t" "$(have "$t" && command -v "$t" || echo 'MISSING')"
+  done
+}
+
+# ----------------------------------------------------------------- main ----
+
+case "${1:-}" in
+  build)     shift; cmd_build "$@" ;;
+  mine)      shift; cmd_mine "$@" ;;
+  read)      shift; cmd_read "$@" ;;
+  precedent) shift; cmd_precedent "$@" ;;
+  bible)     shift; cmd_bible "$@" ;;
+  harvest)   shift; cmd_harvest "$@" ;;
+  doctor)    shift; cmd_doctor "$@" ;;
+  -h|--help|help|"") usage ;;
+  --version) printf '%s\n' "$VERSION" ;;
+  *) die "unknown command: $1 (try --help)" ;;
+esac
