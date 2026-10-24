@@ -14,8 +14,9 @@ registries and private workspace policy in a local overlay.
 
 ## Guardrails
 
-- Default to Ship Mode: crewmates push feature branches and open PRs once their
-  checks pass; merging and deploying still wait for the user.
+- Default to Ship Mode: crewmates push feature branches, open PRs and enable
+  auto-merge once their checks pass, preferring one PR of stacked commits over
+  several PRs to save CI. Deploying still waits for the user.
 - Never bypass repository guards or validation gates.
 - Treat optional yolo behavior as unavailable unless the repository's branch
   policy explicitly enables it.

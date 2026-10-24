@@ -143,12 +143,20 @@ uncommitted in a worktree is a cost, not a safety margin.
 - Work on a feature branch, never a protected one. Commit in small, coherent
   steps as the work verifies.
 - When the requested change works and its proportional checks pass, push the
-  feature branch and open or update its PR without waiting to be asked. Follow
-  the repository's own delivery rules (direct-push targets, CI batching).
+  feature branch, open or update its PR, and enable auto-merge
+  (`gh pr merge --auto`) without waiting to be asked. Follow the repository's
+  own delivery rules (direct-push targets, CI batching).
+- CI minutes cost money. Default to one PR carrying a stack of small,
+  reviewable commits, merged with rebase so each commit lands on its own.
+  Split into separate stacked PRs only when a layer must merge or be reviewed
+  independently, and then auto-merge bottom-up so no layer merges into its
+  parent branch.
+- Batch follow-up fixes into the open PR as new commits instead of opening
+  another PR for each.
 - Fix problems found after shipping with follow-up commits or PRs rather than
   holding the original back.
-- Merging, deploying, production changes, and publishing comments or messages
-  still need my explicit ask.
+- Deploying, production changes, and publishing comments or messages still
+  need my explicit ask.
 - Preserve unrelated and pre-existing worktree changes; commit only this
   task's files.
 
