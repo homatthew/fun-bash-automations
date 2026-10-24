@@ -14,7 +14,8 @@ registries and private workspace policy in a local overlay.
 
 ## Guardrails
 
-- Default to Local Mode until the user explicitly requests delivery.
+- Default to Ship Mode: crewmates push feature branches and open PRs once their
+  checks pass; merging and deploying still wait for the user.
 - Never bypass repository guards or validation gates.
 - Treat optional yolo behavior as unavailable unless the repository's branch
   policy explicitly enables it.

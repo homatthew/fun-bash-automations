@@ -137,12 +137,24 @@ Most of my work is Python and backend systems.
 
 ## Git Modes
 
-Local Mode is the default.
+Ship Mode is the default. Ship first and fix forward; finished work sitting
+uncommitted in a worktree is a cost, not a safety margin.
 
-- Edit and verify locally, then leave the worktree review-ready.
-- Do not stage, commit, sync, push, open a PR, or publish comments unless I ask
-  for that action in the current task or invoke an explicit delivery workflow.
-- Preserve unrelated and pre-existing worktree changes.
+- Work on a feature branch, never a protected one. Commit in small, coherent
+  steps as the work verifies.
+- When the requested change works and its proportional checks pass, push the
+  feature branch and open or update its PR without waiting to be asked. Follow
+  the repository's own delivery rules (direct-push targets, CI batching).
+- Fix problems found after shipping with follow-up commits or PRs rather than
+  holding the original back.
+- Merging, deploying, production changes, and publishing comments or messages
+  still need my explicit ask.
+- Preserve unrelated and pre-existing worktree changes; commit only this
+  task's files.
+
+Local Mode begins when I ask to keep work local, not commit, or review before
+committing. Edit and verify, then leave the worktree review-ready without
+staging, committing, syncing, pushing, or opening a PR.
 
 Remote Scratch Mode begins only when I ask for a scratch backup or remote
 handoff. It permits checkpoint commits only on configured non-delivery scratch
