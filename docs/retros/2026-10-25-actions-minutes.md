@@ -165,13 +165,14 @@ workflow and the corresponding instruction; leave required Linux gates unchanged
 
 ## Policy: use less, never pay more
 
-- CS:GO: macOS/Windows only via workflow_dispatch; retain both Linux jobs, main-only
-  push and PR triggers, workflow/ref cancellation. Add 10-minute Linux/macOS and
+- CS:GO: Windows only via workflow_dispatch; macOS PR/main checks use the existing
+  private-only `mini-csgo` runner, labels `[self-hosted, macOS, ARM64, csgo-mac]`.
+  Keep workflow/ref cancellation. Add 10-minute Linux/macOS and
   5-minute Windows timeouts, pinned toolchain and pip caches. Ignore only README.md and AGENTS.md changes; docs/ contains frozen and tested
   Markdown contracts as well as executable manifests.
   Keep the orchestrator's `/tmp/csgo-gate.sh` unchanged and validate against it.
 - No workflow changes in other personal repos: none recorded October activity.
-- Global/repo agent rules: local checks first, one complete push, expensive OSs on
+- Global/repo agent rules: local checks first, one complete push, hosted expensive OSs on
   demand, no CI reruns, no OS matrices on PRs,
   usage check before a large wave. Keep both $0 budgets permanently; no paid
   runners or nightly expensive OS jobs.
@@ -195,10 +196,22 @@ workflow and the corresponding instruction; leave required Linux gates unchanged
   report to reconcile this estimate. **Leave both $0 budgets unchanged.** Enable
   included-usage/budget notifications if available, and wait for the allowance
   reset to resume private hosted CI. Do not pay for extra minutes or runners.
-- Optional user decisions only: make csgo-bots public (review source/privacy first)
-  to get free standard hosted runs, or use the Mac as a self-hosted macOS runner.
-  The simpler free option is running the existing local gate on the Mac; no
-  self-hosted service or visibility change is installed by this work.
+- The user has registered `mini-csgo` under `~/actions-runner/csgo-bots` as a
+  launchd user service, scoped to private csgo-bots only. This work changes only
+  workflow routing, not its installation. Use unique per-run checkouts, in-repo
+  venvs and runner.temp scratch; clean up only those job-owned paths. No sudo or
+  global brew/pip installs. The first real run must verify this integration; the
+  user will confirm self-hosted minutes show no charge in billing afterward.
+- Python quality, frozen-check, discovery and goldens pass on the Mac. The pinned
+  SourcePawn compiler is a Linux ELF executable; build/bootstrap/prepare also use
+  GNU `sha256sum` and `mv --target-directory`. Retain Linux compilation/packaging
+  coverage until a reviewed container-based alternative is chosen. Moving portable
+  Python quality to the Mac avoids paying for a second Linux job.
+- **Never route cozycommons/cc or any public repo to this Mac runner.** Public fork
+  PRs must never execute code on the user's machine. If the user chooses to make
+  csgo-bots public, remove self-hosted routing first. Public visibility remains a
+  user option, not an automatic change.
+
 
 
 Evidence retained locally under `~/.local/share/actions-retro/2026-10-25/`: repo
