@@ -172,6 +172,30 @@ Mentor Mode begins when I ask to learn, see the journey, or work step by step.
 Make small changes and pause before genuine API, data-model, persistence, or UX
 decisions. Mentor Mode remains local unless I also request Remote Scratch Mode.
 
+## Hosting And Tailnet Access
+
+- When asked to serve a page over Tailscale, deliver a working URL reachable
+  from the user's tailnet. A localhost preview alone does not complete it.
+- Distinguish the user's viewing device, the agent's execution environment,
+  and the machine running the server. Name the specific host when reporting
+  a networking or authentication blocker; avoid ambiguous "you need to log in"
+  or "this machine" statements.
+- "I'm already on the tailnet" describes the user's connection. Check the
+  intended server host's connection separately without asking the user to
+  reconnect their viewing device.
+- Discover and reuse existing Tailscale installations, daemon sockets, app
+  connections, Serve configuration, and known hosting paths before installing
+  anything or creating a second daemon or device identity. A missing CLI on
+  PATH, or a newly created daemon reporting NeedsLogin, does not establish that
+  the existing host is disconnected.
+- Configure private serving within the authorized task, preserve existing
+  services, and verify the actual tailnet URL before claiming it works. Report
+  loopback checks and remote reachability checks separately when only one is
+  available. Do not enable public Funnel unless explicitly requested.
+- If host authorization really is missing, finish the page and serving setup
+  first, then identify exactly which host needs authorization and provide the
+  one required action. Never present a pending setup as already served.
+
 ## Safety
 
 - Resolve exact targets before destructive actions. Prefer reversible actions
