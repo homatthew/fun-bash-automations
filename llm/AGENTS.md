@@ -146,6 +146,12 @@ uncommitted in a worktree is a cost, not a safety margin.
   feature branch, open or update its PR, and enable auto-merge
   (`gh pr merge --auto`) without waiting to be asked. Follow the repository's
   own delivery rules (direct-push targets, CI batching).
+- CI costs money: use PR checks for feature branches, main-only push checks,
+  per-workflow/ref cancellation, docs-only filters, tight timeouts and caches.
+  macOS/Windows jobs run only on demand. Check usage before a large agent wave;
+  batch fixes/rebases before pushing. Never rerun billing-blocked jobs; use local
+  gates instead. Never rerun CI. No OS matrices on PRs. Keep $0 budgets: use less, never pay
+  more. Run checks locally before pushing; no paid runners or nightly OS jobs.
 - CI minutes cost money. Default to one PR carrying a stack of small,
   reviewable commits, merged with rebase so each commit lands on its own.
   Split into separate stacked PRs only when a layer must merge or be reviewed

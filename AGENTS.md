@@ -78,3 +78,9 @@ canonical instruction entrypoint.
   than publishing that history wholesale.
 - Move company-internal topology, private URLs, credentials, private auth,
   team-specific lore, and machine-specific overlays to `~/repos/dotfiles`.
+
+## CI costs money
+
+- Follow the CI budget rules in llm/AGENTS.md. This repository currently has no
+  Actions workflows; keep the budget watchdog local, never a scheduled Action.
+- Run `python3 tests/actions-budget-watch-test.py` for watchdog changes.
