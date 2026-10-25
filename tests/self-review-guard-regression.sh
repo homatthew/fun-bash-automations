@@ -57,7 +57,7 @@ out="$(run_guard)"
 grep -q '"decision":"block"' <<<"$out" || { echo "expected a block on a sensitive path, got: $out" >&2; exit 1; }
 grep -q 'sensitive surface' <<<"$out" || { echo "expected the trigger to be named: $out" >&2; exit 1; }
 grep -q 'self-review-guard.sh --mark-reviewed' <<<"$out" || { echo "block reason must name the mark command: $out" >&2; exit 1; }
-grep -q 'gpt-5.6-sol' <<<"$out" || { echo "block reason must name the reviewer roster: $out" >&2; exit 1; }
+grep -q 'gpt-6.1-sol' <<<"$out" || { echo "block reason must name the reviewer roster: $out" >&2; exit 1; }
 grep -q 'skipping review' <<<"$out" || { echo "block reason must bless the opt-out: $out" >&2; exit 1; }
 
 # --- same diff again: must not block twice -----------------------------------

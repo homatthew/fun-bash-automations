@@ -465,7 +465,7 @@ claim_notify "$hash" || exit 0
 
 reason="This diff looks worth a second pair of eyes before you finish - $trigger ($(changed_summary | tr -d '\n')), in $(git rev-parse --show-toplevel 2>/dev/null || pwd).
 
-Send the diff to an independent reviewer model (Codex gpt-5.6-sol, or Cursor claude-opus-5-thinking-high / kimi-k3-high via the cursor-sub-review skill - see the \`ship\` skill), act on anything real it finds, then record it:
+Send the diff to an independent reviewer model (the newest Codex sol model, currently gpt-6.1-sol, or Cursor claude-opus-5-thinking-high / kimi-k3-high via the cursor-sub-review skill - see the \`ship\` skill), act on anything real it finds, then record it:
 
   ~/.claude/hooks/self-review-guard.sh --mark-reviewed
 

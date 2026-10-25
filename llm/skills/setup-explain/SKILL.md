@@ -95,7 +95,7 @@ Ceremony scales with risk, not habit:
 - **Tier 0 — nothing.** `wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`, and
   any `*yolo/` branch. Just make it run. Review the end state once, later.
 - **Tier 1 — default.** Ordinary feature branch: repo tests/lint + **one**
-  independent-model review leg (Codex `gpt-5.6-sol`). Seconds to a minute.
+  independent-model review leg (the newest Codex sol model, `gpt-6.1-sol` as of 2026-10-25). Seconds to a minute.
 - **Tier 2.** Three legs (+ Cursor `claude-opus-5-thinking-high` and
   `kimi-k3-high`) when the diff touches guards/auth/data-loss or is wide
   (>400 lines / >15 files).

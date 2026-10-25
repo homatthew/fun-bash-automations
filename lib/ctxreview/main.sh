@@ -30,7 +30,7 @@ SPAWN="${CTXREVIEW_CURSOR_SPAWN:-$FBA/llm/skills/cursor-sub-review/scripts/spawn
 # Resolve with `cursor-agent --list-models` / your codex + claude builds.
 CURSOR_KIMI="${CTXREVIEW_KIMI:-kimi-k3-high}"
 CURSOR_GROK="${CTXREVIEW_GROK:-cursor-grok-4.6-high}"
-CODEX_SOL="${CTXREVIEW_SOL:-gpt-5.6-sol}"
+CODEX_SOL="${CTXREVIEW_SOL:-gpt-6.1-sol}"
 CLAUDE_OPUS="${CTXREVIEW_OPUS:-}"
 CLAUDE_OPUS_LABEL="${CLAUDE_OPUS:-managed default (Opus 5 1M)}"
 

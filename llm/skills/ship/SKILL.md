@@ -67,7 +67,7 @@ is what makes a workflow something people route around.
 | Tier | When | Legs |
 | --- | --- | --- |
 | **0 — none** | `wip/`, `scratch/`, `gnhf/`, `tmp/`, `experiment/`, `*yolo/` branches; throwaway spikes | none |
-| **1 — one leg** *(default)* | Ordinary feature/fix branch headed for a PR | Codex `gpt-5.6-sol` |
+| **1 — one leg** *(default)* | Ordinary feature/fix branch headed for a PR | Codex sol (newest) |
 | **2 — three legs** | Risky or wide (below), or on request | + Cursor `claude-opus-5-thinking-high`, Cursor `kimi-k3-high` |
 
 **Escalate to tier 2** when the diff touches security guards, hooks, auth,
@@ -82,9 +82,13 @@ verify, not as truth.
 
 | Model | How |
 | --- | --- |
-| Codex `gpt-5.6-sol` | `codex:codex-rescue` subagent, or `codex exec` |
+| Codex sol — always the newest (`gpt-6.1-sol` as of 2026-10-25) | `codex:codex-rescue` subagent, or `codex exec -m <model>` |
 | `claude-opus-5-thinking-high` | `cursor-sub-review` skill |
 | `kimi-k3-high` | `cursor-sub-review` skill |
+
+"Sol" means the newest `gpt-*-sol` model, never a version remembered from
+this file. Check the live model list before each review leg, pass it with
+`-m`, and name the model that actually ran in your report.
 
 **Launch past the user's aliases.** `codex` and `claude` are aliased in the
 user's shell to `--dangerously-bypass-approvals-and-sandbox` and
