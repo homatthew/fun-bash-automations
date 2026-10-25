@@ -165,10 +165,10 @@ workflow and the corresponding instruction; leave required Linux gates unchanged
 
 ## Policy: use less, never pay more
 
-- CS:GO: Windows only via workflow_dispatch; macOS PR/main checks use the existing
+- CS:GO: all hosted Linux/Windows jobs are workflow_dispatch-only; default checks use the existing
   private-only `mini-csgo` runner, labels `[self-hosted, macOS, ARM64, csgo-mac]`.
-  Keep workflow/ref cancellation. Add 10-minute Linux/macOS and
-  5-minute Windows timeouts, pinned toolchain and pip caches. Ignore only README.md and AGENTS.md changes; docs/ contains frozen and tested
+  Keep workflow/ref cancellation. Hosted Linux/Windows timeouts are 10/5 minutes;
+  the self-hosted Mac is bounded at 20 minutes. Preserve pinned toolchain/pip caches. Ignore only README.md and AGENTS.md changes; docs/ contains frozen and tested
   Markdown contracts as well as executable manifests.
   Keep the orchestrator's `/tmp/csgo-gate.sh` unchanged and validate against it.
 - No workflow changes in other personal repos: none recorded October activity.
@@ -200,13 +200,25 @@ workflow and the corresponding instruction; leave required Linux gates unchanged
   launchd user service, scoped to private csgo-bots only. This work changes only
   workflow routing, not its installation. Use unique per-run checkouts, in-repo
   venvs and runner.temp scratch; clean up only those job-owned paths. No sudo or
-  global brew/pip installs. The first real run must verify this integration; the
-  user will confirm self-hosted minutes show no charge in billing afterward.
-- Python quality, frozen-check, discovery and goldens pass on the Mac. The pinned
+  global brew/pip installs. The real self-hosted run at f350dd1 passed after the
+  timeout fix; the user will confirm zero self-hosted charges in billing.
+- Python quality, frozen-check, discovery and goldens pass on the Mac and are
+  consolidated into its default job. The pinned
   SourcePawn compiler is a Linux ELF executable; build/bootstrap/prepare also use
   GNU `sha256sum` and `mv --target-directory`. Retain Linux compilation/packaging
-  coverage until a reviewed container-based alternative is chosen. Moving portable
-  Python quality to the Mac avoids paying for a second Linux job.
+  coverage only on manual dispatch until a reviewed container-based alternative is
+  chosen. No hosted runner is required for normal private-repo PR/main checks.
+- The first mini-csgo job successfully checked out, created its venv and ran tests,
+  then reached the original 10-minute limit while tests were still passing.
+  Cleanup succeeded. The Mac-only limit was raised to 20 minutes; no hosted limit
+  or billing budget was increased, and no unchanged CI run was retried.
+- The other private repo with CI uses its own separately registered Mac runner.
+  Its Python 3.12 contract tests run there by default. Optional Ubuntu/Windows checks require
+  workflow_dispatch with `hosted_os_matrix: true`; no hosted macOS matrix remains.
+- **Private homatthew repos default to their own registered Mac runner; hosted
+  runners are dispatch-only.** Personal accounts cannot share repository runners.
+  A new private repo with CI needs a separate runner registration, not another
+  repo's label. Existing runner services are not installed or reconfigured here.
 - **Never route cozycommons/cc or any public repo to this Mac runner.** Public fork
   PRs must never execute code on the user's machine. If the user chooses to make
   csgo-bots public, remove self-hosted routing first. Public visibility remains a

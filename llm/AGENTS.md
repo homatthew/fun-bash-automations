@@ -148,8 +148,9 @@ uncommitted in a worktree is a cost, not a safety margin.
   own delivery rules (direct-push targets, CI batching).
 - CI costs money: use PR checks for feature branches, main-only push checks,
   per-workflow/ref cancellation, docs-only filters, tight timeouts and caches.
-  Hosted macOS/Windows jobs run only on demand; private-only self-hosted macOS
-  is allowed. Never route public repos (including cozycommons/cc) or their fork PRs
+  Private homatthew repos default to their own self-hosted Mac runner; all hosted
+  runners are workflow_dispatch-only. Personal accounts cannot share repository
+  runners: each new private repo with CI needs its own runner registration. Never route public repos (including cozycommons/cc) or their fork PRs
   to the user's Mac runner. Check usage before a large agent wave;
   batch fixes/rebases before pushing. Never rerun billing-blocked jobs; use local
   gates instead. Never rerun CI. No OS matrices on PRs. Keep $0 budgets: use less, never pay
