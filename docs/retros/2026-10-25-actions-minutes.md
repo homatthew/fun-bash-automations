@@ -2,35 +2,39 @@
 
 ## Finding and timeline (UTC)
 
-The personal account was blocked by billing, not a failing test. The annotation
-on [main run 40208833678](https://github.com/homatthew/csgo-bots/actions/runs/40208833678)
-(created 15:50:23) says recent payments failed **or** the spending limit needs to
-increase. This does not distinguish exhausted allowance, payment failure, or a
-budget cap. At 16:17 the orchestrator investigated; at 16:18 it identified billing
-and switched to local gates. No billing settings were changed by this work.
+**Confirmed cause: homatthew's Free included Actions allowance ran out against a
+$0 budget (“Usage blocked”).** The user read the billing UI for October 1–25:
+Linux 519 min / $3.11, Windows 449 min / $4.49, macOS 3-core 70.9 min / $4.40,
+storage under $0.01; gross $12.00, billed $0. The included allowance is about $12
+(2,000 baseline Linux minutes). No billing settings were changed by this work.
+
+The annotation on [main run 40208833678](https://github.com/homatthew/csgo-bots/actions/runs/40208833678)
+(created 15:50:23) reports payment/limit blockage. At 16:17 the orchestrator
+investigated; at 16:18 it identified billing and switched to local gates.
 
 - October 14–24: estimated 1,157 weighted minutes accumulated in csgo-bots.
 - October 25 10:34: PR #16 merged macOS portability coverage after local validation.
-- October 25: another 1,142 weighted minutes, including 830 on macOS alone.
+- October 25: another estimated 1,142 weighted minutes, including an estimated 830 on macOS.
 - By 15:50: jobs were refused; subsequent blocked jobs cost zero in this estimate.
 
 ## Personal account evidence
 
 Read-only GitHub API snapshot through 17:13 UTC. All **69 homatthew repositories**
 were queried for October runs. Only private `csgo-bots` had any: 258 runs, 258
-attempts, 576 job records, 559 with executed steps. `courtside`, public
-`fun-bash-automations`, and every other repo returned zero. Dirty checkouts were
+attempts, 576 job records, 559 with executed steps. Public `fun-bash-automations` and every other repo returned zero. Dirty checkouts were
 not inspected or modified.
 
-The window is October 1–25, **not a verified billing cycle**: the billing APIs
-returned 404 and gh explicitly reported missing `user` scope. The reset date and
-actual allowance remain unverified. Run timing API returned zero billable_ms even
-for executed jobs, so it is unsuitable for this reconstruction.
+Billing UI figures above are authoritative; API timings below attribute the
+activity, not the invoice. The personal billing APIs returned 404 with missing
+`user` scope, which limits unattended monitoring but no longer leaves the incident
+cause unknown. Run timing API returned zero billable_ms for executed jobs.
+October is the UI reporting window; exact reset date should still be checked.
 
 Estimate: sum `ceil((completed_at-started_at)/60)` **per executed job**, then
 multiply Linux ×1, Windows ×2, macOS ×10. Unassigned/step-less jobs count zero.
 Timestamps can include overhead, and this is not an invoice or proof of a precise
-2,000-minute limit. Raw elapsed time was 797.27 minutes; weighted estimate 2,299.
+2,000-minute limit. Current SKU dollar prices differ from the historical OS
+multipliers; use $12.00 for the actual allowance accounting. Raw elapsed time was 797.27 minutes; weighted estimate 2,299.
 [Billing rules](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 charge the repository owner and exempt public standard runners.
 
@@ -64,17 +68,20 @@ charge the repository owner and exempt public standard runners.
 
 ## Ranked causes and agent behavior
 
-1. **Windows on routine CI: 912 weighted minutes (40%).** Many short jobs round
-   up, even when native packaging coverage was not needed for that change.
-2. **macOS on routine CI: 830 (36%).** Its 83 rounded runner minutes all occurred
-   today. Adding a locally validated portability job to every PR/main run made a
-   rapid agent merge wave disproportionately costly.
-3. **Repeated Linux checks: 557 (24%).** Both build/full-suite and Python quality
-   discovery run on Linux. Installs/downloads repeat; the build job lacked pip
-   caching, while macOS and python-quality already cached pip. No minute saving
-   from caching or overlapping test discovery is claimed without step profiling.
+1. **Windows on routine CI: 449 billed-usage minutes / $4.49 (37% of cost).**
+   About 898 weighted equivalent; job timestamps estimate 912. Many short jobs
+   round up, even when native packaging coverage is not needed for the change.
+2. **macOS on routine CI: 70.9 minutes / $4.40 (37% of cost).** About 709 weighted
+   equivalent; timestamps estimate 830. Only 7% of raw billed-usage minutes caused
+   37% of cost. Adding portability coverage to every PR/main run amplified today's
+   rapid agent wave, which cost $5.80 overall. October 18 cost $1.86 and October 23
+   $1.94; most other days were under $0.40.
+3. **Repeated Linux checks: 519 minutes / $3.11 (26% of cost).** Timestamps estimate
+   557 weighted. Build/full-suite and Python quality both discover tests. The build
+   job lacked pip caching; macOS and python-quality already cached pip. No exact
+   savings from caching or overlapping discovery are claimed without profiling.
 
-These three OS totals partition 2,299; the following behavioral costs overlap them.
+The timestamp estimates partition 2,299; the following behavioral costs overlap them.
 **53 feature-branch push runs duplicated PR-head checks: 244 weighted minutes.**
 The long-lived `setup/reproducible-rise` branch alone generated 198 runs and 1,056
 weighted minutes. Main generated 13 runs / 377 minutes. Stacks, rebases and small
@@ -97,14 +104,20 @@ API-only snapshot around 17:20 UTC: visible repos are public `cc` and public
 `/usage/summary` **succeeded with the existing token**. No scope change was needed.
 The org API reports plan `free`.
 
-Billing reports **2,223 Linux + 403 macOS raw minutes = 6,253 weighted equivalent**,
-$38.324 gross, fully discounted, **$0 net**. Of that, cc is 6,251 weighted;
-`demo-repository` and `curly-happiness-demo-repository` contribute one Linux minute
-each but are no longer returned by the repo API. Their visibility cannot now be
-verified. Public cc's standard runners consume **zero private allowance**. Against
-the Free plan's 2,000 private-minute allowance, known current repos use 0%; even
-conservatively charging both missing demos gives **2/2,000 = 0.1%**, leaving 1,998.
-This is not 313% quota consumption. Public usage explains why cc kept running.
+The user's billing UI confirms **2,223 Linux min / $13.34 + 403 macOS min /
+$24.99 = $38.33 gross, $0 billed**. API detail agrees before display rounding:
+$38.324 gross, fully discounted; 6,253 historical weighted equivalent. cc is public
+and standard runners are free, so it consumes **0% of the 2,000 private-minute
+allowance**. Its budget is also $0 / blocked, but public standard runs remain free.
+It is not at risk unless visibility or runner class changes. If cc became private,
+the October 1–25 activity represents roughly $38 of gross usage before the included
+allowance, with macOS 65% of gross cost.
+
+API detail assigns 6,251 weighted equivalent to cc and one Linux minute each to
+`demo-repository` and `curly-happiness-demo-repository`, which no longer appear in
+the repo inventory. All are fully discounted. The watchdog conservatively counts
+these two unknown-visibility minutes: an upper bound of 2/2,000 (0.1%), not a
+claim that public cc used private allowance.
 
 Per-run reconstruction: cc / CI has 237 runs, 242 attempts, 1,516 job records;
 6,272 weighted equivalent (Linux 2,252, macOS 4,020). Small differences from billing
@@ -146,39 +159,47 @@ Five extra rerun attempts contributed 176 weighted minutes, already included abo
 | 25 | 345 | 0 | 345 |
 
 cc already selects projects, restricts push to main, has job timeouts, and cancels
-superseded PRs. **No org guardrail PR is proposed:** its public-runner activity
-is not burning the private allowance. Reassess before making a repo private or
-adopting paid/larger runners.
+superseded PRs. Current main already removed macOS from the routine Crowdset
+matrix. Per the user's request, add only a separate on-demand macOS portability
+workflow and the corresponding instruction; leave required Linux gates unchanged.
 
-## Changes and remaining user actions
+## Policy: use less, never pay more
 
 - CS:GO: macOS/Windows only via workflow_dispatch; retain both Linux jobs, main-only
   push and PR triggers, workflow/ref cancellation. Add 10-minute Linux/macOS and
-  5-minute Windows timeouts, pinned toolchain and pip caches. Ignore Markdown-only
-  changes, not all docs: docs/refactor contains executable frozen/schema manifests.
+  5-minute Windows timeouts, pinned toolchain and pip caches. Ignore only README.md and AGENTS.md changes; docs/ contains frozen and tested
+  Markdown contracts as well as executable manifests.
   Keep the orchestrator's `/tmp/csgo-gate.sh` unchanged and validate against it.
 - No workflow changes in other personal repos: none recorded October activity.
 - Global/repo agent rules: local checks first, one complete push, expensive OSs on
-  demand, no billing-blocked reruns, one targeted retry for a demonstrated flake,
-  usage check before a large wave.
+  demand, no CI reruns, no OS matrices on PRs,
+  usage check before a large wave. Keep both $0 budgets permanently; no paid
+  runners or nightly expensive OS jobs.
 - Local `bin/actions-budget-watch`, daily launchd on the Mac: 50%/80% threshold
-  notifications, deduplicated per observed cycle. User mode reads the allowance
-  API (already weighted); org mode reads detailed usage and excludes known public
-  repos, counting missing repos conservatively. Org allowance is explicitly 2,000
-  from its Free plan; update the launch arguments if its plan changes. Nothing
+  notifications, deduplicated per observed cycle. Both modes read detailed billing usage, sum gross dollars
+  for private/unknown repos and exclude known public repos. Each uses the confirmed
+  $12 included allowance; update launch arguments if either plan changes. Dollar
+  accounting follows current SKU prices instead of historical OS multipliers. Nothing
   runs in Actions and the script never changes billing.
-- Personal API monitoring is **unavailable today**, not reporting zero. The daily
-  job reports that failure. Run `gh auth refresh -h github.com -s user` and retry
-  `bin/actions-budget-watch --account homatthew --dry-run`. If migration leaves the
-  legacy allowance endpoint unavailable, use GitHub's dashboard/budget alerts;
-  the new usage report alone does not establish the personal included allowance.
-- In [personal billing](https://github.com/settings/billing), check Overview for
-  plan, reset date, included/used minutes and failed invoices/payment method;
+- Personal billing API access remains scoped out, so the watchdog falls back to
+  per-run private-repo jobs: per-job rounded minutes weighted Linux 1x, Windows 2x,
+  macOS 10x against 2,000. Completed jobs are cached locally; rerun attempts are
+  included. It labels estimates clearly, excludes self-hosted/public runs, and
+  never interprets API failure as zero. Estimates may alert early; billing UI is
+  authoritative. A daily check can miss a same-day burst, so pre-wave checks and
+  manual-only expensive runners remain essential. No additional scope is needed
+  for this fallback. The Mac must be logged in for launchd notifications.
+- In [personal billing](https://github.com/settings/billing), confirm the reset date and current included balance;
   Usage filtered to Actions for Oct 1–25, grouped by repo and SKU; and Budgets and
   alerts for the Actions cap and “stop usage” setting. Download the detailed usage
-  report to reconcile this estimate. If paying for more usage, choose a small
-  deliberate Actions budget and alerts; otherwise keep the cap and wait for reset.
-  Enable included-usage emails and budget alerts. **Only the user changes these.**
+  report to reconcile this estimate. **Leave both $0 budgets unchanged.** Enable
+  included-usage/budget notifications if available, and wait for the allowance
+  reset to resume private hosted CI. Do not pay for extra minutes or runners.
+- Optional user decisions only: make csgo-bots public (review source/privacy first)
+  to get free standard hosted runs, or use the Mac as a self-hosted macOS runner.
+  The simpler free option is running the existing local gate on the Mac; no
+  self-hosted service or visibility change is installed by this work.
+
 
 Evidence retained locally under `~/.local/share/actions-retro/2026-10-25/`: repo
 inventories, all run/job API responses, per-job CSVs (`jobs.csv`, `org-jobs.csv`),

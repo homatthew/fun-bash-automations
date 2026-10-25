@@ -33,64 +33,106 @@ def api(endpoint, paginate=False):
     return json.loads(result.stdout)
 
 
-def org_usage(account, year, month):
-    report = api(f'/organizations/{account}/settings/billing/usage?year={year}&month={month}')
-    pages = api(f'/orgs/{account}/repos?per_page=100', paginate=True)
-    public = {r['name'] for page in pages for r in page if not r['private']}
+def detailed_usage(account, org, year, month):
+    root = 'organizations' if org else 'users'
+    report = api(f'/{root}/{account}/settings/billing/usage?year={year}&month={month}')
+    endpoint = f'/orgs/{account}/repos?per_page=100' if org else '/user/repos?affiliation=owner&per_page=100'
+    pages = api(endpoint, paginate=True)
+    public = {r['name'] for page in pages for r in page
+              if not r['private'] and r['owner']['login'].lower() == account.lower()}
     used = 0.0
     for item in report['usageItems']:
         if item['product'].lower() != 'actions' or item['repositoryName'] in public:
             continue
-        sku = item['sku'].lower()
-        weights = {'actions linux': 1, 'actions windows': 2, 'actions macos 3-core': 10}
-        if item['unitType'].lower() != 'minutes' or sku not in weights:
-            raise ValueError('Nonstandard Actions SKU: inspect billing dashboard')
-        # Missing/deleted repositories are conservatively counted against quota.
-        used += float(item['quantity']) * weights[sku]
+        # Current billing consumes a dollar allowance; historical OS multipliers
+        # are useful for attribution but do not match every SKU's current price.
+        # Missing/deleted repositories and storage are conservatively included.
+        used += float(item['grossAmount'])
     return used
+
+
+def estimate_usage(account, org, year, month, cache):
+    """Conservative legacy-weighted estimate; standard hosted private jobs only."""
+    endpoint = f'/orgs/{account}/repos?per_page=100' if org else '/user/repos?affiliation=owner&per_page=100'
+    repos = [r for page in api(endpoint, paginate=True) for r in page
+             if r['private'] and r['owner']['login'].lower() == account.lower()]
+    weighted = 0
+    start = f'{year}-{month:02d}-01'
+    end = (dt.date(year + (month == 12), month % 12 + 1, 1) - dt.timedelta(days=1)).isoformat()
+    cache.mkdir(parents=True, exist_ok=True)
+    for repo in repos:
+        root = f"/repos/{repo['full_name']}/actions/runs"
+        runs = [r for page in api(f'{root}?per_page=100&created={start}..{end}', paginate=True)
+                for r in page['workflow_runs']]
+        for run in runs:
+            for attempt in range(1, run['run_attempt'] + 1):
+                saved = cache / f"{repo['id']}-{run['id']}-{attempt}.json"
+                if saved.exists():
+                    weighted += json.loads(saved.read_text())
+                    continue
+                jobs = [j for page in api(f"{root}/{run['id']}/attempts/{attempt}/jobs?per_page=100", paginate=True)
+                        for j in page['jobs']]
+                subtotal = 0
+                for job in jobs:
+                    labels = ' '.join(job['labels']).lower()
+                    if 'self-hosted' in labels or not job['steps']:
+                        continue
+                    multiplier = 10 if 'macos' in labels else 2 if 'windows' in labels else 1 if 'ubuntu' in labels else None
+                    if multiplier is None:
+                        raise ValueError('Unknown runner OS in usage estimate')
+                    if job['started_at'] and job['completed_at']:
+                        seconds = (dt.datetime.fromisoformat(job['completed_at'].replace('Z', '+00:00')) -
+                                   dt.datetime.fromisoformat(job['started_at'].replace('Z', '+00:00'))).total_seconds()
+                        subtotal += max(0, math.ceil(seconds / 60)) * multiplier
+                weighted += subtotal
+                if jobs and all(j['status'] == 'completed' for j in jobs):
+                    saved.write_text(json.dumps(subtotal))
+    # Express estimate against the confirmed Free allowance in the same units as
+    # dollar-mode thresholds. This is NOT a predicted charge or exact billing.
+    return weighted / 2000 * 12
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--account', default='homatthew')
     parser.add_argument('--org', action='store_true', help='Account is an organization')
-    parser.add_argument('--allowance', type=float, help='Confirmed org monthly allowance; required with --org')
+    parser.add_argument('--allowance-usd', type=float, required=True, help='Confirmed monthly included Actions dollar allowance')
     parser.add_argument('--state-dir', type=Path,
                         default=Path.home() / '.local/share/actions-budget-watch')
     parser.add_argument('--dry-run', action='store_true', help='Print only; do not notify or save state')
     args = parser.parse_args()
     if not args.account or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' for c in args.account):
         parser.error('account must be a GitHub login')
-    if args.org and (args.allowance is None or args.allowance <= 0):
-        parser.error('--org requires a confirmed positive --allowance')
+    if not math.isfinite(args.allowance_usd) or args.allowance_usd <= 0:
+        parser.error('--allowance-usd must be positive and finite')
     today = dt.datetime.now(dt.timezone.utc)
     args.state_dir.mkdir(parents=True, exist_ok=True)
     state_path = args.state_dir / (args.account + '.json')
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     try:
-        if args.org:
-            used = org_usage(args.account, today.year, today.month)
-            included = args.allowance
-        else:
-            usage = api(f'/users/{args.account}/settings/billing/actions')
-            used = float(usage['total_minutes_used'])
-            included = float(usage['included_minutes'])
-        # Legacy API includes OS multipliers already. Do not multiply twice.
+        source = 'billing gross USD'
+        try:
+            used = detailed_usage(args.account, args.org, today.year, today.month)
+        except ValueError:
+            source = 'ESTIMATE from per-job rounded minutes, Linux 1x Windows 2x macOS 10x'
+            used = estimate_usage(args.account, args.org, today.year, today.month,
+                                  args.state_dir / 'job-cache')
+        included = args.allowance_usd
         # Detect observed reset as well as month rollover; dashboard owns cycle dates.
         cycle = today.strftime('%Y-%m')
         sent = state.get('sent', []) if state.get('cycle') == cycle and used >= state.get('used', 0) else []
         levels = thresholds(used, included, sent)
-        message = (f'{args.account}: {used:g}/{included:g} included Actions minutes used '
-                   f'({used / included:.0%}); crossed {", ".join(str(x) + "%" for x in levels)}.') if levels else ''
-        print(json.dumps({'account': args.account, 'used': used, 'included': included, 'alerts': levels}))
+        message = (f'{args.account}: ${used:.2f}/${included:g} included Actions allowance used '
+                   f'({used / included:.0%}; {source}); crossed {", ".join(str(x) + "%" for x in levels)}.') if levels else ''
+        print(json.dumps({'account': args.account, 'used': used, 'included': included, 'source': source, 'alerts': levels}))
         if message and not args.dry_run:
             notify(message)
         state = {'cycle': cycle, 'used': used, 'sent': sorted(set(sent + levels))}
         exit_code = 0
-    except (ValueError, KeyError, subprocess.TimeoutExpired) as error:
+    except (ValueError, KeyError, subprocess.TimeoutExpired, OSError) as error:
         message = (f'{args.account}: budget monitoring unavailable. Check GitHub Settings > Billing & licensing > Usage. '
                    + ('Check org billing access/admin:org scope.' if args.org else
-                    'Run gh auth refresh -h github.com -s user, then retry; the legacy endpoint may also be unavailable after billing migration.'))
+                    'Run gh auth refresh -h github.com -s user, then retry; check billing access if it still fails.'))
         print(str(error) + ': ' + message, file=sys.stderr)
         if not args.dry_run and state.get('error_day') != today.date().isoformat():
             notify(message)
